@@ -1,0 +1,1 @@
+pub const NORMAL_DRIFT_TARGET_MS: u16 = 100;

@@ -1,0 +1,1 @@
+pub const DEFAULT_GOODPUT_SAMPLE_COUNT: usize = 5;

@@ -1,0 +1,1 @@
+pub const DEFAULT_CHUNK_SIZE_BYTES: u64 = 1_048_576;

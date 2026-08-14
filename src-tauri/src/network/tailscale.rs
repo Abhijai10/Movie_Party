@@ -1,0 +1,1 @@
+pub const DEFAULT_TAILSCALE_PORT: u16 = 47_821;

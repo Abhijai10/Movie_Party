@@ -1,0 +1,15 @@
+export type AppState =
+  | "BOOTING"
+  | "FIRST_RUN"
+  | "HOME"
+  | "CREATE_PARTY"
+  | "JOIN_PARTY"
+  | "SCHEDULE"
+  | "LOBBY"
+  | "PREPARING"
+  | "READY_CHECK"
+  | "CINEMA"
+  | "BUFFERING"
+  | "RECONNECTING"
+  | "PARTY_ENDED"
+  | "ERROR";
