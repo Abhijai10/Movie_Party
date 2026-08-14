@@ -57,7 +57,7 @@ Windows launch verification and hosted CI execution require external environment
 ⬜ Windows ↔ macOS test environment available
 ⬜ Tailscale verified on both machines
 ⚠ CI running — configured locally; hosted GitHub execution pending
-⬜ architecture docs committed
+🟦 architecture docs committed
 ```
 
 ---
