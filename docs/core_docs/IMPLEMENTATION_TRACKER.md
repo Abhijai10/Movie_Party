@@ -137,6 +137,7 @@ Tasks:
 🟦 Build QUIC client
 🟦 Generate protocol-shaped room credentials
 🟦 Bind host to Tailscale address
+🟦 Reject non-loopback/non-Tailscale QUIC bind addresses
 🟦 Implement HELLO
 🟦 HELLO validates UUIDv7 device IDs
 🟦 HELLO rejects future minor protocol versions
@@ -170,7 +171,7 @@ Gate:
 ```
 ⚠ 1 GB reliable transfer — EXTERNAL VERIFICATION PENDING over real Tailscale peers
 ⬜ reconnect test passes
-🟦 no listening on public interfaces in local listener API; real host binding pending Tailscale environment
+🟦 no listening on public/LAN interfaces in local listener API; real host binding pending Tailscale environment
 ```
 
 Notes:
@@ -178,6 +179,7 @@ Notes:
 ```
 Hardened locally on 2026-08-15:
 - Added room credential generation for 128-bit Base64URL room IDs and 256-bit Base64URL join secrets.
+- QUIC server binding is restricted to loopback or Tailscale IPv4 addresses; wildcard, LAN, and public binds are rejected locally.
 - Replaced Phase 1 placeholder public-key/signature values with Ed25519 device identity support.
 - HELLO now carries the local identity public key.
 - HELLO validates that device IDs are UUIDv7 strings before room authentication succeeds.

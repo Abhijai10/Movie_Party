@@ -188,6 +188,8 @@ pub enum QuicError {
     Tls(String),
     #[error("MP-NET-001 QUIC authentication failed: {0}")]
     Auth(String),
+    #[error("MP-NET-001 QUIC bind address must be loopback or Tailscale IPv4")]
+    InvalidBindAddress,
     #[error("MP-NET-001 QUIC response mismatch")]
     UnexpectedResponse,
 }
@@ -201,6 +203,7 @@ pub struct QuicServer {
 
 impl QuicServer {
     pub fn bind(bind_addr: SocketAddr, credentials: RoomCredentials) -> Result<Self, QuicError> {
+        validate_quic_bind_addr(bind_addr)?;
         let (server_config, certificate) = configure_server()?;
         let endpoint = Endpoint::server(server_config, bind_addr)?;
 
@@ -408,6 +411,27 @@ impl QuicClient {
 
 pub fn loopback_bind_addr() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+}
+
+pub fn tailscale_bind_addr(local_ipv4: Ipv4Addr) -> Result<SocketAddr, QuicError> {
+    let addr = SocketAddr::new(
+        IpAddr::V4(local_ipv4),
+        crate::network::tailscale::DEFAULT_TAILSCALE_PORT,
+    );
+    validate_quic_bind_addr(addr)?;
+    Ok(addr)
+}
+
+pub fn validate_quic_bind_addr(bind_addr: SocketAddr) -> Result<(), QuicError> {
+    match bind_addr.ip() {
+        IpAddr::V4(ipv4) if ipv4.is_loopback() || is_tailscale_ipv4(ipv4) => Ok(()),
+        _ => Err(QuicError::InvalidBindAddress),
+    }
+}
+
+fn is_tailscale_ipv4(ipv4: Ipv4Addr) -> bool {
+    let octets = ipv4.octets();
+    octets[0] == 100 && (64..=127).contains(&octets[1])
 }
 
 pub fn certificate_fingerprint(certificate: &CertificateDer<'static>) -> String {
@@ -764,11 +788,15 @@ fn goodput_bps(bytes: u64, elapsed: Duration) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{atomic::AtomicU64, Arc};
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        sync::{atomic::AtomicU64, Arc},
+    };
 
     use super::{
-        loopback_bind_addr, monotonic_us, AuthRequest, ClientRequest, HelloPayload, QuicClient,
-        QuicServer, RoomCredentials, ServerResponse,
+        loopback_bind_addr, monotonic_us, tailscale_bind_addr, validate_quic_bind_addr,
+        AuthRequest, ClientRequest, HelloPayload, QuicClient, QuicError, QuicServer,
+        RoomCredentials, ServerResponse,
     };
     use crate::identity::DeviceIdentity;
 
@@ -787,6 +815,29 @@ mod tests {
         assert!(super::is_base64url_256bit(&first.join_secret));
         assert_ne!(first.room_id, second.room_id);
         assert_ne!(first.join_secret, second.join_secret);
+    }
+
+    #[test]
+    fn quic_bind_addresses_are_limited_to_loopback_or_tailscale() {
+        assert!(validate_quic_bind_addr(loopback_bind_addr()).is_ok());
+        assert_eq!(
+            tailscale_bind_addr(Ipv4Addr::new(100, 64, 0, 10)).expect("tailscale bind"),
+            SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(100, 64, 0, 10)),
+                crate::network::tailscale::DEFAULT_TAILSCALE_PORT,
+            )
+        );
+        assert!(matches!(
+            validate_quic_bind_addr(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)),
+            Err(QuicError::InvalidBindAddress)
+        ));
+        assert!(matches!(
+            validate_quic_bind_addr(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)),
+                0
+            )),
+            Err(QuicError::InvalidBindAddress)
+        ));
     }
 
     #[tokio::test]
