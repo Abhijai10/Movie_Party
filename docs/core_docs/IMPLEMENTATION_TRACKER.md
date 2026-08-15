@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 15
+PHASE 16
 
 Current Release:
 V1 Development
@@ -598,24 +598,36 @@ Implemented locally on 2026-08-15:
 Status:
 
 ```
-⬜
+⚠ PARTIAL / PLATFORM-SPECIFIC
 ```
 
 ```
-⬜ Locate Chrome Windows
-⬜ Locate Chrome macOS
-⬜ Dedicated profile
-⬜ Local CDP
-⬜ Navigate URL
-⬜ Reuse provider session
-⬜ Close/restart safely
+🟦 Locate Chrome Windows
+🟦 Locate Chrome macOS
+🟦 Dedicated profile
+🟦 Local CDP
+🟦 Navigate URL
+⚠ Reuse provider session — EXTERNAL VERIFICATION PENDING with real Chrome login
+🟦 Close/restart safely
 ```
 
 Security:
 
 ```
-⬜ CDP bound locally
-⬜ No provider cookies logged
+🟦 CDP bound locally
+🟦 No provider cookies logged
+```
+
+Notes:
+
+```
+Implemented locally on 2026-08-15:
+- Added managed Chrome candidate discovery for macOS/Windows/Linux.
+- Added dedicated provider profile path construction with traversal rejection.
+- Added launch plan arguments for non-default profile, localhost-only CDP address, CDP port, and provider URL.
+- Added CDP navigation and browser-close command payload builders.
+- Added tests proving localhost CDP binding, profile isolation, traversal rejection, and cookie-free launch/CDP payloads.
+- Real Chrome executable discovery, launching, provider login reuse, and close/restart behavior require manual platform verification with installed Chrome.
 ```
 
 ---
@@ -1353,6 +1365,45 @@ Documentation Updated:
 
 Next permitted task:
 - Begin Phase 16 managed Chrome.
+
+---
+
+## 2026-08-15
+
+Active Phase:
+Phase 16
+
+Completed:
+- Added managed Chrome discovery candidates for macOS, Windows, and Linux.
+- Added dedicated provider profile path builder with path traversal rejection.
+- Added Chrome launch plan arguments using non-default provider profile and localhost-only CDP.
+- Added CDP navigation and browser-close command payload builders.
+- Added tests for local CDP binding, profile isolation, cookie-free payloads, and invalid provider IDs.
+
+Tests:
+- `cargo fmt --check` passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` passed.
+- `cargo test providers::chrome` passed.
+- `cargo test` passed after approving local UDP socket access for existing QUIC loopback tests.
+- `pnpm lint` passed.
+- `pnpm build` passed.
+- `pnpm format` passed.
+
+Failures:
+- Initial `cargo fmt --check` wanted wrapping in the new Chrome module; fixed with `cargo fmt`.
+
+Cross-platform:
+- Windows: ⚠ EXTERNAL VERIFICATION PENDING.
+- macOS: Automated validation passed locally on 2026-08-15; real Chrome launch/profile/session reuse pending manual verification.
+
+Blockers:
+- Real provider session reuse requires installed Chrome and provider login in the dedicated profile.
+
+Documentation Updated:
+- `docs/core_docs/IMPLEMENTATION_TRACKER.md`
+
+Next permitted task:
+- Begin Phase 17 generic provider.
 
 ---
 
