@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 19
+PHASE 20
 
 Current Release:
 V1 Development
@@ -755,23 +755,34 @@ Implemented locally on 2026-08-15:
 Status:
 
 ```
-⬜
+⚠ PARTIAL / PLATFORM-SPECIFIC
 ```
 
 Test:
 
 ```
-⬜ YouTube video
-⬜ YouTube audio
-⬜ Netflix video
-⬜ Netflix audio
-⬜ Prime video
-⬜ Prime audio
-⬜ JioHotstar video
-⬜ JioHotstar audio
+⚠ YouTube video — EXTERNAL VERIFICATION PENDING
+⚠ YouTube audio — EXTERNAL VERIFICATION PENDING
+⚠ Netflix video — EXTERNAL VERIFICATION PENDING
+⚠ Netflix audio — EXTERNAL VERIFICATION PENDING
+⚠ Prime video — EXTERNAL VERIFICATION PENDING
+⚠ Prime audio — EXTERNAL VERIFICATION PENDING
+⚠ JioHotstar video — EXTERNAL VERIFICATION PENDING
+⚠ JioHotstar audio — EXTERNAL VERIFICATION PENDING
 ```
 
 Record protected-capture behavior.
+
+Notes:
+
+```
+Implemented locally on 2026-08-15:
+- Added Windows diagnostic capture plan for Windows.Graphics.Capture video, WASAPI Application Loopback audio, selected-window capture, provider-audio capture, and 30-second sample duration.
+- Added provider-shared capture availability model.
+- Added black-frame/protected-content heuristic using frame count, luma, variance, changed-frame ratio, and provider-playing signal.
+- Added one diagnostic retry then Provider Sync fallback policy.
+- Actual Windows capture APIs, provider media samples, and protected-capture outcomes require Windows/manual external verification.
+```
 
 ---
 
@@ -1551,6 +1562,44 @@ Documentation Updated:
 
 Next permitted task:
 - Begin Phase 20 Windows shared capture spike.
+
+---
+
+## 2026-08-15
+
+Active Phase:
+Phase 20
+
+Completed:
+- Added Windows provider-shared diagnostic capture plan.
+- Added capture availability model for video/audio diagnostic results.
+- Added black-frame/protected-content heuristic based on luma, variance, frame change, and provider-playing state.
+- Added capture failure policy: one diagnostic retry, then offer Provider Sync Mode.
+
+Tests:
+- `cargo fmt --check` passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` passed.
+- `cargo test capture` passed.
+- `cargo test` passed after approving local UDP socket access for existing QUIC loopback tests.
+- `pnpm lint` passed.
+- `pnpm build` passed.
+- `pnpm format` passed.
+
+Failures:
+- Initial `cargo fmt --check` wanted wrapping in capture tests; fixed with `cargo fmt`.
+
+Cross-platform:
+- Windows: ⚠ EXTERNAL VERIFICATION PENDING for all real capture/audio/provider samples.
+- macOS: Automated validation passed locally on 2026-08-15; Windows API behavior not available in this environment.
+
+Blockers:
+- Real Windows Graphics Capture and WASAPI Application Loopback testing requires Windows hardware, Chrome, provider playback, and capture permissions.
+
+Documentation Updated:
+- `docs/core_docs/IMPLEMENTATION_TRACKER.md`
+
+Next permitted task:
+- Begin Phase 21 macOS shared capture spike.
 
 ---
 
