@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 5
+PHASE 6
 
 Current Release:
 V1 Development
@@ -298,14 +298,14 @@ Acceptance:
 Status:
 
 ```
-⬜
+⚠ PARTIAL / PLATFORM-SPECIFIC
 ```
 
 ```
-⬜ Local range server
-⬜ Random byte ranges
+⚠ Local range server — route/range responder implemented; live loopback HTTP server pending
+🟦 Random byte ranges
 ⬜ mpv playback from incomplete media
-⬜ Range-triggered chunk priority
+🟦 Range-triggered chunk priority
 ⬜ Forward seek
 ⬜ Backward seek
 ```
