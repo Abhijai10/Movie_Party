@@ -673,6 +673,12 @@ fn validate_handshake(
         };
     }
 
+    if !is_base64url_256bit(&hello.public_key) {
+        return ServerResponse::AuthReject {
+            code: "INVALID_PUBLIC_KEY".to_string(),
+        };
+    }
+
     if auth.room_id != credentials.room_id
         || auth.join_secret_hash != credentials.join_secret_hash()
     {
@@ -983,6 +989,60 @@ mod tests {
             response,
             ServerResponse::AuthReject {
                 code: "INVALID_SECRET_HASH".to_string()
+            }
+        );
+        client.wait_idle().await;
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn rejects_malformed_public_key() {
+        let credentials = RoomCredentials::new_for_tests();
+        let server = QuicServer::bind(loopback_bind_addr(), credentials.clone()).expect("server");
+        let addr = server.local_addr().expect("addr");
+        let certificate = server.certificate.clone();
+        let server_task = tokio::spawn(server.run());
+        let identity = test_identity();
+        let endpoint = super::make_client_endpoint(certificate).expect("endpoint");
+        let connection = endpoint
+            .connect(addr, "localhost")
+            .expect("connect")
+            .await
+            .expect("connected");
+        let client = QuicClient {
+            endpoint,
+            connection,
+            credentials: credentials.clone(),
+            identity: identity.clone(),
+            next_seq: Arc::new(AtomicU64::new(1)),
+        };
+        let mut hello = HelloPayload::local("Test Guest", &identity);
+        hello.public_key = "short".to_string();
+        let join_secret_hash = credentials.join_secret_hash();
+        let invite_nonce = "nonce".to_string();
+        let auth = AuthRequest {
+            room_id: credentials.room_id.clone(),
+            join_secret_hash: join_secret_hash.clone(),
+            invite_nonce: invite_nonce.clone(),
+            device_signature: identity.sign_auth_request(
+                &credentials.room_id,
+                &join_secret_hash,
+                &invite_nonce,
+            ),
+        };
+
+        let response = client
+            .send_request(ClientRequest::HelloAuth {
+                hello: Box::new(hello),
+                auth: Box::new(auth),
+            })
+            .await
+            .expect("auth response");
+
+        assert_eq!(
+            response,
+            ServerResponse::AuthReject {
+                code: "INVALID_PUBLIC_KEY".to_string()
             }
         );
         client.wait_idle().await;
