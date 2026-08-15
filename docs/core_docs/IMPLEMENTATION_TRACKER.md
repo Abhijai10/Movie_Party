@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 6
+PHASE 7
 
 Current Release:
 V1 Development
@@ -317,26 +317,26 @@ Status:
 Status:
 
 ```
-⬜
+⚠ PARTIAL / PLATFORM-SPECIFIC
 ```
 
 ```
-⬜ Player adapter connected
-⬜ Scheduled play
-⬜ Scheduled pause
-⬜ Scheduled seek
-⬜ Buffer reports
-⬜ BUFFER_LOW flow
-⬜ Global pause
-⬜ Ready recovery
-⬜ Global resume
-⬜ Disconnect pause
+⚠ Player adapter connected — coordinator boundary implemented; real libmpv unavailable locally
+🟦 Scheduled play
+🟦 Scheduled pause
+🟦 Scheduled seek
+🟦 Buffer reports
+🟦 BUFFER_LOW flow
+🟦 Global pause
+🟦 Ready recovery
+🟦 Global resume
+🟦 Disconnect pause
 ```
 
 Critical test:
 
 ```
-⬜ Guest buffer starvation pauses Host
+🟦 Guest buffer starvation pauses Host in coordinator test; real libmpv/Tailscale test pending
 ```
 
 Phase may not pass without this.
