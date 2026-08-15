@@ -393,3 +393,158 @@ pub mod regression {
         }
     }
 }
+
+pub mod beta {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum BetaEventKind {
+        TrustedFriendInstall,
+        BugReport,
+        DiagnosticBundleExport,
+        RealMovieNight,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct BetaEvent {
+        pub kind: BetaEventKind,
+        pub notes: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct DiagnosticBundle {
+        pub app_version: String,
+        pub platform: String,
+        pub beta_events: Vec<BetaEvent>,
+        pub redacted_log_lines: Vec<String>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum BetaReadiness {
+        ExternalVerificationPending { missing_events: Vec<BetaEventKind> },
+        ReadyForManualReview,
+    }
+
+    pub fn redact_log_line(line: &str) -> String {
+        line.split_whitespace()
+            .map(|token| {
+                let lower = token.to_ascii_lowercase();
+                if lower.contains("token=")
+                    || lower.contains("cookie=")
+                    || lower.contains("password=")
+                    || lower.contains("authorization=")
+                {
+                    "[REDACTED]".to_string()
+                } else {
+                    token.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    pub fn build_diagnostic_bundle(
+        app_version: impl Into<String>,
+        platform: impl Into<String>,
+        beta_events: Vec<BetaEvent>,
+        raw_log_lines: &[String],
+    ) -> DiagnosticBundle {
+        DiagnosticBundle {
+            app_version: app_version.into(),
+            platform: platform.into(),
+            beta_events,
+            redacted_log_lines: raw_log_lines
+                .iter()
+                .map(|line| redact_log_line(line))
+                .collect(),
+        }
+    }
+
+    pub fn beta_readiness(events: &[BetaEvent]) -> BetaReadiness {
+        let required = [
+            BetaEventKind::TrustedFriendInstall,
+            BetaEventKind::DiagnosticBundleExport,
+            BetaEventKind::RealMovieNight,
+        ];
+
+        let missing_events = required
+            .into_iter()
+            .filter(|required_kind| !events.iter().any(|event| event.kind == *required_kind))
+            .collect::<Vec<_>>();
+
+        if missing_events.is_empty() {
+            BetaReadiness::ReadyForManualReview
+        } else {
+            BetaReadiness::ExternalVerificationPending { missing_events }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn diagnostic_bundle_redacts_common_secret_tokens() {
+            let bundle = build_diagnostic_bundle(
+                "0.1.0",
+                "macos",
+                vec![BetaEvent {
+                    kind: BetaEventKind::DiagnosticBundleExport,
+                    notes: "manual export".to_string(),
+                }],
+                &[
+                    "room_id=abc token=secret cookie=session".to_string(),
+                    "authorization=Bearer password=hunter2 sync_drift_ms=32".to_string(),
+                ],
+            );
+
+            assert_eq!(
+                bundle.redacted_log_lines,
+                vec![
+                    "room_id=abc [REDACTED] [REDACTED]".to_string(),
+                    "[REDACTED] [REDACTED] sync_drift_ms=32".to_string(),
+                ]
+            );
+        }
+
+        #[test]
+        fn beta_readiness_requires_external_install_bundle_and_movie_night() {
+            let readiness = beta_readiness(&[BetaEvent {
+                kind: BetaEventKind::DiagnosticBundleExport,
+                notes: "exported locally".to_string(),
+            }]);
+
+            assert_eq!(
+                readiness,
+                BetaReadiness::ExternalVerificationPending {
+                    missing_events: vec![
+                        BetaEventKind::TrustedFriendInstall,
+                        BetaEventKind::RealMovieNight,
+                    ],
+                }
+            );
+        }
+
+        #[test]
+        fn bug_reports_are_collected_without_being_required_for_initial_readiness() {
+            let events = vec![
+                BetaEvent {
+                    kind: BetaEventKind::TrustedFriendInstall,
+                    notes: "trusted friend device".to_string(),
+                },
+                BetaEvent {
+                    kind: BetaEventKind::DiagnosticBundleExport,
+                    notes: "manual diagnostics".to_string(),
+                },
+                BetaEvent {
+                    kind: BetaEventKind::RealMovieNight,
+                    notes: "movie night completed".to_string(),
+                },
+                BetaEvent {
+                    kind: BetaEventKind::BugReport,
+                    notes: "chat overlay polish request".to_string(),
+                },
+            ];
+
+            assert_eq!(beta_readiness(&events), BetaReadiness::ReadyForManualReview);
+        }
+    }
+}

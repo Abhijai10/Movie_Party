@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 31
+PHASE 32
 
 Current Release:
 V1 Development
@@ -1147,15 +1147,28 @@ Implemented locally on 2026-08-15:
 Status:
 
 ```
-⬜
+🟦 IMPLEMENTED / TESTING REQUIRED
 ```
 
 ```
-⬜ Create development installer
-⬜ Install on trusted friend device
-⬜ Collect bug reports
-⬜ Export diagnostic bundles
-⬜ Run real movie nights
+⚠ Create development installer — EXTERNAL VERIFICATION PENDING
+⚠ Install on trusted friend device — EXTERNAL VERIFICATION PENDING
+🟦 Collect bug reports support
+🟦 Export diagnostic bundle support
+⚠ Export diagnostic bundles from real beta device — EXTERNAL VERIFICATION PENDING
+⚠ Run real movie nights — EXTERNAL VERIFICATION PENDING
+🟦 Beta readiness gate requires trusted install, diagnostic export, and real movie night
+```
+
+Notes:
+
+```
+Implemented locally on 2026-08-15:
+- Added telemetry beta diagnostic bundle model with app version, platform, beta event list, and redacted log lines.
+- Added redaction for common token, cookie, password, and authorization fields.
+- Added beta event records for trusted friend install, bug reports, diagnostic bundle export, and real movie nights.
+- Added beta readiness gate that remains externally pending until a trusted friend install, diagnostic bundle export, and real movie night are recorded.
+- Real installer creation, trusted-device install, real diagnostic export, and real movie-night usage remain externally pending.
 ```
 
 ---
