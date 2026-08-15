@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 2
+PHASE 5
 
 Current Release:
 V1 Development
@@ -215,30 +215,30 @@ Gate:
 Status:
 
 ```
-⬜
+⚠ PARTIAL / PLATFORM-SPECIFIC
 ```
 
 Capabilities:
 
 ```
-⬜ Open
-⬜ Play
-⬜ Pause
-⬜ Seek
-⬜ Position
+⚠ Open — app boundary implemented; real libmpv unavailable locally
+⚠ Play — app boundary implemented; real libmpv unavailable locally
+⚠ Pause — app boundary implemented; real libmpv unavailable locally
+⚠ Seek — app boundary implemented; real libmpv unavailable locally
+🟦 Position
 ⬜ Duration
-⬜ Volume
+🟦 Volume
 ⬜ Audio track
 ⬜ Subtitle track
-⬜ Playback rate
-⬜ State events
+🟦 Playback rate
+🟦 State events
 ```
 
 Platform:
 
 ```
-⬜ Windows
-⬜ macOS
+⚠ Windows — EXTERNAL VERIFICATION PENDING
+⚠ macOS — EXTERNAL VERIFICATION PENDING; libmpv not installed in current environment
 ```
 
 ---
@@ -248,16 +248,16 @@ Platform:
 Status:
 
 ```
-⬜
+⚠ PARTIAL / PLATFORM-SPECIFIC
 ```
 
 ```
-⬜ Metadata extraction
-⬜ Quick fingerprint
-⬜ BLAKE3 full hash
-⬜ Manifest
-⬜ Identical-file detection
-⬜ Different-file rejection
+⚠ Metadata extraction — filename/container/size implemented; duration/codecs pending media backend
+🟦 Quick fingerprint
+🟦 BLAKE3 full hash
+🟦 Manifest
+🟦 Identical-file detection
+🟦 Different-file rejection
 ```
 
 ---
@@ -267,27 +267,27 @@ Status:
 Status:
 
 ```
-⬜
+⚠ PARTIAL / PLATFORM-SPECIFIC
 ```
 
 ```
-⬜ 1 MiB chunking
-⬜ Chunk scheduler
-⬜ Chunk hash
-⬜ QUIC chunk stream
-⬜ Sparse cache
-⬜ Resume bitmap
-⬜ Transfer progress
-⬜ Disconnect recovery
+🟦 1 MiB chunking
+🟦 Chunk scheduler
+🟦 Chunk hash
+🟦 QUIC chunk stream
+🟦 Sparse cache
+🟦 Resume bitmap
+🟦 Transfer progress
+🟦 Disconnect recovery
 ```
 
 Acceptance:
 
 ```
-⬜ 4GB file transfer
-⬜ interrupt at 35%
-⬜ restart
-⬜ resume
+⚠ 4GB file transfer — EXTERNAL VERIFICATION PENDING
+⚠ interrupt at 35% — large-file manual verification pending
+⚠ restart — large-file manual verification pending
+🟦 resume bitmap persists in sparse cache tests
 ⬜ final hash identical
 ```
 

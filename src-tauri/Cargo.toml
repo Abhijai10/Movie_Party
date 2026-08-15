@@ -27,3 +27,4 @@ sha2 = "0.10"
 rand = "0.9"
 base64 = "0.22"
 uuid = { version = "1", features = ["v7", "serde"] }
+blake3 = "1"
