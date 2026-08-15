@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 13
+PHASE 14
 
 Current Release:
 V1 Development
@@ -512,33 +512,45 @@ Implemented locally on 2026-08-15:
 Status:
 
 ```
-⬜
+⚠ PARTIAL / PLATFORM-SPECIFIC
 ```
 
 ```
-⬜ Camera enumeration
-⬜ Mic enumeration
-⬜ WebRTC signalling
-⬜ Peer video
-⬜ Peer voice
-⬜ Mic default muted
-⬜ Voice-only
-⬜ Call-off
+🟦 Camera enumeration
+🟦 Mic enumeration
+🟦 WebRTC signalling payload/model
+⚠ Peer video — EXTERNAL VERIFICATION PENDING with real WebRTC peer
+⚠ Peer voice — EXTERNAL VERIFICATION PENDING with real WebRTC peer
+🟦 Mic default muted
+🟦 Voice-only
+🟦 Call-off
 ```
 
 Cross-platform:
 
 ```
-⬜ Win → Win
-⬜ Win → Mac
-⬜ Mac → Win
-⬜ Mac → Mac
+⚠ Win → Win — EXTERNAL VERIFICATION PENDING
+⚠ Win → Mac — EXTERNAL VERIFICATION PENDING
+⚠ Mac → Win — EXTERNAL VERIFICATION PENDING
+⚠ Mac → Mac — EXTERNAL VERIFICATION PENDING
 ```
 
 If routing fails:
 
 ```
 ⬜ ADR created
+```
+
+Notes:
+
+```
+Implemented locally on 2026-08-15:
+- Added native call state, camera state, mic state, and CALL_SIGNAL payload model.
+- Added protocol IDs 160 CALL_STATE, 161 CAMERA_STATE, 162 MIC_STATE, and 163 CALL_SIGNAL.
+- Added Tier B initial camera constraints and mic-default-muted tests.
+- Added browser device enumeration helper and WebRTC peer-connection helper with no TURN servers configured.
+- Added Cinema Mode call controls for Video + Voice, Voice Only, Off, mic/camera toggles, and minimizable/hideable floating camera card.
+- Real getUserMedia permission flow, remote peer media, Tailscale route behavior, and all OS combinations require manual/external validation.
 ```
 
 ---
@@ -1247,6 +1259,51 @@ Documentation Updated:
 
 Next permitted task:
 - Begin Phase 14 video call spike.
+
+---
+
+## 2026-08-15
+
+Active Phase:
+Phase 14
+
+Completed:
+- Replaced the call stub with typed native call, camera, mic, and signal models.
+- Registered protocol IDs for `CALL_STATE`, `CAMERA_STATE`, `MIC_STATE`, and `CALL_SIGNAL`.
+- Added tests for muted initial microphone state, Tier B camera defaults, and signal payload validation.
+- Added frontend helpers for browser camera/microphone enumeration and WebRTC peer connection creation without TURN servers.
+- Added Cinema Mode call mode controls, mic/camera toggles, and minimizable/hideable floating camera card.
+
+Tests:
+- `cargo fmt --check` passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` passed.
+- `cargo test call` passed.
+- `cargo test protocol` passed.
+- `cargo test` passed after approving local UDP socket access for existing QUIC loopback tests.
+- `pnpm lint` passed.
+- `pnpm test` passed.
+- `pnpm build` passed.
+- `pnpm format` passed.
+
+Failures:
+- Initial `cargo test call protocol` was an invalid Cargo filter invocation; reran as separate filters.
+- Initial `pnpm lint` flagged the runtime media-device guard; fixed with a narrower runtime navigator shape.
+- Initial `cargo clippy` flagged an assertion on a constant; removed the redundant assertion.
+- Initial `pnpm format` found formatting drift in new call/Cinema files; fixed with project formatter.
+
+Cross-platform:
+- Windows: ⚠ EXTERNAL VERIFICATION PENDING.
+- macOS: Automated validation passed locally on 2026-08-15; real camera/mic permissions, peer media, and WebRTC route verification pending.
+
+Blockers:
+- Real peer video/voice and Tailscale route behavior require two devices and Windows/macOS manual testing.
+- If WebRTC routing fails in the target WebViews, the documented native media transport ADR path remains pending.
+
+Documentation Updated:
+- `docs/core_docs/IMPLEMENTATION_TRACKER.md`
+
+Next permitted task:
+- Begin Phase 15 adaptive camera.
 
 ---
 

@@ -1,3 +1,5 @@
+import { enumerateCallDevices, type CallDeviceInventory } from "../call/mediaDevices";
+import type { CallMode } from "../call/webrtc";
 import type { KeyboardEvent as ReactKeyboardEvent, SyntheticEvent } from "react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -44,10 +46,28 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
   const [isPrivacyMode, setIsPrivacyMode] = useState(false);
   const [cameraEnabled, setCameraEnabled] = useState(true);
   const [microphoneEnabled, setMicrophoneEnabled] = useState(false);
+  const [callMode, setCallMode] = useState<CallMode>("VIDEO_VOICE");
+  const [callDevices, setCallDevices] = useState<CallDeviceInventory | null>(null);
+  const [isCameraCardMinimized, setIsCameraCardMinimized] = useState(false);
+  const [isCameraCardHidden, setIsCameraCardHidden] = useState(false);
   const [privacyNotice, setPrivacyNotice] = useState("");
   const visibleMessages = messages.slice(-3);
   const encodedDraftLength = useMemo(() => new TextEncoder().encode(draft).length, [draft]);
   const isDraftTooLong = encodedDraftLength > chatBodyLimitBytes;
+
+  useEffect(() => {
+    let isMounted = true;
+
+    void enumerateCallDevices().then((inventory) => {
+      if (isMounted) {
+        setCallDevices(inventory);
+      }
+    });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     let noticeTimeout: number | undefined;
@@ -191,6 +211,20 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
     }, 2_400);
   };
 
+  const chooseCallMode = (mode: CallMode) => {
+    setCallMode(mode);
+
+    if (mode === "OFF") {
+      setCameraEnabled(false);
+      setMicrophoneEnabled(false);
+      return;
+    }
+
+    if (mode === "VOICE_ONLY") {
+      setCameraEnabled(false);
+    }
+  };
+
   return (
     <main className="cinema-shell" aria-label="Cinema mode">
       <section
@@ -201,12 +235,86 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
           <div className="movie-light" />
           <span>Interstellar</span>
         </div>
-        <article className="camera-card" aria-label="Rahul camera">
-          <strong>Rahul</strong>
-          <span>
-            Camera {cameraEnabled ? "on" : "off"} - Mic {microphoneEnabled ? "on" : "muted"}
-          </span>
-        </article>
+        {isCameraCardHidden ? (
+          <button
+            className="camera-restore"
+            type="button"
+            onClick={() => {
+              setIsCameraCardHidden(false);
+            }}
+          >
+            Show Call
+          </button>
+        ) : (
+          <article className="camera-card" aria-label="Rahul camera" draggable>
+            <div className="camera-card-header">
+              <strong>Rahul</strong>
+              <div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsCameraCardMinimized((current) => !current);
+                  }}
+                  aria-label={isCameraCardMinimized ? "Expand camera card" : "Minimize camera card"}
+                >
+                  {isCameraCardMinimized ? "Expand" : "Min"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsCameraCardHidden(true);
+                  }}
+                  aria-label="Hide camera card"
+                >
+                  Hide
+                </button>
+              </div>
+            </div>
+            <span>
+              {callMode === "OFF"
+                ? "Call off"
+                : `Camera ${cameraEnabled ? "on" : "off"} - Mic ${microphoneEnabled ? "on" : "muted"}`}
+            </span>
+            {isCameraCardMinimized ? null : (
+              <>
+                <div className="call-mode-row" aria-label="Call mode">
+                  <button
+                    type="button"
+                    aria-pressed={callMode === "VIDEO_VOICE"}
+                    onClick={() => {
+                      chooseCallMode("VIDEO_VOICE");
+                    }}
+                  >
+                    Video
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={callMode === "VOICE_ONLY"}
+                    onClick={() => {
+                      chooseCallMode("VOICE_ONLY");
+                    }}
+                  >
+                    Voice
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={callMode === "OFF"}
+                    onClick={() => {
+                      chooseCallMode("OFF");
+                    }}
+                  >
+                    Off
+                  </button>
+                </div>
+                <small>
+                  {callDevices?.available
+                    ? `${String(callDevices.cameras.length)} camera(s), ${String(callDevices.microphones.length)} mic(s)`
+                    : (callDevices?.errorCode ?? "Checking devices...")}
+                </small>
+              </>
+            )}
+          </article>
+        )}
         <article className="chat-bubble" aria-label="Recent chat message">
           {visibleMessages.map((message) => (
             <p key={message.id}>
@@ -311,10 +419,27 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
           <button type="button" aria-label="Forward 10 seconds">
             +10
           </button>
-          <button type="button" aria-label="Mute microphone">
+          <button
+            type="button"
+            aria-label="Mute microphone"
+            onClick={() => {
+              setMicrophoneEnabled((current) => !current);
+              setCallMode((current) => (current === "OFF" ? "VOICE_ONLY" : current));
+            }}
+          >
             {microphoneEnabled ? "Mic On" : "Mic"}
           </button>
-          <button type="button" aria-label="Toggle camera">
+          <button
+            type="button"
+            aria-label="Toggle camera"
+            onClick={() => {
+              setCameraEnabled((current) => !current);
+              setCallMode((current) =>
+                current === "OFF" || current === "VOICE_ONLY" ? "VIDEO_VOICE" : current,
+              );
+              setIsCameraCardHidden(false);
+            }}
+          >
             {cameraEnabled ? "Camera" : "Camera Off"}
           </button>
           <button

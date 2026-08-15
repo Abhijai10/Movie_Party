@@ -8,6 +8,10 @@ pub enum MessageType {
     AuthAccept = 3,
     AuthReject = 4,
     Heartbeat = 5,
+    CallState = 160,
+    CameraState = 161,
+    MicState = 162,
+    CallSignal = 163,
     ChatMessage = 180,
     Reaction = 181,
     Error = 250,
@@ -41,6 +45,10 @@ mod tests {
     fn protocol_foundation_uses_locked_limits() {
         assert_eq!(MAX_CONTROL_MESSAGE_BYTES, 262_144);
         assert_eq!(MessageType::Hello as u16, 1);
+        assert_eq!(MessageType::CallState as u16, 160);
+        assert_eq!(MessageType::CameraState as u16, 161);
+        assert_eq!(MessageType::MicState as u16, 162);
+        assert_eq!(MessageType::CallSignal as u16, 163);
         assert_eq!(MessageType::ChatMessage as u16, 180);
         assert_eq!(MessageType::Reaction as u16, 181);
         assert_eq!(MessageType::Error as u16, 250);

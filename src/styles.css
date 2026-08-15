@@ -442,20 +442,64 @@ h1 {
   top: clamp(22px, 3vw, 44px);
   display: grid;
   align-content: end;
+  gap: 10px;
   width: min(24vw, 260px);
   min-width: 180px;
+  min-height: 164px;
   aspect-ratio: 4 / 3;
+  overflow: auto;
+  resize: both;
   background:
     linear-gradient(180deg, transparent 45%, rgba(0, 0, 0, 0.72)),
     linear-gradient(135deg, #32373f, #15191f);
   padding: 14px;
 }
 
+.camera-card-header {
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  align-items: start;
+}
+
+.camera-card-header div,
+.call-mode-row {
+  display: flex;
+  gap: 6px;
+}
+
+.camera-card button,
+.camera-restore {
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(8, 10, 12, 0.52);
+  color: var(--ink);
+  cursor: pointer;
+  padding: 0 8px;
+}
+
+.call-mode-row button[aria-pressed="true"] {
+  border-color: rgba(85, 199, 122, 0.72);
+  background: rgba(35, 122, 70, 0.42);
+}
+
+.camera-restore {
+  position: absolute;
+  z-index: 2;
+  right: clamp(22px, 3vw, 44px);
+  top: clamp(22px, 3vw, 44px);
+  min-height: 40px;
+  background: rgba(8, 10, 12, 0.76);
+  backdrop-filter: blur(16px);
+}
+
 .camera-card span,
 .chat-bubble span,
 .buffer-overlay p,
 .buffer-overlay small,
-.reconnect-overlay p {
+.reconnect-overlay p,
+.camera-card small {
   color: var(--muted);
 }
 
@@ -526,6 +570,7 @@ h1 {
 }
 
 .privacy-hidden .camera-card,
+.privacy-hidden .camera-restore,
 .privacy-hidden .chat-bubble,
 .privacy-hidden .reaction-float-layer,
 .privacy-hidden .buffer-overlay,
