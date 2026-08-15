@@ -1,5 +1,6 @@
 pub mod call;
 pub mod capture;
+pub mod chat;
 pub mod encode;
 pub mod identity;
 pub mod media;

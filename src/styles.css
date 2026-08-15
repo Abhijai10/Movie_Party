@@ -463,9 +463,38 @@ h1 {
   left: clamp(22px, 3vw, 44px);
   bottom: clamp(148px, 18vh, 180px);
   display: grid;
-  gap: 2px;
+  gap: 8px;
   max-width: min(360px, calc(100vw - 44px));
   padding: 14px 16px;
+}
+
+.chat-bubble p {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+}
+
+.reaction-float-layer {
+  position: absolute;
+  z-index: 3;
+  right: min(31vw, 320px);
+  top: clamp(110px, 19vh, 220px);
+  display: grid;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.floating-reaction {
+  display: grid;
+  width: 52px;
+  height: 52px;
+  place-items: center;
+  border: 1px solid rgba(245, 247, 250, 0.2);
+  border-radius: 50%;
+  background: rgba(8, 10, 12, 0.68);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.36);
+  font-size: 1.6rem;
+  animation: reaction-float 2400ms ease forwards;
 }
 
 .buffer-overlay {
@@ -494,6 +523,135 @@ h1 {
   top: clamp(22px, 3vw, 44px);
   width: min(360px, calc(100vw - 44px));
   padding: 16px;
+}
+
+.chat-compose {
+  position: absolute;
+  z-index: 4;
+  left: 50%;
+  bottom: clamp(94px, 12vh, 120px);
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  width: min(560px, 70vw);
+  transform: translateX(-50%);
+}
+
+.chat-compose input {
+  min-width: 0;
+  border: 1px solid rgba(245, 247, 250, 0.18);
+  border-radius: 8px;
+  background: rgba(8, 10, 12, 0.86);
+  color: var(--ink);
+  padding: 14px 16px;
+}
+
+.chat-compose button,
+.chat-history button,
+.reaction-tray button {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(28, 31, 36, 0.88);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.chat-compose button {
+  min-width: 74px;
+}
+
+.chat-compose button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.chat-compose small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  text-align: center;
+}
+
+.chat-history {
+  position: absolute;
+  z-index: 4;
+  left: 50%;
+  top: 50%;
+  width: min(620px, 75vw);
+  max-height: min(560px, 70vh);
+  transform: translate(-50%, -50%);
+  overflow: hidden;
+  border: 1px solid rgba(245, 247, 250, 0.16);
+  border-radius: 8px;
+  background: rgba(8, 10, 12, 0.82);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.44);
+  backdrop-filter: blur(18px);
+  padding: 18px;
+}
+
+.history-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.history-header h2 {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
+.history-header button {
+  min-height: 36px;
+  padding: 0 12px;
+}
+
+.chat-history ol {
+  display: grid;
+  gap: 12px;
+  max-height: calc(min(560px, 70vh) - 76px);
+  overflow: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chat-history li {
+  display: grid;
+  gap: 3px;
+  border-bottom: 1px solid rgba(245, 247, 250, 0.1);
+  padding-bottom: 10px;
+}
+
+.chat-history span {
+  color: var(--muted);
+}
+
+.reaction-tray {
+  position: absolute;
+  z-index: 4;
+  right: clamp(22px, 3vw, 44px);
+  bottom: clamp(148px, 18vh, 184px);
+  display: grid;
+  grid-template-columns: repeat(3, 42px);
+  gap: 8px;
+}
+
+.reaction-tray button {
+  width: 42px;
+  height: 42px;
+  font-size: 1.25rem;
+}
+
+.reaction-tray span {
+  grid-column: 1 / -1;
+  border: 1px solid rgba(228, 184, 77, 0.38);
+  border-radius: 8px;
+  background: rgba(8, 10, 12, 0.78);
+  color: #e4b84d;
+  font-size: 0.82rem;
+  padding: 8px;
+  text-align: center;
 }
 
 .control-dock {
@@ -563,6 +721,28 @@ h1 {
   .control-dock {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .chat-compose {
+    grid-template-columns: 1fr;
+    width: calc(100vw - 32px);
+  }
+
+  .chat-history {
+    width: calc(100vw - 32px);
+  }
+
+  .reaction-tray {
+    grid-template-columns: repeat(6, 36px);
+    left: 16px;
+    right: auto;
+    bottom: 276px;
+  }
+
+  .reaction-tray button {
+    width: 36px;
+    height: 36px;
+    font-size: 1.05rem;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -572,5 +752,25 @@ h1 {
 
   button:hover {
     transform: none;
+  }
+
+  .floating-reaction {
+    animation: none;
+  }
+}
+
+@keyframes reaction-float {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 24px, 0) scale(0.82);
+  }
+
+  18% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate3d(-52px, -70px, 0) scale(1.12);
   }
 }

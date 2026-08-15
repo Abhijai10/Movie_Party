@@ -8,6 +8,8 @@ pub enum MessageType {
     AuthAccept = 3,
     AuthReject = 4,
     Heartbeat = 5,
+    ChatMessage = 180,
+    Reaction = 181,
     Error = 250,
 }
 
@@ -39,6 +41,8 @@ mod tests {
     fn protocol_foundation_uses_locked_limits() {
         assert_eq!(MAX_CONTROL_MESSAGE_BYTES, 262_144);
         assert_eq!(MessageType::Hello as u16, 1);
+        assert_eq!(MessageType::ChatMessage as u16, 180);
+        assert_eq!(MessageType::Reaction as u16, 181);
         assert_eq!(MessageType::Error as u16, 250);
     }
 

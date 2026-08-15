@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 11
+PHASE 12
 
 Current Release:
 V1 Development
@@ -449,16 +449,28 @@ Implemented locally on 2026-08-15:
 Status:
 
 ```
-⬜
+🟦 IMPLEMENTED / TESTING REQUIRED
 ```
 
 ```
-⬜ CHAT_MESSAGE
-⬜ Compose
-⬜ Floating messages
-⬜ History
-⬜ Reactions
-⬜ Rate limiting
+🟦 CHAT_MESSAGE
+🟦 Compose
+🟦 Floating messages
+🟦 History
+🟦 Reactions
+🟦 Rate limiting
+```
+
+Notes:
+
+```
+Implemented locally on 2026-08-15:
+- Added native chat payload validation for CHAT_MESSAGE with 2000-byte UTF-8 body limit.
+- Added native REACTION validation for the V1 allowed reaction set.
+- Added per-participant reaction rate limiter for max 5 reactions per 3 seconds.
+- Added protocol message IDs 180 CHAT_MESSAGE and 181 REACTION.
+- Added Cinema Mode compose input, floating recent messages, translucent history overlay, reaction tray, floating reaction animation, keyboard handling for Enter/C/Esc, and client-side reaction limit feedback.
+- Peer transport wiring remains pending; local UI/state and native validation are implemented.
 ```
 
 ---
@@ -1141,6 +1153,48 @@ Documentation Updated:
 
 Next permitted task:
 - Begin Phase 12 chat and reactions.
+
+---
+
+## 2026-08-15
+
+Active Phase:
+Phase 12
+
+Completed:
+- Added native chat and reaction message validation under `src-tauri/src/chat`.
+- Registered protocol IDs 180 `CHAT_MESSAGE` and 181 `REACTION`.
+- Added reaction rate limiting at max 5 reactions per 3 seconds per participant.
+- Added Cinema Mode chat compose, floating message queue, chat history overlay, reaction tray, floating reaction animation, and Enter/C/Esc keyboard behavior.
+
+Tests:
+- `cargo fmt --check` passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` passed.
+- `cargo test chat` passed.
+- `cargo test protocol` passed.
+- `cargo test` passed after approving local UDP socket access for existing QUIC loopback tests.
+- `pnpm lint` passed.
+- `pnpm test` passed.
+- `pnpm build` passed.
+- `pnpm format` passed.
+
+Failures:
+- Initial `cargo test chat protocol` was an invalid Cargo filter invocation; reran as separate filters.
+- Initial sandboxed `cargo test` failed on existing QUIC loopback socket binding; rerun with permission passed.
+- Initial `pnpm lint` flagged deprecated React form event aliases and numeric template IDs; fixed.
+
+Cross-platform:
+- Windows: ⚠ EXTERNAL VERIFICATION PENDING.
+- macOS: Automated frontend and Rust validation passed locally on 2026-08-15; peer chat/reaction transport and manual visual QA pending.
+
+Blockers:
+- Real peer delivery requires later room/network integration.
+
+Documentation Updated:
+- `docs/core_docs/IMPLEMENTATION_TRACKER.md`
+
+Next permitted task:
+- Begin Phase 13 Ghost Mode and Privacy Mode.
 
 ---
 
