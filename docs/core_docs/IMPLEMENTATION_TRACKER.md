@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 21
+PHASE 22
 
 Current Release:
 V1 Development
@@ -823,29 +823,40 @@ Implemented locally on 2026-08-15:
 Status:
 
 ```
-⬜
+⚠ PARTIAL / PLATFORM-SPECIFIC
 ```
 
 Windows:
 
 ```
-⬜ H264 Media Foundation
+🟦 H264 Media Foundation
 ```
 
 macOS:
 
 ```
-⬜ H264 VideoToolbox
+🟦 H264 VideoToolbox
 ```
 
 Benchmark:
 
 ```
-⬜ 720p30
-⬜ 1080p30
-⬜ encode latency
-⬜ CPU
-⬜ GPU
+🟦 720p30
+🟦 1080p30
+🟦 encode latency
+⚠ CPU — EXTERNAL VERIFICATION PENDING on real hardware
+⚠ GPU — EXTERNAL VERIFICATION PENDING on real hardware
+```
+
+Notes:
+
+```
+Implemented locally on 2026-08-15:
+- Added hardware encoder platform mapping for Windows Media Foundation and macOS VideoToolbox.
+- Added V1 H264 30fps bitrate ladder: 1080p30 High, 1080p30 Medium, 720p30 High, and 720p30 Low.
+- Added goodput-based encoder profile selection.
+- Added benchmark sample classification for capture-to-encode latency and achieved FPS.
+- Real Media Foundation/VideoToolbox invocation, CPU/GPU measurement, and 720p30/1080p30 benchmark samples require usable provider capture and external platform testing.
 ```
 
 ---
@@ -1658,6 +1669,44 @@ Documentation Updated:
 
 Next permitted task:
 - Begin Phase 22 hardware encoding.
+
+---
+
+## 2026-08-15
+
+Active Phase:
+Phase 22
+
+Completed:
+- Added hardware encoder platform mapping for Windows Media Foundation and macOS VideoToolbox.
+- Added H264 30fps bitrate ladder for 1080p30 and 720p30 profiles.
+- Added goodput-based profile selection.
+- Added benchmark sample classification for encode latency and achieved FPS.
+
+Tests:
+- `cargo fmt --check` passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` passed.
+- `cargo test encode` passed.
+- `cargo test` passed after approving local UDP socket access for existing QUIC loopback tests.
+- `pnpm lint` passed.
+- `pnpm build` passed.
+- `pnpm format` passed.
+
+Failures:
+- Initial `cargo fmt --check` wanted one assertion wrapped; fixed with `cargo fmt`.
+
+Cross-platform:
+- Windows: ⚠ EXTERNAL VERIFICATION PENDING for real Media Foundation encode benchmarks.
+- macOS: Automated validation passed locally on 2026-08-15; real VideoToolbox encode benchmark pending usable capture and permissions.
+
+Blockers:
+- Real hardware benchmark data requires usable provider capture samples and platform-specific encoder execution.
+
+Documentation Updated:
+- `docs/core_docs/IMPLEMENTATION_TRACKER.md`
+
+Next permitted task:
+- Begin Phase 23 Shared Mode transport.
 
 ---
 
