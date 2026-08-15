@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 14
+PHASE 15
 
 Current Release:
 V1 Development
@@ -560,24 +560,35 @@ Implemented locally on 2026-08-15:
 Status:
 
 ```
-⬜
+🟦 IMPLEMENTED / TESTING REQUIRED
 ```
 
 ```
-⬜ Camera tier A
-⬜ Tier B
-⬜ Tier C
-⬜ Tier D
-⬜ Goodput feedback
-⬜ Buffer feedback
-⬜ Camera downgrade
-⬜ Camera recovery
+🟦 Camera tier A
+🟦 Tier B
+🟦 Tier C
+🟦 Tier D
+🟦 Goodput feedback
+🟦 Buffer feedback
+🟦 Camera downgrade
+🟦 Camera recovery
 ```
 
 Critical:
 
 ```
-⬜ Movie stays smooth when camera is degraded
+🟦 Movie stays smooth when camera is degraded in policy tests; real WebRTC sender enforcement pending Phase 14 external verification
+```
+
+Notes:
+
+```
+Implemented locally on 2026-08-15:
+- Added camera Tier A/B/C/D state definitions with V1-safe resolution/FPS caps.
+- Added adaptive camera recommendation policy using measured goodput, movie bitrate, guest buffer, and RTT.
+- Policy downgrades camera before sacrificing movie continuity and disables camera under severe pressure.
+- Policy recovers one tier at a time only under healthy buffer/goodput/RTT conditions.
+- Applying constraints to a live WebRTC sender remains pending real call integration and external platform verification.
 ```
 
 ---
@@ -1304,6 +1315,44 @@ Documentation Updated:
 
 Next permitted task:
 - Begin Phase 15 adaptive camera.
+
+---
+
+## 2026-08-15
+
+Active Phase:
+Phase 15
+
+Completed:
+- Added camera Tier A/B/C/D definitions with V1 resolution/FPS/bitrate limits.
+- Added adaptive camera recommendation policy driven by goodput, movie bitrate, guest buffer, and RTT.
+- Added downgrade behavior that reduces/disables camera before compromising movie continuity.
+- Added conservative one-tier-at-a-time recovery behavior.
+
+Tests:
+- `cargo fmt --check` passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` passed.
+- `cargo test call` passed.
+- `cargo test` passed after approving local UDP socket access for existing QUIC loopback tests.
+- `pnpm lint` passed.
+- `pnpm build` passed.
+- `pnpm format` passed.
+
+Failures:
+- Initial `cargo fmt --check` wanted one function signature wrapped; fixed with `cargo fmt`.
+
+Cross-platform:
+- Windows: ⚠ EXTERNAL VERIFICATION PENDING.
+- macOS: Automated validation passed locally on 2026-08-15; live WebRTC sender constraint behavior pending external/manual call testing.
+
+Blockers:
+- Real camera quality changes require live WebRTC sender integration and real network/camera devices.
+
+Documentation Updated:
+- `docs/core_docs/IMPLEMENTATION_TRACKER.md`
+
+Next permitted task:
+- Begin Phase 16 managed Chrome.
 
 ---
 
