@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 9
+PHASE 10
 
 Current Release:
 V1 Development
@@ -398,15 +398,15 @@ Status:
 Status:
 
 ```
-⬜
+🟦 IMPLEMENTED / TESTING REQUIRED
 ```
 
 ```
-⬜ Keep
-⬜ Remove
-⬜ Save As
-⬜ Cache cleanup
-⬜ Settings policy
+🟦 Keep
+🟦 Remove
+🟦 Save As
+🟦 Cache cleanup
+🟦 Settings policy
 ```
 
 ---
