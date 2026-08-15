@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 25
+PHASE 26
 
 Current Release:
 V1 Development
@@ -955,15 +955,27 @@ Implemented locally on 2026-08-15:
 Status:
 
 ```
-⬜
+🟦 IMPLEMENTED / TESTING REQUIRED
 ```
 
 ```
-⬜ 1080p high
-⬜ 1080p medium
-⬜ 720p high
-⬜ 720p low
-⬜ camera reduction before movie reduction
+🟦 1080p high
+🟦 1080p medium
+🟦 720p high
+🟦 720p low
+🟦 camera reduction before movie reduction
+```
+
+Notes:
+
+```
+Implemented locally on 2026-08-15:
+- Added automatic quality decision model using network goodput, buffer level, encoder stats, and call bitrate.
+- Added output decision for movie encoder profile and camera tier.
+- Policy preserves current movie quality and reduces camera first when the movie bitrate budget is still available.
+- Policy reduces movie profile only when the movie budget or encoder health is unsafe.
+- Policy recovers movie and camera quality under healthy buffer/goodput/encoder conditions.
+- Live sender/encoder reconfiguration remains pending capture/encode/transport integration.
 ```
 
 ---
@@ -1854,6 +1866,45 @@ Documentation Updated:
 
 Next permitted task:
 - Begin Phase 26 Automatic Quality.
+
+---
+
+## 2026-08-15
+
+Active Phase:
+Phase 26
+
+Completed:
+- Added automatic quality input and decision model.
+- Added movie encoder profile + camera tier output selection.
+- Added policy to reduce camera before movie when movie bitrate remains safe.
+- Added movie profile reduction only when movie budget or encoder health is unsafe.
+- Added recovery behavior under healthy buffer, goodput, and encoder stats.
+
+Tests:
+- `cargo fmt --check` passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` passed.
+- `cargo test encode` passed.
+- `cargo test` passed after approving local UDP socket access for existing QUIC loopback tests.
+- `pnpm lint` passed.
+- `pnpm build` passed.
+- `pnpm format` passed.
+
+Failures:
+- Initial `cargo fmt --check` wanted wrapping in automatic quality conditions; fixed with `cargo fmt`.
+
+Cross-platform:
+- Windows: Automated validation passed locally; live encoder/camera sender reconfiguration pending platform testing.
+- macOS: Automated validation passed locally on 2026-08-15; live encoder/camera sender reconfiguration pending integration testing.
+
+Blockers:
+- Real automatic quality behavior requires live shared capture, encoder, call sender, and transport metrics.
+
+Documentation Updated:
+- `docs/core_docs/IMPLEMENTATION_TRACKER.md`
+
+Next permitted task:
+- Evaluate Phase 27 vBrowser R&D activation criteria.
 
 ---
 

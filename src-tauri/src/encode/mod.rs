@@ -1,6 +1,8 @@
 pub mod macos;
 pub mod windows;
 
+use crate::call::CameraTier;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncoderPlatform {
     WindowsMediaFoundation,
@@ -38,6 +40,20 @@ pub enum BenchmarkStatus {
     FailsLatency,
     FailsFrameRate,
     ExternalVerificationPending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AutomaticQualityInput {
+    pub measured_goodput_bps: u64,
+    pub buffer_level_us: u64,
+    pub encoder_sample: EncoderBenchmarkSample,
+    pub call_bitrate_bps: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutomaticQualityDecision {
+    pub movie: EncoderConfig,
+    pub camera_tier: CameraTier,
 }
 
 pub fn encoder_api(platform: EncoderPlatform) -> &'static str {
@@ -104,6 +120,73 @@ pub fn classify_benchmark(sample: EncoderBenchmarkSample) -> BenchmarkStatus {
     }
 
     BenchmarkStatus::Pass
+}
+
+pub fn automatic_quality_decision(
+    current_movie: H264Profile,
+    current_camera: CameraTier,
+    input: AutomaticQualityInput,
+) -> AutomaticQualityDecision {
+    if input.buffer_level_us < 2_000_000
+        || classify_benchmark(input.encoder_sample) != BenchmarkStatus::Pass
+    {
+        return AutomaticQualityDecision {
+            movie: config_for_profile(H264Profile::P720Low),
+            camera_tier: CameraTier::D,
+        };
+    }
+
+    let current_movie_config = config_for_profile(current_movie);
+    let camera_pressure_budget = current_movie_config.target_bitrate_bps as u64
+        + u64::from(input.call_bitrate_bps)
+        + 500_000;
+
+    if input.measured_goodput_bps < camera_pressure_budget
+        && input.measured_goodput_bps >= u64::from(current_movie_config.target_bitrate_bps)
+    {
+        return AutomaticQualityDecision {
+            movie: current_movie_config,
+            camera_tier: downgrade_camera(current_camera),
+        };
+    }
+
+    if input.measured_goodput_bps < u64::from(current_movie_config.target_bitrate_bps) {
+        return AutomaticQualityDecision {
+            movie: select_profile_for_goodput(input.measured_goodput_bps),
+            camera_tier: CameraTier::D,
+        };
+    }
+
+    if input.buffer_level_us >= 10_000_000
+        && input.measured_goodput_bps >= camera_pressure_budget + 2_000_000
+    {
+        return AutomaticQualityDecision {
+            movie: select_profile_for_goodput(input.measured_goodput_bps),
+            camera_tier: upgrade_camera(current_camera),
+        };
+    }
+
+    AutomaticQualityDecision {
+        movie: current_movie_config,
+        camera_tier: current_camera,
+    }
+}
+
+fn downgrade_camera(tier: CameraTier) -> CameraTier {
+    match tier {
+        CameraTier::A => CameraTier::B,
+        CameraTier::B => CameraTier::C,
+        CameraTier::C | CameraTier::D => CameraTier::D,
+    }
+}
+
+fn upgrade_camera(tier: CameraTier) -> CameraTier {
+    match tier {
+        CameraTier::A => CameraTier::A,
+        CameraTier::B => CameraTier::A,
+        CameraTier::C => CameraTier::B,
+        CameraTier::D => CameraTier::C,
+    }
 }
 
 #[cfg(test)]
@@ -190,5 +273,71 @@ mod tests {
             }),
             BenchmarkStatus::FailsFrameRate
         );
+    }
+
+    #[test]
+    fn automatic_quality_reduces_camera_before_movie_when_movie_budget_is_available() {
+        let decision = automatic_quality_decision(
+            H264Profile::P1080Medium,
+            CameraTier::B,
+            AutomaticQualityInput {
+                measured_goodput_bps: 4_100_000,
+                buffer_level_us: 8_000_000,
+                encoder_sample: EncoderBenchmarkSample {
+                    capture_to_encode_latency_ms: 60.0,
+                    cpu_percent: 20.0,
+                    gpu_percent: 40.0,
+                    achieved_fps: 29.7,
+                },
+                call_bitrate_bps: 350_000,
+            },
+        );
+
+        assert_eq!(decision.movie.profile, H264Profile::P1080Medium);
+        assert_eq!(decision.camera_tier, CameraTier::C);
+    }
+
+    #[test]
+    fn automatic_quality_reduces_movie_only_when_movie_budget_is_unsafe() {
+        let decision = automatic_quality_decision(
+            H264Profile::P1080High,
+            CameraTier::A,
+            AutomaticQualityInput {
+                measured_goodput_bps: 3_100_000,
+                buffer_level_us: 8_000_000,
+                encoder_sample: EncoderBenchmarkSample {
+                    capture_to_encode_latency_ms: 60.0,
+                    cpu_percent: 20.0,
+                    gpu_percent: 40.0,
+                    achieved_fps: 29.7,
+                },
+                call_bitrate_bps: 350_000,
+            },
+        );
+
+        assert_eq!(decision.movie.profile, H264Profile::P720Low);
+        assert_eq!(decision.camera_tier, CameraTier::D);
+    }
+
+    #[test]
+    fn automatic_quality_recovers_movie_and_camera_when_conditions_are_healthy() {
+        let decision = automatic_quality_decision(
+            H264Profile::P720High,
+            CameraTier::C,
+            AutomaticQualityInput {
+                measured_goodput_bps: 7_500_000,
+                buffer_level_us: 15_000_000,
+                encoder_sample: EncoderBenchmarkSample {
+                    capture_to_encode_latency_ms: 60.0,
+                    cpu_percent: 20.0,
+                    gpu_percent: 40.0,
+                    achieved_fps: 29.7,
+                },
+                call_bitrate_bps: 250_000,
+            },
+        );
+
+        assert_eq!(decision.movie.profile, H264Profile::P1080High);
+        assert_eq!(decision.camera_tier, CameraTier::B);
     }
 }
