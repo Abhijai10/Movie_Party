@@ -1,6 +1,7 @@
 use std::{
+    collections::HashSet,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -22,6 +23,7 @@ use crate::identity::{verify_auth_request_signature, DeviceIdentity};
 pub const QUIC_TRANSPORT_NAME: &str = "quic";
 pub const MOVE_PARTY_ALPN: &[&[u8]] = &[b"moveparty-v1"];
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
+const MAX_AUTH_NONCES: usize = 4_096;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomCredentials {
@@ -168,6 +170,7 @@ pub struct QuicServer {
     endpoint: Endpoint,
     certificate: CertificateDer<'static>,
     credentials: RoomCredentials,
+    replay_guard: AuthReplayGuard,
 }
 
 impl QuicServer {
@@ -179,6 +182,7 @@ impl QuicServer {
             endpoint,
             certificate,
             credentials,
+            replay_guard: AuthReplayGuard::default(),
         })
     }
 
@@ -193,10 +197,11 @@ impl QuicServer {
     pub async fn run(self) -> Result<(), QuicError> {
         while let Some(incoming) = self.endpoint.accept().await {
             let credentials = self.credentials.clone();
+            let replay_guard = self.replay_guard.clone();
             tokio::spawn(async move {
                 match incoming.await {
                     Ok(connection) => {
-                        let _ = handle_connection(connection, credentials).await;
+                        let _ = handle_connection(connection, credentials, replay_guard).await;
                     }
                     Err(_error) => {}
                 }
@@ -204,6 +209,26 @@ impl QuicServer {
         }
 
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct AuthReplayGuard {
+    accepted_nonces: Arc<Mutex<HashSet<String>>>,
+}
+
+impl AuthReplayGuard {
+    fn accept_once(&self, device_id: &str, invite_nonce: &str) -> bool {
+        let mut accepted_nonces = match self.accepted_nonces.lock() {
+            Ok(accepted_nonces) => accepted_nonces,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        if accepted_nonces.len() >= MAX_AUTH_NONCES {
+            accepted_nonces.clear();
+        }
+
+        accepted_nonces.insert(format!("{device_id}:{invite_nonce}"))
     }
 }
 
@@ -405,6 +430,7 @@ fn ensure_crypto_provider() {
 async fn handle_connection(
     connection: Connection,
     credentials: RoomCredentials,
+    replay_guard: AuthReplayGuard,
 ) -> Result<(), QuicError> {
     loop {
         let stream = connection.accept_bi().await;
@@ -415,8 +441,9 @@ async fn handle_connection(
         };
 
         let credentials = credentials.clone();
+        let replay_guard = replay_guard.clone();
         tokio::spawn(async move {
-            let _ = handle_request(stream, credentials).await;
+            let _ = handle_request(stream, credentials, replay_guard).await;
         });
     }
 }
@@ -424,10 +451,13 @@ async fn handle_connection(
 async fn handle_request(
     (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
     credentials: RoomCredentials,
+    replay_guard: AuthReplayGuard,
 ) -> Result<(), QuicError> {
     let request = read_request(&mut recv).await?;
     let response = match request {
-        ClientRequest::HelloAuth { hello, auth } => validate_handshake(&credentials, *hello, *auth),
+        ClientRequest::HelloAuth { hello, auth } => {
+            validate_handshake(&credentials, &replay_guard, *hello, *auth)
+        }
         ClientRequest::Heartbeat { .. } => ServerResponse::HeartbeatAck {
             room_state: "LOBBY".to_string(),
         },
@@ -468,6 +498,7 @@ async fn handle_request(
 
 fn validate_handshake(
     credentials: &RoomCredentials,
+    replay_guard: &AuthReplayGuard,
     hello: HelloPayload,
     auth: AuthRequest,
 ) -> ServerResponse {
@@ -497,6 +528,12 @@ fn validate_handshake(
     {
         return ServerResponse::AuthReject {
             code: "INVALID_SIGNATURE".to_string(),
+        };
+    }
+
+    if !replay_guard.accept_once(&hello.device_id, &auth.invite_nonce) {
+        return ServerResponse::AuthReject {
+            code: "REPLAYED_AUTH".to_string(),
         };
     }
 
@@ -673,6 +710,65 @@ mod tests {
             response,
             ServerResponse::AuthReject {
                 code: "INVALID_SIGNATURE".to_string()
+            }
+        );
+        client.wait_idle().await;
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn rejects_replayed_auth_nonce() {
+        let credentials = RoomCredentials::new_for_tests();
+        let server = QuicServer::bind(loopback_bind_addr(), credentials.clone()).expect("server");
+        let addr = server.local_addr().expect("addr");
+        let certificate = server.certificate.clone();
+        let server_task = tokio::spawn(server.run());
+        let identity = test_identity("test-device");
+        let endpoint = super::make_client_endpoint(certificate).expect("endpoint");
+        let connection = endpoint
+            .connect(addr, "localhost")
+            .expect("connect")
+            .await
+            .expect("connected");
+        let client = QuicClient {
+            endpoint,
+            connection,
+            credentials: credentials.clone(),
+            identity: identity.clone(),
+        };
+        let hello = HelloPayload::local("Test Guest", &identity);
+        let join_secret_hash = credentials.join_secret_hash();
+        let auth = AuthRequest {
+            room_id: credentials.room_id.clone(),
+            join_secret_hash: join_secret_hash.clone(),
+            invite_nonce: "nonce".to_string(),
+            device_signature: identity.sign_auth_request(
+                &credentials.room_id,
+                &join_secret_hash,
+                "nonce",
+            ),
+        };
+
+        let first = client
+            .send_request(ClientRequest::HelloAuth {
+                hello: Box::new(hello.clone()),
+                auth: Box::new(auth.clone()),
+            })
+            .await
+            .expect("first auth");
+        let second = client
+            .send_request(ClientRequest::HelloAuth {
+                hello: Box::new(hello),
+                auth: Box::new(auth),
+            })
+            .await
+            .expect("replayed auth");
+
+        assert!(matches!(first, ServerResponse::AuthAccept(_)));
+        assert_eq!(
+            second,
+            ServerResponse::AuthReject {
+                code: "REPLAYED_AUTH".to_string()
             }
         );
         client.wait_idle().await;

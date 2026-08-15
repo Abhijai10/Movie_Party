@@ -140,6 +140,7 @@ Tasks:
 🟦 Implement authentication
 🟦 Ed25519 identity public key in HELLO
 🟦 AUTH_REQUEST device signature validation
+🟦 AUTH_REQUEST invite nonce replay rejection
 🟦 Implement heartbeat
 🟦 Implement RTT test
 🟦 Implement throughput test
@@ -171,7 +172,7 @@ Hardened locally on 2026-08-15:
 - Replaced Phase 1 placeholder public-key/signature values with Ed25519 device identity support.
 - HELLO now carries the local identity public key.
 - AUTH_REQUEST signatures cover room ID, join secret hash, invite nonce, and device ID.
-- Host-side QUIC auth rejects invalid room secrets and tampered device signatures in loopback tests.
+- Host-side QUIC auth rejects invalid room secrets, tampered device signatures, and replayed invite nonces in loopback tests.
 - Persistent OS credential storage for the private identity key remains future integration work; current automated tests use deterministic/ephemeral identities.
 ```
 
