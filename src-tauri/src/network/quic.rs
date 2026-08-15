@@ -606,6 +606,12 @@ fn validate_handshake(
         };
     }
 
+    if !is_uuid_v7(&hello.device_id) {
+        return ServerResponse::AuthReject {
+            code: "INVALID_DEVICE_ID".to_string(),
+        };
+    }
+
     if !matches!(hello.platform.as_str(), "windows" | "macos") {
         return ServerResponse::AuthReject {
             code: "UNSUPPORTED_PLATFORM".to_string(),
@@ -645,6 +651,10 @@ fn validate_handshake(
         session_id: Uuid::now_v7().to_string(),
         room_role: "guest".to_string(),
     })
+}
+
+fn is_uuid_v7(value: &str) -> bool {
+    Uuid::parse_str(value).is_ok_and(|uuid| uuid.get_version_num() == 7)
 }
 
 async fn write_request(
@@ -719,8 +729,10 @@ mod tests {
     };
     use crate::identity::DeviceIdentity;
 
-    fn test_identity(device_id: &str) -> DeviceIdentity {
-        DeviceIdentity::from_seed_for_tests(device_id, [9; 32])
+    const TEST_DEVICE_ID: &str = "0198c3d0-7c55-7f82-9af2-36c9946b2974";
+
+    fn test_identity() -> DeviceIdentity {
+        DeviceIdentity::from_seed_for_tests(TEST_DEVICE_ID, [9; 32])
     }
 
     #[tokio::test]
@@ -735,7 +747,7 @@ mod tests {
             addr,
             certificate,
             credentials,
-            test_identity("test-device"),
+            test_identity(),
             "Test Guest",
         )
         .await
@@ -758,14 +770,8 @@ mod tests {
 
         let mut wrong = credentials;
         wrong.join_secret = "wrong".to_string();
-        let result = QuicClient::connect(
-            addr,
-            certificate,
-            wrong,
-            test_identity("test-device"),
-            "Test Guest",
-        )
-        .await;
+        let result =
+            QuicClient::connect(addr, certificate, wrong, test_identity(), "Test Guest").await;
 
         assert!(result.is_err());
         server_task.abort();
@@ -778,7 +784,7 @@ mod tests {
         let addr = server.local_addr().expect("addr");
         let certificate = server.certificate.clone();
         let server_task = tokio::spawn(server.run());
-        let identity = test_identity("test-device");
+        let identity = test_identity();
         let endpoint = super::make_client_endpoint(certificate).expect("endpoint");
         let connection = endpoint
             .connect(addr, "localhost")
@@ -830,7 +836,7 @@ mod tests {
         let addr = server.local_addr().expect("addr");
         let certificate = server.certificate.clone();
         let server_task = tokio::spawn(server.run());
-        let identity = test_identity("test-device");
+        let identity = test_identity();
         let endpoint = super::make_client_endpoint(certificate).expect("endpoint");
         let connection = endpoint
             .connect(addr, "localhost")
@@ -878,13 +884,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_non_uuid_v7_device_id() {
+        let credentials = RoomCredentials::new_for_tests();
+        let server = QuicServer::bind(loopback_bind_addr(), credentials.clone()).expect("server");
+        let addr = server.local_addr().expect("addr");
+        let certificate = server.certificate.clone();
+        let server_task = tokio::spawn(server.run());
+        let identity = DeviceIdentity::from_seed_for_tests("not-a-uuid", [9; 32]);
+        let endpoint = super::make_client_endpoint(certificate).expect("endpoint");
+        let connection = endpoint
+            .connect(addr, "localhost")
+            .expect("connect")
+            .await
+            .expect("connected");
+        let client = QuicClient {
+            endpoint,
+            connection,
+            credentials: credentials.clone(),
+            identity: identity.clone(),
+            next_seq: Arc::new(AtomicU64::new(1)),
+        };
+        let hello = HelloPayload::local("Test Guest", &identity);
+        let join_secret_hash = credentials.join_secret_hash();
+        let invite_nonce = "nonce".to_string();
+        let auth = AuthRequest {
+            room_id: credentials.room_id.clone(),
+            join_secret_hash: join_secret_hash.clone(),
+            invite_nonce: invite_nonce.clone(),
+            device_signature: identity.sign_auth_request(
+                &credentials.room_id,
+                &join_secret_hash,
+                &invite_nonce,
+            ),
+        };
+
+        let response = client
+            .send_request(ClientRequest::HelloAuth {
+                hello: Box::new(hello),
+                auth: Box::new(auth),
+            })
+            .await
+            .expect("auth response");
+
+        assert_eq!(
+            response,
+            ServerResponse::AuthReject {
+                code: "INVALID_DEVICE_ID".to_string()
+            }
+        );
+        client.wait_idle().await;
+        server_task.abort();
+    }
+
+    #[tokio::test]
     async fn rejects_replayed_auth_nonce() {
         let credentials = RoomCredentials::new_for_tests();
         let server = QuicServer::bind(loopback_bind_addr(), credentials.clone()).expect("server");
         let addr = server.local_addr().expect("addr");
         let certificate = server.certificate.clone();
         let server_task = tokio::spawn(server.run());
-        let identity = test_identity("test-device");
+        let identity = test_identity();
         let endpoint = super::make_client_endpoint(certificate).expect("endpoint");
         let connection = endpoint
             .connect(addr, "localhost")
@@ -954,14 +1013,14 @@ mod tests {
             endpoint,
             connection,
             credentials: RoomCredentials::new_for_tests(),
-            identity: test_identity("test-device"),
+            identity: test_identity(),
             next_seq: Arc::new(AtomicU64::new(1)),
         };
 
         let response = client
             .send_request(ClientRequest::Heartbeat {
                 seq: 1,
-                sender: "test-device".to_string(),
+                sender: TEST_DEVICE_ID.to_string(),
                 sent_mono_us: monotonic_us(),
                 room_state: "LOBBY".to_string(),
                 last_seen_peer_seq: 0,
@@ -990,7 +1049,7 @@ mod tests {
             addr,
             certificate,
             credentials,
-            test_identity("test-device"),
+            test_identity(),
             "Test Guest",
         )
         .await
@@ -999,7 +1058,7 @@ mod tests {
         let first = client
             .send_request(ClientRequest::Heartbeat {
                 seq: 1,
-                sender: "test-device".to_string(),
+                sender: TEST_DEVICE_ID.to_string(),
                 sent_mono_us: monotonic_us(),
                 room_state: "LOBBY".to_string(),
                 last_seen_peer_seq: 0,
@@ -1009,7 +1068,7 @@ mod tests {
         let duplicate = client
             .send_request(ClientRequest::Heartbeat {
                 seq: 1,
-                sender: "test-device".to_string(),
+                sender: TEST_DEVICE_ID.to_string(),
                 sent_mono_us: monotonic_us(),
                 room_state: "LOBBY".to_string(),
                 last_seen_peer_seq: 0,
@@ -1040,7 +1099,7 @@ mod tests {
             addr,
             certificate,
             credentials,
-            test_identity("test-device"),
+            test_identity(),
             "Test Guest",
         )
         .await
