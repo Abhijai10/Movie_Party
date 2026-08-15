@@ -135,6 +135,7 @@ Tasks:
 🟦 Detect path type
 🟦 Build QUIC listener
 🟦 Build QUIC client
+🟦 Generate protocol-shaped room credentials
 🟦 Bind host to Tailscale address
 🟦 Implement HELLO
 🟦 HELLO validates UUIDv7 device IDs
@@ -176,6 +177,7 @@ Notes:
 
 ```
 Hardened locally on 2026-08-15:
+- Added room credential generation for 128-bit Base64URL room IDs and 256-bit Base64URL join secrets.
 - Replaced Phase 1 placeholder public-key/signature values with Ed25519 device identity support.
 - HELLO now carries the local identity public key.
 - HELLO validates that device IDs are UUIDv7 strings before room authentication succeeds.

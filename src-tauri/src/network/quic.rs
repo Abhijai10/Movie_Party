@@ -13,6 +13,7 @@ use quinn::{
     crypto::rustls::{QuicClientConfig, QuicServerConfig},
     ClientConfig, Connection, Endpoint, ServerConfig,
 };
+use rand::RngCore;
 use rustls::{
     pki_types::{CertificateDer, PrivatePkcs8KeyDer},
     RootCertStore,
@@ -36,6 +37,18 @@ pub struct RoomCredentials {
 }
 
 impl RoomCredentials {
+    pub fn generate() -> Self {
+        let mut room_id = [0_u8; 16];
+        let mut join_secret = [0_u8; 32];
+        rand::rng().fill_bytes(&mut room_id);
+        rand::rng().fill_bytes(&mut join_secret);
+
+        Self {
+            room_id: URL_SAFE_NO_PAD.encode(room_id),
+            join_secret: URL_SAFE_NO_PAD.encode(join_secret),
+        }
+    }
+
     pub fn new_for_tests() -> Self {
         Self {
             room_id: "EjRWeJCrze8BI0VniavN7w".to_string(),
@@ -763,6 +776,17 @@ mod tests {
 
     fn test_identity() -> DeviceIdentity {
         DeviceIdentity::from_seed_for_tests(TEST_DEVICE_ID, [9; 32])
+    }
+
+    #[test]
+    fn generated_room_credentials_match_protocol_shapes() {
+        let first = RoomCredentials::generate();
+        let second = RoomCredentials::generate();
+
+        assert!(super::is_base64url_128bit(&first.room_id));
+        assert!(super::is_base64url_256bit(&first.join_secret));
+        assert_ne!(first.room_id, second.room_id);
+        assert_ne!(first.join_secret, second.join_secret);
     }
 
     #[tokio::test]
