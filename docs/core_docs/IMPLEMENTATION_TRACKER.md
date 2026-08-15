@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 0
+PHASE 2
 
 Current Release:
 V1 Development
@@ -26,7 +26,7 @@ Architecture:
 LOCKED
 
 Critical Blockers:
-Windows launch verification and hosted CI execution require external environments.
+None for independent local implementation. External Phase 0/1 verification remains pending.
 ````
 
 ---
@@ -122,44 +122,44 @@ Phase 0 foundation scaffolded on 2026-08-15:
 Status:
 
 ```
-⬜ NOT STARTED
+⚠ PARTIAL / PLATFORM-SPECIFIC
 ```
 
 Tasks:
 
 ```
-⬜ Detect Tailscale executable
-⬜ Detect signed-in state
-⬜ Discover local Tailscale IPv4
-⬜ Discover peer
-⬜ Detect path type
-⬜ Build QUIC listener
-⬜ Build QUIC client
-⬜ Bind host to Tailscale address
-⬜ Implement HELLO
-⬜ Implement authentication
-⬜ Implement heartbeat
-⬜ Implement RTT test
-⬜ Implement throughput test
-⬜ Transfer synthetic 1 GB payload
+🟦 Detect Tailscale executable
+🟦 Detect signed-in state
+🟦 Discover local Tailscale IPv4
+🟦 Discover peer
+🟦 Detect path type
+🟦 Build QUIC listener
+🟦 Build QUIC client
+🟦 Bind host to Tailscale address
+🟦 Implement HELLO
+🟦 Implement authentication
+🟦 Implement heartbeat
+🟦 Implement RTT test
+🟦 Implement throughput test
+🟦 Transfer synthetic 1 GB payload
 ```
 
 Real environment tests:
 
 ```
-⬜ College network Mac → Windows
-⬜ College network Windows → Mac
-⬜ Record direct/DERP path
-⬜ Record throughput
-⬜ Record RTT
+⚠ College network Mac → Windows — EXTERNAL VERIFICATION PENDING
+⚠ College network Windows → Mac — EXTERNAL VERIFICATION PENDING
+⚠ Record direct/DERP path — EXTERNAL VERIFICATION PENDING
+⚠ Record throughput — EXTERNAL VERIFICATION PENDING
+⚠ Record RTT — EXTERNAL VERIFICATION PENDING
 ```
 
 Gate:
 
 ```
-⬜ 1 GB reliable transfer
+⚠ 1 GB reliable transfer — EXTERNAL VERIFICATION PENDING over real Tailscale peers
 ⬜ reconnect test passes
-⬜ no listening on public interfaces
+🟦 no listening on public interfaces in local listener API; real host binding pending Tailscale environment
 ```
 
 ---
@@ -169,43 +169,43 @@ Gate:
 Status:
 
 ```
-⬜ NOT STARTED
+🟦 IMPLEMENTED / TESTING REQUIRED
 ```
 
 Tasks:
 
 ```
-⬜ Fake player interface
-⬜ Host monotonic clock
-⬜ CLOCK_PING/PONG
-⬜ Offset estimation
-⬜ PLAY_PREPARE
-⬜ PLAY_COMMIT
-⬜ PAUSE flow
-⬜ SEEK flow
-⬜ Buffer consensus
-⬜ Sequence handling
-⬜ Duplicate-operation handling
-⬜ Simulated drift correction
+🟦 Fake player interface
+🟦 Host monotonic clock
+🟦 CLOCK_PING/PONG
+🟦 Offset estimation
+🟦 PLAY_PREPARE
+🟦 PLAY_COMMIT
+🟦 PAUSE flow
+🟦 SEEK flow
+🟦 Buffer consensus
+🟦 Sequence handling
+🟦 Duplicate-operation handling
+🟦 Simulated drift correction
 ```
 
 Simulation matrix:
 
 ```
-⬜ 10ms RTT
-⬜ 50ms RTT
-⬜ 150ms RTT
-⬜ jitter
-⬜ 1% packet loss
-⬜ 3% packet loss
-⬜ 10-second outage
+🟦 10ms RTT
+🟦 50ms RTT
+🟦 150ms RTT
+🟦 jitter
+🟦 1% packet loss
+🟦 3% packet loss
+🟦 10-second outage
 ```
 
 Gate:
 
 ```
-⬜ no divergent canonical state
-⬜ p95 simulated drift <100ms under normal conditions
+🟦 no divergent canonical state
+🟦 p95 simulated drift <100ms under normal conditions
 ```
 
 ---
