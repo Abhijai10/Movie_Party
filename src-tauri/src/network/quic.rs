@@ -1,7 +1,10 @@
 use std::{
     collections::HashSet,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -19,6 +22,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::identity::{verify_auth_request_signature, DeviceIdentity};
+use crate::protocol::SequenceTracker;
 
 pub const QUIC_TRANSPORT_NAME: &str = "quic";
 pub const MOVE_PARTY_ALPN: &[&[u8]] = &[b"moveparty-v1"];
@@ -93,14 +97,23 @@ pub enum ClientRequest {
         auth: Box<AuthRequest>,
     },
     Heartbeat {
+        seq: u64,
+        sender: String,
+        sent_mono_us: u64,
         room_state: String,
         last_seen_peer_seq: u64,
     },
     Ping {
+        seq: u64,
+        sender: String,
+        sent_mono_us: u64,
         probe_id: u64,
         t0_us: u64,
     },
     ThroughputUpload {
+        seq: u64,
+        sender: String,
+        sent_mono_us: u64,
         bytes: u64,
     },
 }
@@ -238,6 +251,7 @@ pub struct QuicClient {
     connection: Connection,
     credentials: RoomCredentials,
     identity: DeviceIdentity,
+    next_seq: Arc<AtomicU64>,
 }
 
 impl QuicClient {
@@ -256,6 +270,7 @@ impl QuicClient {
             connection,
             credentials,
             identity,
+            next_seq: Arc::new(AtomicU64::new(1)),
         };
         let response = client
             .send_request(ClientRequest::HelloAuth {
@@ -274,6 +289,9 @@ impl QuicClient {
     pub async fn heartbeat(&self) -> Result<(), QuicError> {
         let response = self
             .send_request(ClientRequest::Heartbeat {
+                seq: self.next_seq(),
+                sender: self.identity.device_id.clone(),
+                sent_mono_us: monotonic_us(),
                 room_state: "LOBBY".to_string(),
                 last_seen_peer_seq: 0,
             })
@@ -289,6 +307,9 @@ impl QuicClient {
         let start = Instant::now();
         let response = self
             .send_request(ClientRequest::Ping {
+                seq: self.next_seq(),
+                sender: self.identity.device_id.clone(),
+                sent_mono_us: monotonic_us(),
                 probe_id: 1,
                 t0_us: 0,
             })
@@ -308,7 +329,12 @@ impl QuicClient {
         chunk_size: usize,
     ) -> Result<ThroughputResult, QuicError> {
         let (mut send, mut recv) = self.connection.open_bi().await?;
-        let request = ClientRequest::ThroughputUpload { bytes };
+        let request = ClientRequest::ThroughputUpload {
+            seq: self.next_seq(),
+            sender: self.identity.device_id.clone(),
+            sent_mono_us: monotonic_us(),
+            bytes,
+        };
         write_request(&mut send, &request).await?;
 
         let chunk = vec![0xA5; chunk_size.max(1)];
@@ -360,6 +386,10 @@ impl QuicClient {
         write_request(&mut send, &request).await?;
         send.finish().map_err(|_| QuicError::ClosedStream)?;
         read_response(&mut recv).await
+    }
+
+    fn next_seq(&self) -> u64 {
+        self.next_seq.fetch_add(1, Ordering::SeqCst)
     }
 }
 
@@ -432,6 +462,7 @@ async fn handle_connection(
     credentials: RoomCredentials,
     replay_guard: AuthReplayGuard,
 ) -> Result<(), QuicError> {
+    let session = Arc::new(Mutex::new(ConnectionSession::default()));
     loop {
         let stream = connection.accept_bi().await;
         let stream = match stream {
@@ -442,58 +473,125 @@ async fn handle_connection(
 
         let credentials = credentials.clone();
         let replay_guard = replay_guard.clone();
+        let session = session.clone();
         tokio::spawn(async move {
-            let _ = handle_request(stream, credentials, replay_guard).await;
+            let _ = handle_request(stream, credentials, replay_guard, session).await;
         });
     }
+}
+
+#[derive(Debug, Default)]
+struct ConnectionSession {
+    authenticated_device_id: Option<String>,
+    sequence_tracker: SequenceTracker,
 }
 
 async fn handle_request(
     (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
     credentials: RoomCredentials,
     replay_guard: AuthReplayGuard,
+    session: Arc<Mutex<ConnectionSession>>,
 ) -> Result<(), QuicError> {
     let request = read_request(&mut recv).await?;
     let response = match request {
         ClientRequest::HelloAuth { hello, auth } => {
-            validate_handshake(&credentials, &replay_guard, *hello, *auth)
-        }
-        ClientRequest::Heartbeat { .. } => ServerResponse::HeartbeatAck {
-            room_state: "LOBBY".to_string(),
-        },
-        ClientRequest::Ping { probe_id, t0_us } => {
-            let receive = monotonic_us();
-            ServerResponse::Pong {
-                probe_id,
-                t0_us,
-                host_receive_us: receive,
-                host_send_us: monotonic_us(),
+            let device_id = hello.device_id.clone();
+            let response = validate_handshake(&credentials, &replay_guard, *hello, *auth);
+            if matches!(response, ServerResponse::AuthAccept(_)) {
+                let mut session = lock_session(&session);
+                session.authenticated_device_id = Some(device_id);
             }
+            response
         }
-        ClientRequest::ThroughputUpload { bytes } => {
-            let start = Instant::now();
-            let mut remaining = bytes;
-            while remaining > 0 {
-                match recv.read_chunk(64 * 1024, true).await {
-                    Ok(Some(chunk)) => {
-                        remaining = remaining.saturating_sub(chunk.bytes.len() as u64);
-                    }
-                    Ok(None) => break,
-                    Err(error) => return Err(QuicError::Read(error.into())),
+        ClientRequest::Heartbeat {
+            seq,
+            sender,
+            sent_mono_us: _,
+            ..
+        } => match validate_authenticated_sequence(&session, &sender, seq) {
+            Ok(()) => ServerResponse::HeartbeatAck {
+                room_state: "LOBBY".to_string(),
+            },
+            Err(code) => ServerResponse::AuthReject { code },
+        },
+        ClientRequest::Ping {
+            seq,
+            sender,
+            sent_mono_us: _,
+            probe_id,
+            t0_us,
+        } => match validate_authenticated_sequence(&session, &sender, seq) {
+            Ok(()) => {
+                let receive = monotonic_us();
+                ServerResponse::Pong {
+                    probe_id,
+                    t0_us,
+                    host_receive_us: receive,
+                    host_send_us: monotonic_us(),
                 }
             }
-            let elapsed = start.elapsed();
-            ServerResponse::ThroughputResult {
-                bytes: bytes.saturating_sub(remaining),
-                elapsed_us: elapsed.as_micros(),
-                goodput_bps: goodput_bps(bytes.saturating_sub(remaining), elapsed),
+            Err(code) => ServerResponse::AuthReject { code },
+        },
+        ClientRequest::ThroughputUpload {
+            seq,
+            sender,
+            sent_mono_us: _,
+            bytes,
+        } => match validate_authenticated_sequence(&session, &sender, seq) {
+            Ok(()) => {
+                let start = Instant::now();
+                let mut remaining = bytes;
+                while remaining > 0 {
+                    match recv.read_chunk(64 * 1024, true).await {
+                        Ok(Some(chunk)) => {
+                            remaining = remaining.saturating_sub(chunk.bytes.len() as u64);
+                        }
+                        Ok(None) => break,
+                        Err(error) => return Err(QuicError::Read(error.into())),
+                    }
+                }
+                let elapsed = start.elapsed();
+                ServerResponse::ThroughputResult {
+                    bytes: bytes.saturating_sub(remaining),
+                    elapsed_us: elapsed.as_micros(),
+                    goodput_bps: goodput_bps(bytes.saturating_sub(remaining), elapsed),
+                }
             }
-        }
+            Err(code) => ServerResponse::AuthReject { code },
+        },
     };
 
     write_response(&mut send, &response).await?;
     send.finish().map_err(|_| QuicError::ClosedStream)?;
     Ok(())
+}
+
+fn validate_authenticated_sequence(
+    session: &Arc<Mutex<ConnectionSession>>,
+    sender: &str,
+    seq: u64,
+) -> Result<(), String> {
+    let mut session = lock_session(session);
+    match session.authenticated_device_id.as_deref() {
+        Some(device_id) if device_id == sender => {}
+        Some(_) => return Err("SENDER_MISMATCH".to_string()),
+        None => return Err("AUTH_REQUIRED".to_string()),
+    }
+
+    if !session.sequence_tracker.accept(seq) {
+        return Err("INVALID_SEQUENCE".to_string());
+    }
+
+    Ok(())
+}
+
+fn lock_session(
+    session: &Arc<Mutex<ConnectionSession>>,
+) -> std::sync::MutexGuard<'_, ConnectionSession> {
+    match session.lock() {
+        Ok(session) => session,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 fn validate_handshake(
@@ -607,9 +705,11 @@ fn goodput_bps(bytes: u64, elapsed: Duration) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{atomic::AtomicU64, Arc};
+
     use super::{
-        loopback_bind_addr, AuthRequest, ClientRequest, HelloPayload, QuicClient, QuicServer,
-        RoomCredentials, ServerResponse,
+        loopback_bind_addr, monotonic_us, AuthRequest, ClientRequest, HelloPayload, QuicClient,
+        QuicServer, RoomCredentials, ServerResponse,
     };
     use crate::identity::DeviceIdentity;
 
@@ -684,6 +784,7 @@ mod tests {
             connection,
             credentials: credentials.clone(),
             identity: identity.clone(),
+            next_seq: Arc::new(AtomicU64::new(1)),
         };
         let hello = HelloPayload::local("Test Guest", &identity);
         let join_secret_hash = credentials.join_secret_hash();
@@ -735,6 +836,7 @@ mod tests {
             connection,
             credentials: credentials.clone(),
             identity: identity.clone(),
+            next_seq: Arc::new(AtomicU64::new(1)),
         };
         let hello = HelloPayload::local("Test Guest", &identity);
         let join_secret_hash = credentials.join_secret_hash();
@@ -769,6 +871,97 @@ mod tests {
             second,
             ServerResponse::AuthReject {
                 code: "REPLAYED_AUTH".to_string()
+            }
+        );
+        client.wait_idle().await;
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn rejects_requests_before_authentication() {
+        let credentials = RoomCredentials::new_for_tests();
+        let server = QuicServer::bind(loopback_bind_addr(), credentials).expect("server");
+        let addr = server.local_addr().expect("addr");
+        let certificate = server.certificate.clone();
+        let server_task = tokio::spawn(server.run());
+        let endpoint = super::make_client_endpoint(certificate).expect("endpoint");
+        let connection = endpoint
+            .connect(addr, "localhost")
+            .expect("connect")
+            .await
+            .expect("connected");
+        let client = QuicClient {
+            endpoint,
+            connection,
+            credentials: RoomCredentials::new_for_tests(),
+            identity: test_identity("test-device"),
+            next_seq: Arc::new(AtomicU64::new(1)),
+        };
+
+        let response = client
+            .send_request(ClientRequest::Heartbeat {
+                seq: 1,
+                sender: "test-device".to_string(),
+                sent_mono_us: monotonic_us(),
+                room_state: "LOBBY".to_string(),
+                last_seen_peer_seq: 0,
+            })
+            .await
+            .expect("response");
+
+        assert_eq!(
+            response,
+            ServerResponse::AuthReject {
+                code: "AUTH_REQUIRED".to_string()
+            }
+        );
+        client.wait_idle().await;
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn rejects_duplicate_or_stale_authenticated_sequence() {
+        let credentials = RoomCredentials::new_for_tests();
+        let server = QuicServer::bind(loopback_bind_addr(), credentials.clone()).expect("server");
+        let addr = server.local_addr().expect("addr");
+        let certificate = server.certificate.clone();
+        let server_task = tokio::spawn(server.run());
+        let client = QuicClient::connect(
+            addr,
+            certificate,
+            credentials,
+            test_identity("test-device"),
+            "Test Guest",
+        )
+        .await
+        .expect("client");
+
+        let first = client
+            .send_request(ClientRequest::Heartbeat {
+                seq: 1,
+                sender: "test-device".to_string(),
+                sent_mono_us: monotonic_us(),
+                room_state: "LOBBY".to_string(),
+                last_seen_peer_seq: 0,
+            })
+            .await
+            .expect("first");
+        let duplicate = client
+            .send_request(ClientRequest::Heartbeat {
+                seq: 1,
+                sender: "test-device".to_string(),
+                sent_mono_us: monotonic_us(),
+                room_state: "LOBBY".to_string(),
+                last_seen_peer_seq: 0,
+            })
+            .await
+            .expect("duplicate");
+
+        assert!(matches!(first, ServerResponse::HeartbeatAck { .. }));
+        assert_eq!(
+            duplicate,
+            ServerResponse::AuthReject {
+                code: "INVALID_SEQUENCE".to_string()
             }
         );
         client.wait_idle().await;
