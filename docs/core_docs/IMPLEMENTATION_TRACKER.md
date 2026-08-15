@@ -1154,7 +1154,7 @@ Status:
 ⚠ Create development installer — EXTERNAL VERIFICATION PENDING
 ⚠ Install on trusted friend device — EXTERNAL VERIFICATION PENDING
 🟦 Collect bug reports support
-🟦 Export diagnostic bundle support
+🟦 Export diagnostic bundle JSON support
 ⚠ Export diagnostic bundles from real beta device — EXTERNAL VERIFICATION PENDING
 ⚠ Run real movie nights — EXTERNAL VERIFICATION PENDING
 🟦 Beta readiness gate requires trusted install, diagnostic export, and real movie night
@@ -1168,6 +1168,7 @@ Implemented locally on 2026-08-15:
 - Added redaction for common token, cookie, password, and authorization fields.
 - Added beta event records for trusted friend install, bug reports, diagnostic bundle export, and real movie nights.
 - Added beta readiness gate that remains externally pending until a trusted friend install, diagnostic bundle export, and real movie night are recorded.
+- Added local diagnostic JSON export helper with stable Move Party metadata, beta events, redacted logs, and destination validation.
 - Real installer creation, trusted-device install, real diagnostic export, and real movie-night usage remain externally pending.
 ```
 
