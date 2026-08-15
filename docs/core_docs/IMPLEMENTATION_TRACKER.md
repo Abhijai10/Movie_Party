@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 12
+PHASE 13
 
 Current Release:
 V1 Development
@@ -480,17 +480,29 @@ Implemented locally on 2026-08-15:
 Status:
 
 ```
-⬜
+⚠ PARTIAL / PLATFORM-SPECIFIC
 ```
 
 ```
-⬜ Ghost Mode
-⬜ Privacy Mode
-⬜ Global shortcut Windows
-⬜ Global shortcut macOS
-⬜ Camera stays unchanged under Ghost
-⬜ Camera disabled under Privacy
-⬜ Mic disabled under Privacy
+🟦 Ghost Mode
+🟦 Privacy Mode
+⚠ Global shortcut Windows — EXTERNAL VERIFICATION PENDING
+⚠ Global shortcut macOS — local in-window shortcut implemented; OS-global registration pending later Tauri integration
+🟦 Camera stays unchanged under Ghost
+🟦 Camera disabled under Privacy
+🟦 Mic disabled under Privacy
+```
+
+Notes:
+
+```
+Implemented locally on 2026-08-15:
+- Added native privacy state model for Ghost Mode and Privacy Mode.
+- Ghost Mode hides local social/control overlays without changing camera or microphone state.
+- Privacy Mode enables Ghost Mode and disables camera/microphone intent.
+- Exiting Privacy Mode restores UI but does not re-enable camera or microphone.
+- Cinema Mode handles Ctrl/Cmd+Shift+M and Ctrl/Cmd+Shift+P while app window is focused.
+- OS-level global shortcut registration and real camera/microphone device effects remain pending for later native integration/manual platform testing.
 ```
 
 ---
@@ -1195,6 +1207,46 @@ Documentation Updated:
 
 Next permitted task:
 - Begin Phase 13 Ghost Mode and Privacy Mode.
+
+---
+
+## 2026-08-15
+
+Active Phase:
+Phase 13
+
+Completed:
+- Added native Ghost/Privacy state model under `src-tauri/src/privacy`.
+- Added tests proving Ghost Mode does not change camera/microphone state.
+- Added tests proving Privacy Mode disables camera/microphone and does not re-enable them on exit.
+- Added focused-window shortcuts in Cinema Mode for Ctrl/Cmd+Shift+M and Ctrl/Cmd+Shift+P.
+- Added UI hiding for camera, chat, reactions, status overlays, and controls while Ghost/Privacy is active, with temporary confirmation notices only.
+
+Tests:
+- `cargo fmt --check` passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` passed.
+- `cargo test privacy` passed.
+- `cargo test` passed after approving local UDP socket access for existing QUIC loopback tests.
+- `pnpm lint` passed.
+- `pnpm test` passed.
+- `pnpm build` passed.
+- `pnpm format` passed.
+
+Failures:
+- Initial `pnpm format` found formatting drift in `src/cinema/CinemaMode.tsx`; fixed with project formatter.
+
+Cross-platform:
+- Windows: ⚠ EXTERNAL VERIFICATION PENDING.
+- macOS: Automated validation passed locally on 2026-08-15; OS-global shortcut registration and real device mute/camera behavior pending.
+
+Blockers:
+- OS-level global shortcuts and real camera/mic device control require later Tauri/call integration and manual platform verification.
+
+Documentation Updated:
+- `docs/core_docs/IMPLEMENTATION_TRACKER.md`
+
+Next permitted task:
+- Begin Phase 14 video call spike.
 
 ---
 

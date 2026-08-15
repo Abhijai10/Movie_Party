@@ -27,6 +27,8 @@ const reactions = ["😂", "❤️", "😮", "🔥", "😭", "👏"] as const;
 const maxReactionEvents = 5;
 const reactionWindowMs = 3_000;
 const chatBodyLimitBytes = 2_000;
+const privacyNoticeMs = 2_200;
+const ghostNoticeMs = 800;
 
 export function CinemaMode({ onLeave }: CinemaModeProps) {
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
@@ -38,11 +40,25 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
   ]);
   const [reactionEvents, setReactionEvents] = useState<number[]>([]);
   const [reactionWarning, setReactionWarning] = useState("");
+  const [isGhostMode, setIsGhostMode] = useState(false);
+  const [isPrivacyMode, setIsPrivacyMode] = useState(false);
+  const [cameraEnabled, setCameraEnabled] = useState(true);
+  const [microphoneEnabled, setMicrophoneEnabled] = useState(false);
+  const [privacyNotice, setPrivacyNotice] = useState("");
   const visibleMessages = messages.slice(-3);
   const encodedDraftLength = useMemo(() => new TextEncoder().encode(draft).length, [draft]);
   const isDraftTooLong = encodedDraftLength > chatBodyLimitBytes;
 
   useEffect(() => {
+    let noticeTimeout: number | undefined;
+    const showNotice = (message: string, durationMs: number) => {
+      setPrivacyNotice(message);
+      window.clearTimeout(noticeTimeout);
+      noticeTimeout = window.setTimeout(() => {
+        setPrivacyNotice("");
+      }, durationMs);
+    };
+
     const handleKeyDown = (event: KeyboardEvent) => {
       const target = event.target;
       const isTextInput =
@@ -53,6 +69,46 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
       if (event.key === "Escape") {
         setIsComposing(false);
         setIsHistoryOpen(false);
+        return;
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "m") {
+        event.preventDefault();
+        if (isPrivacyMode) {
+          showNotice("Privacy Mode is active", ghostNoticeMs);
+          return;
+        }
+
+        setIsGhostMode((current) => {
+          const next = !current;
+          showNotice(next ? "Ghost Mode on" : "Ghost Mode off", ghostNoticeMs);
+          return next;
+        });
+        setIsComposing(false);
+        setIsHistoryOpen(false);
+        return;
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "p") {
+        event.preventDefault();
+        setIsPrivacyMode((current) => {
+          if (current) {
+            setIsGhostMode(false);
+            showNotice(
+              "Privacy Mode ended. Camera and microphone remain disabled.",
+              privacyNoticeMs,
+            );
+            return false;
+          }
+
+          setCameraEnabled(false);
+          setMicrophoneEnabled(false);
+          setIsGhostMode(true);
+          setIsComposing(false);
+          setIsHistoryOpen(false);
+          showNotice("Privacy Mode on", ghostNoticeMs);
+          return true;
+        });
         return;
       }
 
@@ -75,8 +131,9 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
 
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
+      window.clearTimeout(noticeTimeout);
     };
-  }, []);
+  }, [isPrivacyMode]);
 
   const sendMessage = (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -104,6 +161,10 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
   };
 
   const sendReaction = (reaction: string) => {
+    if (isGhostMode) {
+      return;
+    }
+
     const now = Date.now();
     const recentEvents = reactionEvents.filter((eventTime) => now - eventTime < reactionWindowMs);
 
@@ -132,14 +193,19 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
 
   return (
     <main className="cinema-shell" aria-label="Cinema mode">
-      <section className="movie-surface" aria-label="Movie">
+      <section
+        className={isGhostMode ? "movie-surface privacy-hidden" : "movie-surface"}
+        aria-label="Movie"
+      >
         <div className="movie-frame">
           <div className="movie-light" />
           <span>Interstellar</span>
         </div>
         <article className="camera-card" aria-label="Rahul camera">
           <strong>Rahul</strong>
-          <span>Camera on - Mic muted</span>
+          <span>
+            Camera {cameraEnabled ? "on" : "off"} - Mic {microphoneEnabled ? "on" : "muted"}
+          </span>
         </article>
         <article className="chat-bubble" aria-label="Recent chat message">
           {visibleMessages.map((message) => (
@@ -172,6 +238,11 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
           <h2>Rahul disconnected.</h2>
           <p>The movie has been paused. Reconnecting...</p>
         </section>
+        {privacyNotice ? (
+          <div className="privacy-toast" role="status" aria-live="polite">
+            {privacyNotice}
+          </div>
+        ) : null}
         {isComposing ? (
           <form className="chat-compose" aria-label="Chat compose" onSubmit={sendMessage}>
             <input
@@ -241,10 +312,10 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
             +10
           </button>
           <button type="button" aria-label="Mute microphone">
-            Mic
+            {microphoneEnabled ? "Mic On" : "Mic"}
           </button>
           <button type="button" aria-label="Toggle camera">
-            Camera
+            {cameraEnabled ? "Camera" : "Camera Off"}
           </button>
           <button
             type="button"
