@@ -38,7 +38,7 @@ pub struct RoomCredentials {
 impl RoomCredentials {
     pub fn new_for_tests() -> Self {
         Self {
-            room_id: "test-room".to_string(),
+            room_id: "EjRWeJCrze8BI0VniavN7w".to_string(),
             join_secret: "test-secret".to_string(),
         }
     }
@@ -624,6 +624,12 @@ fn validate_handshake(
         };
     }
 
+    if !is_base64url_128bit(&auth.room_id) {
+        return ServerResponse::AuthReject {
+            code: "INVALID_ROOM_ID".to_string(),
+        };
+    }
+
     if auth.room_id != credentials.room_id
         || auth.join_secret_hash != credentials.join_secret_hash()
     {
@@ -661,6 +667,12 @@ fn validate_handshake(
 
 fn is_uuid_v7(value: &str) -> bool {
     Uuid::parse_str(value).is_ok_and(|uuid| uuid.get_version_num() == 7)
+}
+
+fn is_base64url_128bit(value: &str) -> bool {
+    URL_SAFE_NO_PAD
+        .decode(value)
+        .is_ok_and(|bytes| bytes.len() == 16)
 }
 
 async fn write_request(
@@ -780,6 +792,60 @@ mod tests {
             QuicClient::connect(addr, certificate, wrong, test_identity(), "Test Guest").await;
 
         assert!(result.is_err());
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn rejects_malformed_room_id() {
+        let credentials = RoomCredentials::new_for_tests();
+        let server = QuicServer::bind(loopback_bind_addr(), credentials.clone()).expect("server");
+        let addr = server.local_addr().expect("addr");
+        let certificate = server.certificate.clone();
+        let server_task = tokio::spawn(server.run());
+        let identity = test_identity();
+        let endpoint = super::make_client_endpoint(certificate).expect("endpoint");
+        let connection = endpoint
+            .connect(addr, "localhost")
+            .expect("connect")
+            .await
+            .expect("connected");
+        let client = QuicClient {
+            endpoint,
+            connection,
+            credentials: credentials.clone(),
+            identity: identity.clone(),
+            next_seq: Arc::new(AtomicU64::new(1)),
+        };
+        let hello = HelloPayload::local("Test Guest", &identity);
+        let malformed_room_id = "not-base64url-room-id".to_string();
+        let join_secret_hash = credentials.join_secret_hash();
+        let invite_nonce = "nonce".to_string();
+        let auth = AuthRequest {
+            room_id: malformed_room_id.clone(),
+            join_secret_hash: join_secret_hash.clone(),
+            invite_nonce: invite_nonce.clone(),
+            device_signature: identity.sign_auth_request(
+                &malformed_room_id,
+                &join_secret_hash,
+                &invite_nonce,
+            ),
+        };
+
+        let response = client
+            .send_request(ClientRequest::HelloAuth {
+                hello: Box::new(hello),
+                auth: Box::new(auth),
+            })
+            .await
+            .expect("auth response");
+
+        assert_eq!(
+            response,
+            ServerResponse::AuthReject {
+                code: "INVALID_ROOM_ID".to_string()
+            }
+        );
+        client.wait_idle().await;
         server_task.abort();
     }
 
