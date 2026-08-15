@@ -9,6 +9,7 @@ pub mod notifications;
 pub mod privacy;
 pub mod protocol;
 pub mod providers;
+pub mod resilience;
 pub mod room;
 pub mod scheduling;
 pub mod storage;

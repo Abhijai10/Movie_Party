@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 26
+PHASE 29
 
 Current Release:
 V1 Development
@@ -26,7 +26,7 @@ Architecture:
 LOCKED
 
 Critical Blockers:
-None for independent local implementation. External Phase 0/1 verification remains pending.
+Independent local implementation has reached the external certification/regression gates. External Phase 0/1 verification and Phase 28-31 manual/device/network verification remain pending.
 ````
 
 ---
@@ -1012,19 +1012,41 @@ TBD
 Status:
 
 ```
-⬜
+🟦 IMPLEMENTED / TESTING REQUIRED
 ```
 
 ```
-⬜ Chrome crash
-⬜ Guest crash
-⬜ Host crash
-⬜ Tailscale disconnect
-⬜ WiFi disconnect
-⬜ Sleep/wake
-⬜ Provider logout
-⬜ Cache corruption
-⬜ Missing local file
+🟦 Chrome crash recovery policy
+🟦 Guest crash recovery policy
+🟦 Host crash recovery policy
+🟦 Tailscale disconnect recovery policy
+🟦 Tailscale reconnect recovery policy
+🟦 Network change recovery policy
+🟦 WiFi disconnect recovery policy
+🟦 Sleep/wake recovery policy
+🟦 Provider logout recovery policy
+🟦 Cache corruption recovery policy
+🟦 Missing local file recovery policy
+⚠ Chrome crash drill — EXTERNAL VERIFICATION PENDING
+⚠ Guest crash drill — EXTERNAL VERIFICATION PENDING
+⚠ Host crash drill — EXTERNAL VERIFICATION PENDING
+⚠ Tailscale disconnect/reconnect drill — EXTERNAL VERIFICATION PENDING
+⚠ WiFi disconnect drill — EXTERNAL VERIFICATION PENDING
+⚠ Sleep/wake drill — EXTERNAL VERIFICATION PENDING
+⚠ Provider logout drill — EXTERNAL VERIFICATION PENDING
+⚠ Cache corruption drill — EXTERNAL VERIFICATION PENDING
+⚠ Missing local file drill — EXTERNAL VERIFICATION PENDING
+```
+
+Notes:
+
+```
+Implemented locally on 2026-08-15:
+- Added explicit resilience recovery planning for Chrome crash, host/guest crash, Tailscale disconnect/reconnect, network change, WiFi disconnect, sleep/wake, provider logout, cache corruption, and missing local file.
+- Every recovery plan pauses both participants before recovery, preserving strict sync behavior.
+- Provider logout and missing local file require user action instead of silent fallback.
+- Tailscale reconnect and network-change events revalidate networking and rebuild buffers before resume.
+- Manual crash, network, sleep/wake, provider-session, and cache-corruption drills require real devices/environments and remain externally pending.
 ```
 
 ---
@@ -1127,6 +1149,10 @@ Status:
 
 ```
 Phase 0 cannot be marked COMPLETE until Windows build/launch and hosted CI are verified externally.
+Phase 28 cannot be marked COMPLETE until manual resilience drills are executed on real devices/networks.
+Phase 29 requires college WiFi with Tailscale and real 2GB/4GB/8GB movie transfer/call/provider tests.
+Phase 30 requires Windows/macOS cross-platform pairs.
+Phase 31 requires a trusted friend device and real movie-night beta usage.
 ```
 
 ---
