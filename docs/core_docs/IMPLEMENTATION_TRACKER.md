@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 8
+PHASE 9
 
 Current Release:
 V1 Development
@@ -376,18 +376,18 @@ Test:
 Status:
 
 ```
-⬜
+⚠ PARTIAL / PLATFORM-SPECIFIC
 ```
 
 ```
-⬜ SQLite schedule table
-⬜ Create schedule
+🟦 SQLite schedule table
+🟦 Create schedule model
 ⬜ Send schedule
 ⬜ Guest accept
-⬜ Local notification registration
-⬜ Preload calculation
+⚠ Local notification registration — notification plan implemented; OS registration pending
+🟦 Preload calculation
 ⬜ Background transfer
-⬜ Offline peer state
+🟦 Offline peer state
 ⬜ Resume when peer returns
 ```
 
