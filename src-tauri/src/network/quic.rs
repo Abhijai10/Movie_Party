@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::identity::{verify_auth_request_signature, DeviceIdentity};
+
 pub const QUIC_TRANSPORT_NAME: &str = "quic";
 pub const MOVE_PARTY_ALPN: &[&[u8]] = &[b"moveparty-v1"];
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
@@ -53,16 +55,16 @@ pub struct HelloPayload {
 }
 
 impl HelloPayload {
-    pub fn local(display_name: impl Into<String>) -> Self {
+    pub fn local(display_name: impl Into<String>, identity: &DeviceIdentity) -> Self {
         Self {
-            device_id: Uuid::now_v7().to_string(),
+            device_id: identity.device_id.clone(),
             display_name: display_name.into(),
             platform: current_platform().to_string(),
             arch: std::env::consts::ARCH.to_string(),
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_major: crate::PROTOCOL_MAJOR,
             protocol_minor: crate::PROTOCOL_MINOR,
-            public_key: "phase1-placeholder-public-key".to_string(),
+            public_key: identity.public_key_base64(),
         }
     }
 }
@@ -210,6 +212,7 @@ pub struct QuicClient {
     endpoint: Endpoint,
     connection: Connection,
     credentials: RoomCredentials,
+    identity: DeviceIdentity,
 }
 
 impl QuicClient {
@@ -217,14 +220,17 @@ impl QuicClient {
         server_addr: SocketAddr,
         server_certificate: CertificateDer<'static>,
         credentials: RoomCredentials,
-        hello: HelloPayload,
+        identity: DeviceIdentity,
+        display_name: impl Into<String>,
     ) -> Result<Self, QuicError> {
         let endpoint = make_client_endpoint(server_certificate)?;
         let connection = endpoint.connect(server_addr, "localhost")?.await?;
+        let hello = HelloPayload::local(display_name, &identity);
         let client = Self {
             endpoint,
             connection,
             credentials,
+            identity,
         };
         let response = client
             .send_request(ClientRequest::HelloAuth {
@@ -310,11 +316,17 @@ impl QuicClient {
     }
 
     fn auth_request(&self) -> AuthRequest {
+        let invite_nonce = Uuid::now_v7().to_string();
+        let join_secret_hash = self.credentials.join_secret_hash();
         AuthRequest {
             room_id: self.credentials.room_id.clone(),
-            join_secret_hash: self.credentials.join_secret_hash(),
-            invite_nonce: Uuid::now_v7().to_string(),
-            device_signature: "phase1-placeholder-signature".to_string(),
+            join_secret_hash: join_secret_hash.clone(),
+            invite_nonce: invite_nonce.clone(),
+            device_signature: self.identity.sign_auth_request(
+                &self.credentials.room_id,
+                &join_secret_hash,
+                &invite_nonce,
+            ),
         }
     }
 
@@ -473,6 +485,21 @@ fn validate_handshake(
         };
     }
 
+    if verify_auth_request_signature(
+        &hello.public_key,
+        &auth.device_signature,
+        &auth.room_id,
+        &auth.join_secret_hash,
+        &auth.invite_nonce,
+        &hello.device_id,
+    )
+    .is_err()
+    {
+        return ServerResponse::AuthReject {
+            code: "INVALID_SIGNATURE".to_string(),
+        };
+    }
+
     ServerResponse::AuthAccept(AuthAccept {
         session_id: Uuid::now_v7().to_string(),
         room_role: "guest".to_string(),
@@ -543,7 +570,15 @@ fn goodput_bps(bytes: u64, elapsed: Duration) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{loopback_bind_addr, HelloPayload, QuicClient, QuicServer, RoomCredentials};
+    use super::{
+        loopback_bind_addr, AuthRequest, ClientRequest, HelloPayload, QuicClient, QuicServer,
+        RoomCredentials, ServerResponse,
+    };
+    use crate::identity::DeviceIdentity;
+
+    fn test_identity(device_id: &str) -> DeviceIdentity {
+        DeviceIdentity::from_seed_for_tests(device_id, [9; 32])
+    }
 
     #[tokio::test]
     async fn authenticates_heartbeat_and_measures_rtt() {
@@ -557,7 +592,8 @@ mod tests {
             addr,
             certificate,
             credentials,
-            HelloPayload::local("Test Guest"),
+            test_identity("test-device"),
+            "Test Guest",
         )
         .await
         .expect("client");
@@ -579,10 +615,67 @@ mod tests {
 
         let mut wrong = credentials;
         wrong.join_secret = "wrong".to_string();
-        let result =
-            QuicClient::connect(addr, certificate, wrong, HelloPayload::local("Test Guest")).await;
+        let result = QuicClient::connect(
+            addr,
+            certificate,
+            wrong,
+            test_identity("test-device"),
+            "Test Guest",
+        )
+        .await;
 
         assert!(result.is_err());
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn rejects_tampered_device_signature() {
+        let credentials = RoomCredentials::new_for_tests();
+        let server = QuicServer::bind(loopback_bind_addr(), credentials.clone()).expect("server");
+        let addr = server.local_addr().expect("addr");
+        let certificate = server.certificate.clone();
+        let server_task = tokio::spawn(server.run());
+        let identity = test_identity("test-device");
+        let endpoint = super::make_client_endpoint(certificate).expect("endpoint");
+        let connection = endpoint
+            .connect(addr, "localhost")
+            .expect("connect")
+            .await
+            .expect("connected");
+        let client = QuicClient {
+            endpoint,
+            connection,
+            credentials: credentials.clone(),
+            identity: identity.clone(),
+        };
+        let hello = HelloPayload::local("Test Guest", &identity);
+        let join_secret_hash = credentials.join_secret_hash();
+        let auth = AuthRequest {
+            room_id: credentials.room_id.clone(),
+            join_secret_hash: join_secret_hash.clone(),
+            invite_nonce: "nonce".to_string(),
+            device_signature: identity.sign_auth_request(
+                &credentials.room_id,
+                &join_secret_hash,
+                "different-nonce",
+            ),
+        };
+
+        let response = client
+            .send_request(ClientRequest::HelloAuth {
+                hello: Box::new(hello),
+                auth: Box::new(auth),
+            })
+            .await
+            .expect("auth response");
+
+        assert_eq!(
+            response,
+            ServerResponse::AuthReject {
+                code: "INVALID_SIGNATURE".to_string()
+            }
+        );
+        client.wait_idle().await;
         server_task.abort();
     }
 
@@ -598,7 +691,8 @@ mod tests {
             addr,
             certificate,
             credentials,
-            HelloPayload::local("Test Guest"),
+            test_identity("test-device"),
+            "Test Guest",
         )
         .await
         .expect("client");
