@@ -142,6 +142,7 @@ Tasks:
 🟦 HELLO rejects unsupported V1 platforms
 🟦 Implement authentication
 🟦 AUTH_REQUEST validates Base64URL 128-bit room IDs
+🟦 AUTH_REQUEST validates Base64URL 256-bit join secret hashes
 🟦 Ed25519 identity public key in HELLO
 🟦 AUTH_REQUEST device signature validation
 🟦 AUTH_REQUEST invite nonce replay rejection
@@ -181,6 +182,7 @@ Hardened locally on 2026-08-15:
 - HELLO rejects future protocol minor versions that this host cannot safely interpret.
 - HELLO rejects unsupported V1 platform values before room authentication succeeds.
 - AUTH_REQUEST rejects malformed room IDs that are not 128-bit Base64URL-without-padding values.
+- AUTH_REQUEST rejects malformed join secret hashes that are not 256-bit Base64URL-without-padding values.
 - AUTH_REQUEST signatures cover room ID, join secret hash, invite nonce, and device ID.
 - Host-side QUIC auth rejects invalid room secrets, tampered device signatures, and replayed invite nonces in loopback tests.
 - Post-auth QUIC requests require an authenticated sender and monotonic per-connection sequence; unauthenticated, mismatched, duplicate, and stale control requests are rejected locally.
