@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 22
+PHASE 23
 
 Current Release:
 V1 Development
@@ -866,16 +866,27 @@ Implemented locally on 2026-08-15:
 Status:
 
 ```
-⬜
+🟦 IMPLEMENTED / TESTING REQUIRED
 ```
 
 ```
-⬜ Encoded media stream
-⬜ Guest receive buffer
-⬜ Decoder
-⬜ Presentation timestamps
-⬜ Audio
-⬜ A/V sync
+🟦 Encoded media stream
+🟦 Guest receive buffer
+⚠ Decoder — EXTERNAL VERIFICATION PENDING with real encoded provider stream
+🟦 Presentation timestamps
+🟦 Audio
+🟦 A/V sync
+```
+
+Notes:
+
+```
+Implemented locally on 2026-08-15:
+- Added shared stream packet format for encoded video/audio packets with sequence, stream kind, keyframe flag, PTS, duration, and payload.
+- Added packet encode/decode validation with typed errors for malformed input.
+- Added guest presentation buffer with seconds-of-media readiness check and PTS-based release.
+- Added duplicate/stale packet rejection.
+- Real decoder integration and playback of encoded provider streams remain pending capture/encoder availability and manual integration testing.
 ```
 
 ---
@@ -1707,6 +1718,44 @@ Documentation Updated:
 
 Next permitted task:
 - Begin Phase 23 Shared Mode transport.
+
+---
+
+## 2026-08-15
+
+Active Phase:
+Phase 23
+
+Completed:
+- Added shared stream packet format for encoded video/audio media.
+- Added typed packet decoder errors for malformed, wrong-magic, unknown-kind, and length-mismatched packets.
+- Added guest presentation buffer with target buffered-duration readiness.
+- Added PTS-based packet release and duplicate/stale packet rejection.
+
+Tests:
+- `cargo fmt --check` passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` passed.
+- `cargo test shared_stream` passed.
+- `cargo test` passed after approving local UDP socket access for existing QUIC loopback tests.
+- `pnpm lint` passed.
+- `pnpm build` passed.
+- `pnpm format` passed.
+
+Failures:
+- Initial `cargo fmt --check` wanted wrapping in the shared-stream module; fixed with `cargo fmt`.
+
+Cross-platform:
+- Windows: Automated validation passed locally; real shared-stream decoder/playback over QUIC pending platform/integration testing.
+- macOS: Automated validation passed locally on 2026-08-15; real shared-stream decoder/playback over QUIC pending integration testing.
+
+Blockers:
+- Real decoder playback requires usable capture/encode input and guest player integration.
+
+Documentation Updated:
+- `docs/core_docs/IMPLEMENTATION_TRACKER.md`
+
+Next permitted task:
+- Begin Phase 24 host loopback.
 
 ---
 
