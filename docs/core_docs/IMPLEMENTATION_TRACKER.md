@@ -138,6 +138,7 @@ Tasks:
 🟦 Bind host to Tailscale address
 🟦 Implement HELLO
 🟦 HELLO validates UUIDv7 device IDs
+🟦 HELLO rejects future minor protocol versions
 🟦 HELLO rejects unsupported V1 platforms
 🟦 Implement authentication
 🟦 Ed25519 identity public key in HELLO
@@ -176,6 +177,7 @@ Hardened locally on 2026-08-15:
 - Replaced Phase 1 placeholder public-key/signature values with Ed25519 device identity support.
 - HELLO now carries the local identity public key.
 - HELLO validates that device IDs are UUIDv7 strings before room authentication succeeds.
+- HELLO rejects future protocol minor versions that this host cannot safely interpret.
 - HELLO rejects unsupported V1 platform values before room authentication succeeds.
 - AUTH_REQUEST signatures cover room ID, join secret hash, invite nonce, and device ID.
 - Host-side QUIC auth rejects invalid room secrets, tampered device signatures, and replayed invite nonces in loopback tests.
