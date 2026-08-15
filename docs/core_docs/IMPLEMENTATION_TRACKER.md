@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 16
+PHASE 17
 
 Current Release:
 V1 Development
@@ -637,16 +637,27 @@ Implemented locally on 2026-08-15:
 Status:
 
 ```
-⬜
+🟦 IMPLEMENTED / TESTING REQUIRED
 ```
 
 ```
-⬜ Media detection
-⬜ Play
-⬜ Pause
-⬜ Seek
-⬜ Position
-⬜ Buffer detection
+🟦 Media detection
+🟦 Play
+🟦 Pause
+🟦 Seek
+🟦 Position
+🟦 Buffer detection
+```
+
+Notes:
+
+```
+Implemented locally on 2026-08-15:
+- Added provider-neutral generic HTML media adapter.
+- Adapter emits CDP Runtime.evaluate commands for media detection, identification, position, player state, buffer state, play, pause, seek, and playback-rate control.
+- Added snapshot mapping for playing/paused/buffering/ended state and buffer-ahead calculation.
+- Tests verify generic adapter uses only HTML media detection and does not include provider-specific selectors.
+- Live ordinary non-DRM web-video testing through managed Chrome remains pending external/manual verification.
 ```
 
 ---
@@ -1404,6 +1415,41 @@ Documentation Updated:
 
 Next permitted task:
 - Begin Phase 17 generic provider.
+
+---
+
+## 2026-08-15
+
+Active Phase:
+Phase 17
+
+Completed:
+- Added generic HTML media provider adapter under `src-tauri/src/providers/generic.rs`.
+- Added provider-neutral CDP commands for detect, identify, position, state, buffer, play, pause, seek, and playback-rate control.
+- Added media snapshot helpers for player-state and buffer-ahead calculation.
+- Added tests proving no provider-specific selectors are present in generic detection.
+
+Tests:
+- `cargo fmt --check` passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` passed.
+- `cargo test providers::generic` passed.
+- `cargo test` passed after approving local UDP socket access for existing QUIC loopback tests.
+
+Failures:
+- None.
+
+Cross-platform:
+- Windows: ⚠ EXTERNAL VERIFICATION PENDING.
+- macOS: Automated validation passed locally on 2026-08-15; live ordinary non-DRM web-video test pending.
+
+Blockers:
+- Live provider/browser testing requires managed Chrome launch and a non-DRM media page.
+
+Documentation Updated:
+- `docs/core_docs/IMPLEMENTATION_TRACKER.md`
+
+Next permitted task:
+- Begin Phase 18 YouTube adapter.
 
 ---
 
