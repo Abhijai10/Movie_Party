@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 29
+PHASE 30
 
 Current Release:
 V1 Development
@@ -1056,7 +1056,7 @@ Implemented locally on 2026-08-15:
 Status:
 
 ```
-⬜
+🟦 IMPLEMENTED / TESTING REQUIRED
 ```
 
 Environment:
@@ -1070,23 +1070,42 @@ Tailscale active
 Local:
 
 ```
-⬜ 2GB
-⬜ 4GB
-⬜ 8GB
+🟦 2GB measurement scenario support
+🟦 4GB measurement scenario support
+🟦 8GB measurement scenario support
+⚠ 2GB real college WiFi run — EXTERNAL VERIFICATION PENDING
+⚠ 4GB real college WiFi run — EXTERNAL VERIFICATION PENDING
+⚠ 8GB real college WiFi run — EXTERNAL VERIFICATION PENDING
 ```
 
 Call:
 
 ```
-⬜ Off
-⬜ Voice
-⬜ Video
+🟦 Off measurement scenario support
+🟦 Voice measurement scenario support
+🟦 Video measurement scenario support
+⚠ Off real college WiFi run — EXTERNAL VERIFICATION PENDING
+⚠ Voice real college WiFi run — EXTERNAL VERIFICATION PENDING
+⚠ Video real college WiFi run — EXTERNAL VERIFICATION PENDING
 ```
 
 Provider Shared:
 
 ```
-⬜ All available provider combinations
+🟦 Provider Shared measurement record support
+⚠ All available provider combinations — EXTERNAL VERIFICATION PENDING
+```
+
+Notes:
+
+```
+Implemented locally on 2026-08-15:
+- Added telemetry certification model for Phase 29 measurement records.
+- Required local movie matrix covers 2GB, 4GB, and 8GB movies across call off, voice-only, and video modes.
+- Certification samples record actual goodput, buffering events, max sync drift, and Tailscale path.
+- Summary logic flags low goodput, buffering, excessive drift, and relayed/unknown Tailscale paths as tuning inputs.
+- The code cannot mark Phase 29 ready until all required real local-movie measurement scenarios have samples.
+- Real college WiFi, Tailscale, provider shared, and media/call runs remain externally pending.
 ```
 
 ---
