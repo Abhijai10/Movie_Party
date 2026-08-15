@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 pub const SHARED_STREAM_MAGIC: &[u8; 4] = b"MPSF";
-pub const DEFAULT_PRESENTATION_BUFFER_US: u64 = 2_000_000;
+pub const SHARED_MODE_PRESENTATION_LATENCY_US: u64 = 5_000_000;
+pub const DEFAULT_PRESENTATION_BUFFER_US: u64 = SHARED_MODE_PRESENTATION_LATENCY_US;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -106,6 +107,44 @@ pub struct PresentationBuffer {
     last_released_sequence: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SharedModeTimeline {
+    pub source_position_us: u64,
+    pub encoded_position_us: u64,
+    pub presentation_position_us: u64,
+}
+
+impl SharedModeTimeline {
+    pub fn from_source(source_position_us: u64, encode_latency_us: u64) -> Self {
+        let encoded_position_us = source_position_us.saturating_sub(encode_latency_us);
+        let presentation_position_us =
+            encoded_position_us.saturating_sub(SHARED_MODE_PRESENTATION_LATENCY_US);
+
+        Self {
+            source_position_us,
+            encoded_position_us,
+            presentation_position_us,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostLoopbackPlan {
+    pub host_consumes_encoded_stream: bool,
+    pub guest_consumes_encoded_stream: bool,
+    pub chrome_source_visible_to_user: bool,
+    pub presentation_latency_us: u64,
+}
+
+pub fn host_loopback_plan() -> HostLoopbackPlan {
+    HostLoopbackPlan {
+        host_consumes_encoded_stream: true,
+        guest_consumes_encoded_stream: true,
+        chrome_source_visible_to_user: false,
+        presentation_latency_us: SHARED_MODE_PRESENTATION_LATENCY_US,
+    }
+}
+
 impl PresentationBuffer {
     pub fn push(&mut self, packet: EncodedMediaPacket) -> Result<(), SharedStreamError> {
         if packet.sequence <= self.last_released_sequence
@@ -195,13 +234,21 @@ mod tests {
     fn presentation_buffer_waits_for_seconds_of_media() {
         let mut buffer = PresentationBuffer::default();
 
-        buffer
-            .push(packet(1, StreamKind::Video, 0, 1_000_000))
-            .expect("packet");
+        for sequence in 1..=4 {
+            buffer
+                .push(packet(
+                    sequence,
+                    StreamKind::Video,
+                    sequence * 1_000_000,
+                    1_000_000,
+                ))
+                .expect("packet");
+        }
+
         assert!(!buffer.ready_for_presentation(DEFAULT_PRESENTATION_BUFFER_US));
 
         buffer
-            .push(packet(2, StreamKind::Audio, 0, 1_000_000))
+            .push(packet(5, StreamKind::Audio, 5_000_000, 1_000_000))
             .expect("packet");
         assert!(buffer.ready_for_presentation(DEFAULT_PRESENTATION_BUFFER_US));
     }
@@ -225,5 +272,24 @@ mod tests {
             buffer.push(packet(2, StreamKind::Audio, 20_000, 20_000)),
             Err(SharedStreamError::DuplicateOrStale)
         );
+    }
+
+    #[test]
+    fn host_loopback_plan_keeps_chrome_source_out_of_user_presentation() {
+        let plan = host_loopback_plan();
+
+        assert!(plan.host_consumes_encoded_stream);
+        assert!(plan.guest_consumes_encoded_stream);
+        assert!(!plan.chrome_source_visible_to_user);
+        assert_eq!(plan.presentation_latency_us, 5_000_000);
+    }
+
+    #[test]
+    fn shared_timeline_uses_delayed_presentation_as_authoritative_position() {
+        let timeline = SharedModeTimeline::from_source(730_000_000, 1_000_000);
+
+        assert_eq!(timeline.source_position_us, 730_000_000);
+        assert_eq!(timeline.encoded_position_us, 729_000_000);
+        assert_eq!(timeline.presentation_position_us, 724_000_000);
     }
 }
