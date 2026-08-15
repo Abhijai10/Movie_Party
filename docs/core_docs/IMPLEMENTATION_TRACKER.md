@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 10
+PHASE 11
 
 Current Release:
 V1 Development
@@ -416,20 +416,30 @@ Status:
 Status:
 
 ```
-⬜
+🟦 IMPLEMENTED / TESTING REQUIRED
 ```
 
 ```
-⬜ Home
-⬜ Create Party
-⬜ Join
-⬜ Lobby
-⬜ Ready Check
-⬜ Cinema
-⬜ Control Dock
-⬜ Buffer UI
-⬜ Reconnect UI
-⬜ End Party UI
+🟦 Home
+🟦 Create Party
+🟦 Join
+🟦 Lobby
+🟦 Ready Check
+🟦 Cinema
+🟦 Control Dock
+🟦 Buffer UI
+🟦 Reconnect UI
+🟦 End Party UI
+```
+
+Notes:
+
+```
+Implemented locally on 2026-08-15:
+- Added React navigation for home, create party, join party, lobby, ready check, cinema, and end party confirmation.
+- Added cinematic fullscreen-style Cinema Mode with dominant movie surface, floating camera, transient chat, control dock, buffering overlay, and reconnect overlay.
+- Added responsive styling that avoids permanent sidebars and keeps social/status UI as overlays.
+- Current UI uses representative local state only; backend command wiring and manual visual/device QA remain pending in later integration phases.
 ```
 
 ---
@@ -1095,6 +1105,42 @@ Documentation Updated:
 
 Next permitted task:
 - Finish Phase 0 external verification, then begin Phase 1 Tailscale connectivity spike.
+
+---
+
+## 2026-08-15
+
+Active Phase:
+Phase 11
+
+Completed:
+- Added the locally navigable Cinema UI flow: home, create party, join party, lobby, ready check, cinema, and end party confirmation.
+- Added Cinema Mode with movie-dominant layout, floating camera, transient chat, control dock, buffering state, and reconnect state.
+- Added responsive frontend styling aligned with the overlay-first UI spec.
+- Added `PRODUCT.md` for Impeccable product context used during UI implementation.
+
+Tests:
+- `pnpm lint` passed.
+- `pnpm test` passed.
+- `pnpm build` passed.
+- `pnpm format` passed.
+
+Failures:
+- Initial `pnpm lint` failed on shorthand callbacks returning void; fixed by using named route handlers.
+- Initial `pnpm format` found formatting drift in new UI files; fixed with project formatter.
+
+Cross-platform:
+- Windows: ⚠ EXTERNAL VERIFICATION PENDING.
+- macOS: Frontend build passed locally on 2026-08-15; manual visual QA pending.
+
+Blockers:
+- Backend command wiring, real playback state, and manual visual/device QA remain pending for later integration.
+
+Documentation Updated:
+- `docs/core_docs/IMPLEMENTATION_TRACKER.md`
+
+Next permitted task:
+- Begin Phase 12 chat and reactions.
 
 ---
 
