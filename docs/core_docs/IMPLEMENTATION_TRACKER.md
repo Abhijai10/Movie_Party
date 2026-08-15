@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 20
+PHASE 21
 
 Current Release:
 V1 Development
@@ -791,10 +791,30 @@ Implemented locally on 2026-08-15:
 Status:
 
 ```
-⬜
+⚠ PARTIAL / PLATFORM-SPECIFIC
 ```
 
-Same matrix.
+Same matrix:
+
+```
+⚠ YouTube video — EXTERNAL VERIFICATION PENDING
+⚠ YouTube audio — EXTERNAL VERIFICATION PENDING
+⚠ Netflix video — EXTERNAL VERIFICATION PENDING
+⚠ Netflix audio — EXTERNAL VERIFICATION PENDING
+⚠ Prime video — EXTERNAL VERIFICATION PENDING
+⚠ Prime audio — EXTERNAL VERIFICATION PENDING
+⚠ JioHotstar video — EXTERNAL VERIFICATION PENDING
+⚠ JioHotstar audio — EXTERNAL VERIFICATION PENDING
+```
+
+Notes:
+
+```
+Implemented locally on 2026-08-15:
+- Added macOS diagnostic capture plan for ScreenCaptureKit video/application audio and VideoToolbox H264.
+- Added 30-second diagnostic sample configuration and macOS capture permission status model.
+- Actual ScreenCaptureKit permission flow, provider media capture, audio capture, and protected-capture outcomes require manual/external verification.
+```
 
 ---
 
@@ -1600,6 +1620,44 @@ Documentation Updated:
 
 Next permitted task:
 - Begin Phase 21 macOS shared capture spike.
+
+---
+
+## 2026-08-15
+
+Active Phase:
+Phase 21
+
+Completed:
+- Added macOS provider-shared diagnostic capture plan.
+- Added ScreenCaptureKit application video/audio capture model.
+- Added VideoToolbox H264 diagnostic encode target.
+- Added macOS capture permission status tracking for external/manual verification.
+
+Tests:
+- `cargo fmt --check` passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` passed.
+- `cargo test capture` passed.
+- `cargo test` passed after approving local UDP socket access for existing QUIC loopback tests.
+- `pnpm lint` passed.
+- `pnpm build` passed.
+- `pnpm format` passed.
+
+Failures:
+- None.
+
+Cross-platform:
+- Windows: Not applicable to Phase 21.
+- macOS: Automated validation passed locally on 2026-08-15; real ScreenCaptureKit permission and provider capture tests pending.
+
+Blockers:
+- Real macOS provider-shared capture testing requires Chrome/provider playback and screen/audio capture permissions.
+
+Documentation Updated:
+- `docs/core_docs/IMPLEMENTATION_TRACKER.md`
+
+Next permitted task:
+- Begin Phase 22 hardware encoding.
 
 ---
 
