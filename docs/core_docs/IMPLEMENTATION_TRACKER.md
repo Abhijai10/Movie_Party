@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 24
+PHASE 25
 
 Current Release:
 V1 Development
@@ -923,18 +923,29 @@ Implemented locally on 2026-08-15:
 Status:
 
 ```
-⬜
+🟦 IMPLEMENTED / TESTING REQUIRED
 ```
 
 Critical test:
 
 ```
-⬜ Throttle Guest
-⬜ Guest buffer falls
-⬜ Source pauses
-⬜ Host presentation pauses
-⬜ Guest rebuilds
-⬜ Both resume together
+🟦 Throttle Guest
+🟦 Guest buffer falls
+🟦 Source pauses
+🟦 Host presentation pauses
+🟦 Guest rebuilds
+🟦 Both resume together
+```
+
+Notes:
+
+```
+Implemented locally on 2026-08-15:
+- Added shared strict-sync decision model for guest buffer pressure, peer disconnect, and decoder readiness.
+- Guest buffer below threshold pauses source, host presentation, and guest presentation together.
+- Paused shared mode rebuilds guest buffer before resuming.
+- Once target shared presentation buffer is restored, action resumes both viewers together.
+- Real throttle test over live shared stream remains pending capture/encode/decode integration.
 ```
 
 ---
@@ -1805,6 +1816,44 @@ Documentation Updated:
 
 Next permitted task:
 - Begin Phase 25 Shared Strict Sync.
+
+---
+
+## 2026-08-15
+
+Active Phase:
+Phase 25
+
+Completed:
+- Added shared strict-sync input/action model.
+- Added pause-all behavior when guest buffer falls, peer disconnects, or either decoder is unavailable.
+- Added rebuild behavior while source is paused and guest buffer is below shared presentation target.
+- Added resume-together behavior once the shared presentation target is restored.
+
+Tests:
+- `cargo fmt --check` passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` passed.
+- `cargo test shared_stream` passed.
+- `cargo test` passed after approving local UDP socket access for existing QUIC loopback tests.
+- `pnpm lint` passed.
+- `pnpm build` passed.
+- `pnpm format` passed.
+
+Failures:
+- None.
+
+Cross-platform:
+- Windows: Automated validation passed locally; live shared-stream throttle test pending integration/external testing.
+- macOS: Automated validation passed locally on 2026-08-15; live shared-stream throttle test pending integration testing.
+
+Blockers:
+- Real throttle/decoder behavior requires usable shared capture, encoder, transport, and decoder playback.
+
+Documentation Updated:
+- `docs/core_docs/IMPLEMENTATION_TRACKER.md`
+
+Next permitted task:
+- Begin Phase 26 Automatic Quality.
 
 ---
 

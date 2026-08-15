@@ -145,6 +145,43 @@ pub fn host_loopback_plan() -> HostLoopbackPlan {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SharedStrictSyncInput {
+    pub guest_connected: bool,
+    pub guest_buffer_us: u64,
+    pub host_decoder_ready: bool,
+    pub guest_decoder_ready: bool,
+    pub source_playing: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedStrictSyncAction {
+    Continue,
+    PauseSourceHostAndGuest,
+    RebuildGuestBuffer,
+    ResumeTogether,
+}
+
+pub fn evaluate_shared_strict_sync(input: SharedStrictSyncInput) -> SharedStrictSyncAction {
+    if !input.guest_connected || !input.host_decoder_ready || !input.guest_decoder_ready {
+        return SharedStrictSyncAction::PauseSourceHostAndGuest;
+    }
+
+    if input.guest_buffer_us < SHARED_MODE_PRESENTATION_LATENCY_US / 2 {
+        return SharedStrictSyncAction::PauseSourceHostAndGuest;
+    }
+
+    if !input.source_playing && input.guest_buffer_us < SHARED_MODE_PRESENTATION_LATENCY_US {
+        return SharedStrictSyncAction::RebuildGuestBuffer;
+    }
+
+    if !input.source_playing && input.guest_buffer_us >= SHARED_MODE_PRESENTATION_LATENCY_US {
+        return SharedStrictSyncAction::ResumeTogether;
+    }
+
+    SharedStrictSyncAction::Continue
+}
+
 impl PresentationBuffer {
     pub fn push(&mut self, packet: EncodedMediaPacket) -> Result<(), SharedStreamError> {
         if packet.sequence <= self.last_released_sequence
@@ -291,5 +328,71 @@ mod tests {
         assert_eq!(timeline.source_position_us, 730_000_000);
         assert_eq!(timeline.encoded_position_us, 729_000_000);
         assert_eq!(timeline.presentation_position_us, 724_000_000);
+    }
+
+    #[test]
+    fn shared_strict_sync_pauses_everything_when_guest_buffer_falls() {
+        let action = evaluate_shared_strict_sync(SharedStrictSyncInput {
+            guest_connected: true,
+            guest_buffer_us: 1_000_000,
+            host_decoder_ready: true,
+            guest_decoder_ready: true,
+            source_playing: true,
+        });
+
+        assert_eq!(action, SharedStrictSyncAction::PauseSourceHostAndGuest);
+    }
+
+    #[test]
+    fn shared_strict_sync_rebuilds_then_resumes_together() {
+        let rebuilding = evaluate_shared_strict_sync(SharedStrictSyncInput {
+            guest_connected: true,
+            guest_buffer_us: 3_000_000,
+            host_decoder_ready: true,
+            guest_decoder_ready: true,
+            source_playing: false,
+        });
+        let ready = evaluate_shared_strict_sync(SharedStrictSyncInput {
+            guest_connected: true,
+            guest_buffer_us: SHARED_MODE_PRESENTATION_LATENCY_US,
+            host_decoder_ready: true,
+            guest_decoder_ready: true,
+            source_playing: false,
+        });
+
+        assert_eq!(rebuilding, SharedStrictSyncAction::RebuildGuestBuffer);
+        assert_eq!(ready, SharedStrictSyncAction::ResumeTogether);
+    }
+
+    #[test]
+    fn shared_strict_sync_pauses_when_any_decoder_or_peer_is_unavailable() {
+        for input in [
+            SharedStrictSyncInput {
+                guest_connected: false,
+                guest_buffer_us: SHARED_MODE_PRESENTATION_LATENCY_US,
+                host_decoder_ready: true,
+                guest_decoder_ready: true,
+                source_playing: true,
+            },
+            SharedStrictSyncInput {
+                guest_connected: true,
+                guest_buffer_us: SHARED_MODE_PRESENTATION_LATENCY_US,
+                host_decoder_ready: false,
+                guest_decoder_ready: true,
+                source_playing: true,
+            },
+            SharedStrictSyncInput {
+                guest_connected: true,
+                guest_buffer_us: SHARED_MODE_PRESENTATION_LATENCY_US,
+                host_decoder_ready: true,
+                guest_decoder_ready: false,
+                source_playing: true,
+            },
+        ] {
+            assert_eq!(
+                evaluate_shared_strict_sync(input),
+                SharedStrictSyncAction::PauseSourceHostAndGuest
+            );
+        }
     }
 }
