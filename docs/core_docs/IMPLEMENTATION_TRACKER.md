@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 7
+PHASE 8
 
 Current Release:
 V1 Development
@@ -348,25 +348,25 @@ Phase may not pass without this.
 Status:
 
 ```
-⬜
+⚠ PARTIAL / PLATFORM-SPECIFIC
 ```
 
 ```
-⬜ Goodput estimator
+🟦 Goodput estimator
 ⬜ Movie bitrate estimator
-⬜ Buffer recommendation
+🟦 Buffer recommendation
 ⬜ Auto mode
-⬜ Smart preload
-⬜ Download-first recommendation
+🟦 Smart preload
+🟦 Download-first recommendation
 ```
 
 Test:
 
 ```
-⬜ 2 Mbps
-⬜ 5 Mbps
-⬜ 10 Mbps
-⬜ 20 Mbps
+🟦 2 Mbps policy unit coverage
+🟦 5 Mbps policy unit coverage
+⚠ 10 Mbps — EXTERNAL VERIFICATION PENDING on real college network
+🟦 20 Mbps policy unit coverage
 ```
 
 ---
