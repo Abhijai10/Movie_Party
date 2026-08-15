@@ -227,3 +227,169 @@ pub mod certification {
         }
     }
 }
+
+pub mod regression {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum DesktopPlatform {
+        Windows,
+        Macos,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct PlatformPair {
+        pub host: DesktopPlatform,
+        pub guest: DesktopPlatform,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum CoreScenario {
+        LocalPerfect,
+        LocalPreloaded,
+        ProviderSync,
+        ProviderShared,
+        CallVoice,
+        CallVideo,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum RegressionOutcome {
+        Passed,
+        Failed,
+        ExternalVerificationPending,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RegressionRecord {
+        pub pair: PlatformPair,
+        pub scenario: CoreScenario,
+        pub outcome: RegressionOutcome,
+        pub notes: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum ReleaseCandidateGate {
+        Closed {
+            missing_or_failed_pairs: Vec<PlatformPair>,
+        },
+        Open,
+    }
+
+    pub fn required_platform_pairs() -> Vec<PlatformPair> {
+        use DesktopPlatform::{Macos, Windows};
+
+        vec![
+            PlatformPair {
+                host: Windows,
+                guest: Windows,
+            },
+            PlatformPair {
+                host: Windows,
+                guest: Macos,
+            },
+            PlatformPair {
+                host: Macos,
+                guest: Windows,
+            },
+            PlatformPair {
+                host: Macos,
+                guest: Macos,
+            },
+        ]
+    }
+
+    pub fn release_candidate_gate(records: &[RegressionRecord]) -> ReleaseCandidateGate {
+        let missing_or_failed_pairs = required_platform_pairs()
+            .into_iter()
+            .filter(|pair| {
+                !records.iter().any(|record| {
+                    record.pair == *pair
+                        && record.scenario == CoreScenario::LocalPerfect
+                        && record.outcome == RegressionOutcome::Passed
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if missing_or_failed_pairs.is_empty() {
+            ReleaseCandidateGate::Open
+        } else {
+            ReleaseCandidateGate::Closed {
+                missing_or_failed_pairs,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn passed_local_perfect(pair: PlatformPair) -> RegressionRecord {
+            RegressionRecord {
+                pair,
+                scenario: CoreScenario::LocalPerfect,
+                outcome: RegressionOutcome::Passed,
+                notes: "verified manually".to_string(),
+            }
+        }
+
+        #[test]
+        fn phase_30_requires_all_windows_and_macos_pairings() {
+            let pairs = required_platform_pairs();
+
+            assert_eq!(pairs.len(), 4);
+            assert!(pairs.contains(&PlatformPair {
+                host: DesktopPlatform::Windows,
+                guest: DesktopPlatform::Windows,
+            }));
+            assert!(pairs.contains(&PlatformPair {
+                host: DesktopPlatform::Windows,
+                guest: DesktopPlatform::Macos,
+            }));
+            assert!(pairs.contains(&PlatformPair {
+                host: DesktopPlatform::Macos,
+                guest: DesktopPlatform::Windows,
+            }));
+            assert!(pairs.contains(&PlatformPair {
+                host: DesktopPlatform::Macos,
+                guest: DesktopPlatform::Macos,
+            }));
+        }
+
+        #[test]
+        fn release_candidate_gate_stays_closed_without_every_local_perfect_pass() {
+            let records = vec![passed_local_perfect(PlatformPair {
+                host: DesktopPlatform::Macos,
+                guest: DesktopPlatform::Macos,
+            })];
+
+            assert_eq!(
+                release_candidate_gate(&records),
+                ReleaseCandidateGate::Closed {
+                    missing_or_failed_pairs: vec![
+                        PlatformPair {
+                            host: DesktopPlatform::Windows,
+                            guest: DesktopPlatform::Windows,
+                        },
+                        PlatformPair {
+                            host: DesktopPlatform::Windows,
+                            guest: DesktopPlatform::Macos,
+                        },
+                        PlatformPair {
+                            host: DesktopPlatform::Macos,
+                            guest: DesktopPlatform::Windows,
+                        },
+                    ],
+                }
+            );
+        }
+
+        #[test]
+        fn release_candidate_gate_opens_after_every_local_perfect_pair_passes() {
+            let records = required_platform_pairs()
+                .into_iter()
+                .map(passed_local_perfect)
+                .collect::<Vec<_>>();
+
+            assert_eq!(release_candidate_gate(&records), ReleaseCandidateGate::Open);
+        }
+    }
+}

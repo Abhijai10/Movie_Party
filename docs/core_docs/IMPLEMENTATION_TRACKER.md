@@ -17,7 +17,7 @@ Project State:
 🟨 IN PROGRESS
 
 Current Phase:
-PHASE 30
+PHASE 31
 
 Current Release:
 V1 Development
@@ -1115,14 +1115,29 @@ Implemented locally on 2026-08-15:
 Status:
 
 ```
-⬜
+🟦 IMPLEMENTED / TESTING REQUIRED
 ```
 
 ```
-⬜ Win → Win
-⬜ Win → Mac
-⬜ Mac → Win
-⬜ Mac → Mac
+🟦 Win → Win regression record support
+🟦 Win → Mac regression record support
+🟦 Mac → Win regression record support
+🟦 Mac → Mac regression record support
+🟦 Release candidate gate requires Local Perfect pass for every platform pair
+⚠ Win → Win manual regression — EXTERNAL VERIFICATION PENDING
+⚠ Win → Mac manual regression — EXTERNAL VERIFICATION PENDING
+⚠ Mac → Win manual regression — EXTERNAL VERIFICATION PENDING
+⚠ Mac → Mac manual regression — EXTERNAL VERIFICATION PENDING
+```
+
+Notes:
+
+```
+Implemented locally on 2026-08-15:
+- Added telemetry regression model for Windows/macOS host/guest pairs.
+- Added regression records for core scenarios including Local Perfect, preloaded local, Provider Sync, Provider Shared, voice call, and video call.
+- Added release-candidate gate that remains closed until every required platform pair has a passing Local Perfect record.
+- Actual Windows/macOS pair testing remains externally pending and no release-candidate status has been claimed.
 ```
 
 ---
