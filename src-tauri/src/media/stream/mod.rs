@@ -4,6 +4,8 @@ use crate::media::{
     transfer::{ChunkPriority, ChunkRequest},
 };
 
+pub mod range_server;
+
 pub const LOOPBACK_BIND_ADDRESS: &str = "127.0.0.1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

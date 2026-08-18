@@ -1,9 +1,52 @@
-.DS_Store
-node_modules/
-.pnpm-store/
-dist/
-coverage/
+# Rust
 target/
+**/target/
+
+# Node
+node_modules/
+dist/
+build/
+
+# Tauri
 src-tauri/target/
 src-tauri/gen/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
 *.log
+
+# Temporary
+tmp/
+temp/
+
+# Runtime data
+*.db
+*.sqlite
+*.sqlite3
+
+# Movie/media files
+*.mp4
+*.mkv
+*.mov
+*.avi
+
+# Build artifacts
+*.dmg
+*.app
+
+# Package stores
+.pnpm-store/
+
+# AI agent temporary files
+.freebuff/

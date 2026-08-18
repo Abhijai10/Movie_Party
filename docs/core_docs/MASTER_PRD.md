@@ -766,7 +766,7 @@ MovePartyInvite {
     hostDeviceId,
     hostTailscaleIp,
     hostPort,
-    hostPublicKeyFingerprint,
+    serverCertificateFingerprint,
     joinSecret,
     expiresAt
 }

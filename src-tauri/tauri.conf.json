@@ -20,12 +20,16 @@
       }
     ],
     "security": {
-      "capabilities": ["default"]
+      "capabilities": [
+        "default"
+      ]
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all",
+    "active": true,
+    "targets": [
+      "app"
+    ],
     "category": "Entertainment",
     "shortDescription": "Watch together and stay synchronized.",
     "longDescription": "Private two-person desktop cinema app for synchronized local media and provider playback."

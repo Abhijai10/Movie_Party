@@ -48,6 +48,7 @@ pub enum CallSignalType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CallSignal {
     pub signal_type: CallSignalType,
     pub data: String,

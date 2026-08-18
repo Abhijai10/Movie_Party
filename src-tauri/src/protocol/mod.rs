@@ -15,6 +15,9 @@ pub enum MessageType {
     ChatMessage = 180,
     Reaction = 181,
     Error = 250,
+    ReadyState = 200,
+    BufferStatus = 201,
+    ControlRequest = 202,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

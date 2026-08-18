@@ -1,10 +1,18 @@
+import type { AppSnapshot } from "../backend/appRuntime";
+import { pickMediaFile } from "../backend/appRuntime";
+import { useState } from "react";
+
 type HomeScreenProps = {
-  onContinue: () => void;
-  onChooseMovie: () => void;
+  snapshot: AppSnapshot;
+  onCreateLocalParty: (mediaPath: string | null) => void;
   onJoin: () => void;
 };
 
-export function HomeScreen({ onContinue, onChooseMovie, onJoin }: HomeScreenProps) {
+export function HomeScreen({ snapshot, onCreateLocalParty, onJoin }: HomeScreenProps) {
+  const [mediaInput, setMediaInput] = useState("");
+  const upcomingLabel = snapshot.media?.filename ?? snapshot.provider.url ?? "No scheduled party";
+  const readiness = snapshot.network.connected ? snapshot.network.path : "Waiting for setup";
+
   return (
     <section className="home-screen" aria-labelledby="home-title">
       <div className="home-preview" aria-hidden="true">
@@ -17,23 +25,45 @@ export function HomeScreen({ onContinue, onChooseMovie, onJoin }: HomeScreenProp
         <p className="brand">Move Party</p>
         <h1 id="home-title">What are we watching?</h1>
         <label className="url-field">
-          <span>Movie or video URL</span>
-          <input type="url" placeholder="Paste Netflix / Prime / Hotstar / YouTube URL..." />
+          <span>Movie file path or video URL</span>
+          <input
+            value={mediaInput}
+            onChange={(event) => {
+              setMediaInput(event.target.value);
+            }}
+            placeholder="Paste a local movie path or provider URL..."
+          />
         </label>
-        <button className="primary-action" type="button" onClick={onContinue}>
+        <button
+          className="primary-action"
+          type="button"
+          onClick={() => {
+            onCreateLocalParty(mediaInput);
+          }}
+        >
           Continue
         </button>
         <div className="divider">or</div>
-        <button className="secondary-action" type="button" onClick={onChooseMovie}>
+        <button
+          className="secondary-action"
+          type="button"
+          onClick={() => {
+            void pickMediaFile().then((path) => {
+              if (path) {
+                onCreateLocalParty(path);
+              }
+            });
+          }}
+        >
           Choose Downloaded Movie
         </button>
         <button className="secondary-action" type="button" onClick={onJoin}>
           Join Existing Party
         </button>
         <section className="upcoming-strip" aria-label="Upcoming parties">
-          <span>Upcoming</span>
-          <strong>Interstellar - Tonight 10:00 PM</strong>
-          <small>Waiting for Rahul to come online</small>
+          <span>Current setup</span>
+          <strong>{upcomingLabel}</strong>
+          <small>{readiness}</small>
         </section>
       </div>
     </section>

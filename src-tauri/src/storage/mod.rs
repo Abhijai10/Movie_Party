@@ -1,3 +1,5 @@
+pub mod sqlite;
+
 pub const MIGRATIONS_DIR: &str = "migrations";
 
 use std::{
@@ -32,6 +34,8 @@ pub enum StorageError {
     UnsafeCachePath,
     #[error("MP-MEDIA-002 storage IO failed: {0}")]
     Io(#[from] std::io::Error),
+    #[error("MP-MEDIA-002 SQLite error: {0}")]
+    Sqlite(String),
 }
 
 pub fn prompt_for_media(

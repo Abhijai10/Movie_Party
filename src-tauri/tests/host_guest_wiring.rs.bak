@@ -1,0 +1,67 @@
+use move_party_lib::app_runtime::{AppRuntime, AppSnapshot, SnapshotSink};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+#[derive(Debug, Clone, Default)]
+struct RecordingSink {
+    snapshots: Arc<Mutex<Vec<AppSnapshot>>>,
+}
+
+impl SnapshotSink for RecordingSink {
+    fn emit(&self, snapshot: &AppSnapshot) {
+        self.snapshots.lock().unwrap().push(snapshot.clone());
+    }
+}
+
+#[tokio::test]
+async fn test_host_guest_wiring() {
+    // Enable deterministic development loopback for M1 tests
+    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+
+    let host_sink = Arc::new(RecordingSink::default());
+    let host = AppRuntime::new_with_emitter(Some(host_sink.clone()));
+
+    // Create a temporary dummy file to act as the host's local media
+    let temp_dir = std::env::temp_dir();
+    let media_path = temp_dir.join("test_movie.mp4");
+    std::fs::write(&media_path, b"dummy media content").unwrap();
+
+    let host_snapshot = host
+        .create_local_party(Some(media_path.to_string_lossy().to_string()))
+        .await
+        .expect("host should create party");
+
+    let invite_code = host_snapshot.room.invite_code.expect("invite code");
+    assert!(invite_code.starts_with("moveparty://join/"));
+
+    let guest_sink = Arc::new(RecordingSink::default());
+    let guest = AppRuntime::new_with_emitter(Some(guest_sink.clone()));
+
+    let guest_snapshot = guest
+        .join_party(invite_code)
+        .await
+        .expect("guest should join party");
+
+    assert_eq!(guest_snapshot.network.connected, true);
+    assert_eq!(guest_snapshot.room.state, "LOBBY");
+
+    // Give some time for the host to process the guest's authentication
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let host_snapshots = host_sink.snapshots.lock().unwrap();
+    let final_host_snapshot = host_snapshots
+        .last()
+        .expect("host should have emitted a snapshot");
+
+    assert_eq!(final_host_snapshot.network.connected, true);
+    assert_eq!(final_host_snapshot.room.state, "LOBBY");
+    let host_peer = final_host_snapshot.participants.iter().find(|p| p.role == "Guest");
+    assert!(host_peer.is_some());
+    let host_peer = host_peer.unwrap();
+    assert_ne!(host_peer.id, "<host>"); // Should be the guest's real ID
+
+    assert_eq!(host_snapshot.room.room_id, guest_snapshot.room.room_id);
+
+    // Cleanup
+    let _ = std::fs::remove_file(media_path);
+}

@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -14,21 +14,36 @@ use quinn::{
     ClientConfig, Connection, Endpoint, ServerConfig,
 };
 use rand::RngCore;
-use rustls::{
-    pki_types::{CertificateDer, PrivatePkcs8KeyDer},
-    RootCertStore,
-};
+use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::identity::{verify_auth_request_signature, DeviceIdentity};
 use crate::protocol::SequenceTracker;
+use crate::sync::clock::ClockSample;
 
 pub const QUIC_TRANSPORT_NAME: &str = "quic";
 pub const MOVE_PARTY_ALPN: &[&[u8]] = &[b"moveparty-v1"];
-const MAX_REQUEST_BYTES: usize = 256 * 1024;
+const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024; // 2 MB — supports base64-encoded 1 MiB chunks
 const MAX_AUTH_NONCES: usize = 4_096;
+
+/// Wraps a [`ServerEvent`] with metadata identifying the originating peer and
+/// the monotonic time at which the event was scheduled by the sender.
+///
+/// `EventEnvelope` is the unit that the Guest receives from the Host over
+/// server-opened bidirectional QUIC streams. The `event` payload by itself
+/// remains the protocol message; the envelope metadata is used by the runtime
+/// for sequence enforcement (duplicate/stale rejection) and for converting the
+/// host's monotonic schedule time into the guest's monotonic timeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventEnvelope {
+    pub seq: u64,
+    pub sender: String,
+    pub sent_mono_us: u64,
+    pub event: ServerEvent,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomCredentials {
@@ -100,6 +115,8 @@ pub struct AuthRequest {
 pub struct AuthAccept {
     pub session_id: String,
     pub room_role: String,
+    pub host_display_name: String,
+    pub host_device_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +146,83 @@ pub enum ClientRequest {
         sent_mono_us: u64,
         bytes: u64,
     },
+    ReadyState {
+        seq: u64,
+        sender: String,
+        ready: bool,
+        buffer_ahead_ms: u64,
+    },
+    BufferStatus {
+        seq: u64,
+        sender: String,
+        position_ms: u64,
+        buffer_ahead_ms: u64,
+        stalled: bool,
+    },
+    PlayReady {
+        seq: u64,
+        sender: String,
+        operation_id: String,
+        ready: bool,
+        position_ms: u64,
+        buffer_ahead_ms: u64,
+    },
+    PauseReady {
+        seq: u64,
+        sender: String,
+        operation_id: String,
+        ready: bool,
+    },
+    SeekReady {
+        seq: u64,
+        sender: String,
+        operation_id: String,
+        ready: bool,
+        buffer_ahead_ms: u64,
+    },
+    ClockResult {
+        seq: u64,
+        sender: String,
+        offset_to_host_us: i64,
+        rtt_us: u64,
+        sample_count: u64,
+        quality: String,
+    },
+    ChatMessage {
+        seq: u64,
+        sender: String,
+        message_id: String,
+        body: String,
+        created_host_time_us: u64,
+    },
+    Reaction {
+        seq: u64,
+        sender: String,
+        reaction_id: String,
+        reaction: String,
+    },
+    ControlRequest {
+        seq: u64,
+        sender: String,
+        request_id: String,
+        action: String,
+        parameters: serde_json::Value,
+    },
+    CallSignal {
+        seq: u64,
+        sender: String,
+        signal_type: String,
+        data: String,
+    },
+    /// M3: Guest requests the media manifest for Local Perfect transfer.
+    ManifestRequest { seq: u64, sender: String },
+    /// M3: Guest requests a specific chunk by index.
+    ChunkRequest {
+        seq: u64,
+        sender: String,
+        media_id: String,
+        chunk_index: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,6 +245,143 @@ pub enum ServerResponse {
         bytes: u64,
         elapsed_us: u128,
         goodput_bps: u64,
+    },
+    ReadyAck {
+        ready: bool,
+    },
+    BufferAck {
+        accepted: bool,
+    },
+    PlayReadyAck {
+        operation_id: String,
+        accepted: bool,
+    },
+    PauseReadyAck {
+        operation_id: String,
+        accepted: bool,
+    },
+    SeekReadyAck {
+        operation_id: String,
+        accepted: bool,
+    },
+    ClockResultAck {
+        accepted: bool,
+    },
+    ChatAccepted {
+        message_id: String,
+    },
+    ReactionAccepted {
+        reaction_id: String,
+    },
+    ControlResponse {
+        request_id: String,
+        granted: bool,
+        reason: Option<String>,
+    },
+    /// M3: Host sends the media manifest to the guest.
+    ManifestResponse {
+        manifest: crate::media::manifest::MediaManifest,
+    },
+    /// M3: Host sends a chunk of media data to the guest.
+    /// The payload is base64-encoded to fit in JSON.
+    ChunkResponse {
+        media_id: String,
+        chunk_index: u32,
+        hash: String,
+        payload: String, // base64-encoded chunk bytes
+    },
+    /// M3: Host indicates chunk is not available.
+    ChunkUnavailable {
+        media_id: String,
+        chunk_index: u64,
+    },
+    /// M3: Media transfer error.
+    MediaError {
+        code: String,
+        message: String,
+        operation_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload")]
+pub enum ServerEvent {
+    PlayPrepare {
+        operation_id: String,
+        target_position_ms: u64,
+        minimum_buffer_ms: u64,
+    },
+    PlayCommit {
+        operation_id: String,
+        target_position_ms: u64,
+        execute_at_host_mono_us: u64,
+        presentation_epoch: u64,
+    },
+    PausePrepare {
+        operation_id: String,
+        reason: String,
+        target_position_ms: u64,
+    },
+    PauseCommit {
+        operation_id: String,
+        target_position_ms: u64,
+        execute_at_host_mono_us: u64,
+    },
+    SeekPrepare {
+        operation_id: String,
+        target_position_ms: u64,
+        initiator: String,
+    },
+    SeekCommit {
+        operation_id: String,
+        target_position_ms: u64,
+        execute_at_host_mono_us: u64,
+        resume_after_seek: bool,
+    },
+    BufferLow {
+        position_ms: u64,
+        buffer_ahead_ms: u64,
+    },
+    BufferRecovered {
+        buffer_ahead_ms: u64,
+    },
+    RoomStateUpdate {
+        state: String,
+        position_ms: u64,
+    },
+    CoordinatorStateUpdate {
+        host_ready: bool,
+        guest_ready: bool,
+        coordinator_play_state: String,
+        buffer_ahead_ms: u64,
+    },
+    ChatMessage {
+        message_id: String,
+        sender: String,
+        body: String,
+        created_host_time_us: u64,
+    },
+    Reaction {
+        reaction_id: String,
+        sender: String,
+        reaction: String,
+    },
+    ControlGrant {
+        request_id: String,
+        action: String,
+    },
+    ControlDeny {
+        request_id: String,
+        reason: String,
+    },
+    SyncError {
+        code: String,
+        message: String,
+        operation_id: Option<String>,
+    },
+    CallSignal {
+        signal_type: String,
+        data: String,
     },
 }
 
@@ -194,15 +425,75 @@ pub enum QuicError {
     UnexpectedResponse,
 }
 
+#[derive(Debug, Clone)]
+pub enum QuicHostEvent {
+    PeerAuthenticated {
+        device_id: String,
+        display_name: String,
+    },
+    PeerDisconnected {
+        device_id: String,
+    },
+    GuestReadyState {
+        broadcaster_device_id: String,
+        coordinator_play_state: String,
+        coordinator_ready: bool,
+        coordinator_buffer_ahead_ms: u64,
+    },
+    GuestPlayReady {
+        broadcaster_device_id: String,
+        operation_id: String,
+        ready: bool,
+        position_ms: u64,
+        buffer_ahead_ms: u64,
+    },
+    GuestPauseReady {
+        broadcaster_device_id: String,
+        operation_id: String,
+        ready: bool,
+    },
+    GuestSeekReady {
+        broadcaster_device_id: String,
+        operation_id: String,
+        ready: bool,
+        buffer_ahead_ms: u64,
+    },
+    GuestControlRequest {
+        broadcaster_device_id: String,
+        request_id: String,
+        action: String,
+        parameters: serde_json::Value,
+    },
+    ClockResultReceived {
+        broadcaster_device_id: String,
+        offset_to_host_us: i64,
+        rtt_p95_us: u64,
+        sample_count: u64,
+        quality: String,
+    },
+}
+
 pub struct QuicServer {
     endpoint: Endpoint,
     certificate: CertificateDer<'static>,
     credentials: RoomCredentials,
     replay_guard: AuthReplayGuard,
+    pub host_display_name: String,
+    pub host_device_id: String,
+    pub event_callback: Option<std::sync::Arc<dyn Fn(QuicHostEvent) + Send + Sync>>,
+    pub local_media: Option<String>,
+    event_tx: Option<std::sync::Arc<broadcast::Sender<EventEnvelope>>>,
+    next_event_seq: AtomicU64,
+    shared_controls: Option<std::sync::Arc<AtomicBool>>,
 }
 
 impl QuicServer {
-    pub fn bind(bind_addr: SocketAddr, credentials: RoomCredentials) -> Result<Self, QuicError> {
+    pub fn bind(
+        bind_addr: SocketAddr,
+        credentials: RoomCredentials,
+        host_display_name: String,
+        host_device_id: String,
+    ) -> Result<Self, QuicError> {
         validate_quic_bind_addr(bind_addr)?;
         let (server_config, certificate) = configure_server()?;
         let endpoint = Endpoint::server(server_config, bind_addr)?;
@@ -212,7 +503,74 @@ impl QuicServer {
             certificate,
             credentials,
             replay_guard: AuthReplayGuard::default(),
+            host_display_name,
+            host_device_id,
+            event_callback: None,
+            local_media: None,
+            event_tx: None,
+            next_event_seq: AtomicU64::new(1),
+            shared_controls: None,
         })
+    }
+
+    pub fn bind_with_local_media(
+        bind_addr: SocketAddr,
+        credentials: RoomCredentials,
+        host_display_name: String,
+        host_device_id: String,
+        media_path: std::path::PathBuf,
+    ) -> Result<Self, QuicError> {
+        let mut server = Self::bind(bind_addr, credentials, host_display_name, host_device_id)?;
+        server.local_media = Some(media_path.to_string_lossy().into_owned());
+        Ok(server)
+    }
+
+    pub fn with_event_callback(
+        mut self,
+        callback: std::sync::Arc<dyn Fn(QuicHostEvent) + Send + Sync>,
+    ) -> Self {
+        self.event_callback = Some(callback);
+        self
+    }
+
+    pub fn with_event_broadcast(
+        mut self,
+        tx: std::sync::Arc<broadcast::Sender<EventEnvelope>>,
+    ) -> Self {
+        self.event_tx = Some(tx);
+        self
+    }
+
+    /// Share the host's Shared-Controls flag so request routing can grant or
+    /// deny guest control requests at the transport boundary.
+    pub fn with_shared_controls(mut self, flag: std::sync::Arc<AtomicBool>) -> Self {
+        self.shared_controls = Some(flag);
+        self
+    }
+
+    /// Broadcast a [`ServerEvent`] to all subscribers. The event is wrapped in
+    /// an [`EventEnvelope`] carrying a strictly-increasing sequence number
+    /// (drawn from `next_event_seq`), the host's device id as `sender`, and the
+    /// current monotonic timestamp.
+    ///
+    /// Sequence numbers are assigned *here*, on the QuicServer, because there
+    /// is a single canonical source per host: this guarantees that the
+    /// dispatcher task and any AppRuntime-level callers share one ordering.
+    pub fn broadcast(&self, event: ServerEvent) {
+        if let Some(ref tx) = self.event_tx {
+            let seq = self.next_event_seq.fetch_add(1, Ordering::SeqCst);
+            let envelope = EventEnvelope {
+                seq,
+                sender: self.host_device_id.clone(),
+                sent_mono_us: monotonic_us(),
+                event,
+            };
+            let _ = tx.send(envelope);
+        }
+    }
+
+    pub fn certificate(&self) -> &rustls::pki_types::CertificateDer<'static> {
+        &self.certificate
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr, QuicError> {
@@ -223,14 +581,36 @@ impl QuicServer {
         certificate_fingerprint(&self.certificate)
     }
 
-    pub async fn run(self) -> Result<(), QuicError> {
+    pub async fn run(
+        self,
+        coordinator_handle: Option<Arc<Mutex<crate::sync::local::LocalSyncCoordinator>>>,
+    ) -> Result<(), QuicError> {
         while let Some(incoming) = self.endpoint.accept().await {
             let credentials = self.credentials.clone();
             let replay_guard = self.replay_guard.clone();
+            let host_display_name = self.host_display_name.clone();
+            let host_device_id = self.host_device_id.clone();
+            let event_callback = self.event_callback.clone();
+            let local_media = self.local_media.clone();
+            let event_tx = self.event_tx.clone();
+            let coordinator = coordinator_handle.clone();
+            let shared_controls = self.shared_controls.clone();
             tokio::spawn(async move {
                 match incoming.await {
                     Ok(connection) => {
-                        let _ = handle_connection(connection, credentials, replay_guard).await;
+                        let _ = handle_connection(
+                            connection,
+                            credentials,
+                            replay_guard,
+                            host_display_name,
+                            host_device_id,
+                            event_callback,
+                            local_media,
+                            event_tx,
+                            coordinator,
+                            shared_controls,
+                        )
+                        .await;
                     }
                     Err(_error) => {}
                 }
@@ -261,7 +641,7 @@ impl AuthReplayGuard {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct QuicClient {
     endpoint: Endpoint,
     connection: Connection,
@@ -273,12 +653,12 @@ pub struct QuicClient {
 impl QuicClient {
     pub async fn connect(
         server_addr: SocketAddr,
-        server_certificate: CertificateDer<'static>,
+        server_certificate_fingerprint: String,
         credentials: RoomCredentials,
-        identity: DeviceIdentity,
-        display_name: impl Into<String>,
-    ) -> Result<Self, QuicError> {
-        let endpoint = make_client_endpoint(server_certificate)?;
+        identity: crate::identity::DeviceIdentity,
+        display_name: String,
+    ) -> Result<(Self, AuthAccept), QuicError> {
+        let endpoint = make_client_endpoint(server_certificate_fingerprint)?;
         let connection = endpoint.connect(server_addr, "localhost")?.await?;
         let hello = HelloPayload::local(display_name, &identity);
         let client = Self {
@@ -296,7 +676,7 @@ impl QuicClient {
             .await?;
 
         match response {
-            ServerResponse::AuthAccept(_) => Ok(client),
+            ServerResponse::AuthAccept(accept) => Ok((client, accept)),
             ServerResponse::AuthReject { code } => Err(QuicError::Auth(code)),
             _ => Err(QuicError::UnexpectedResponse),
         }
@@ -339,6 +719,116 @@ impl QuicClient {
         }
     }
 
+    /// One CLOCK_PING probe. Returns the full Pong so the guest can compute a
+    /// proper `ClockSample` (t0 guest / host receive / host send / t3 guest).
+    pub async fn clock_probe(&self, probe_id: u64, t0_us: u64) -> Result<ClockSample, QuicError> {
+        let response = self
+            .send_request(ClientRequest::Ping {
+                seq: self.next_seq(),
+                sender: self.identity.device_id.clone(),
+                sent_mono_us: monotonic_us(),
+                probe_id,
+                t0_us,
+            })
+            .await?;
+
+        match response {
+            ServerResponse::Pong {
+                host_receive_us,
+                host_send_us,
+                ..
+            } => Ok(ClockSample {
+                t0_guest_us: t0_us as i64,
+                host_receive_us: host_receive_us as i64,
+                host_send_us: host_send_us as i64,
+                t3_guest_us: monotonic_us() as i64,
+            }),
+            _ => Err(QuicError::UnexpectedResponse),
+        }
+    }
+
+    pub async fn send_play_ready(
+        &self,
+        operation_id: String,
+        ready: bool,
+        position_ms: u64,
+        buffer_ahead_ms: u64,
+    ) -> Result<ServerResponse, QuicError> {
+        self.send_control(ClientRequest::PlayReady {
+            seq: self.next_seq(),
+            sender: self.identity.device_id.clone(),
+            operation_id,
+            ready,
+            position_ms,
+            buffer_ahead_ms,
+        })
+        .await
+    }
+
+    pub async fn send_pause_ready(
+        &self,
+        operation_id: String,
+        ready: bool,
+    ) -> Result<ServerResponse, QuicError> {
+        self.send_control(ClientRequest::PauseReady {
+            seq: self.next_seq(),
+            sender: self.identity.device_id.clone(),
+            operation_id,
+            ready,
+        })
+        .await
+    }
+
+    pub async fn send_seek_ready(
+        &self,
+        operation_id: String,
+        ready: bool,
+        buffer_ahead_ms: u64,
+    ) -> Result<ServerResponse, QuicError> {
+        self.send_control(ClientRequest::SeekReady {
+            seq: self.next_seq(),
+            sender: self.identity.device_id.clone(),
+            operation_id,
+            ready,
+            buffer_ahead_ms,
+        })
+        .await
+    }
+
+    pub async fn send_clock_result(
+        &self,
+        offset_to_host_us: i64,
+        rtt_p95_us: u64,
+        sample_count: u64,
+        quality: &str,
+    ) -> Result<ServerResponse, QuicError> {
+        self.send_control(ClientRequest::ClockResult {
+            seq: self.next_seq(),
+            sender: self.identity.device_id.clone(),
+            offset_to_host_us,
+            rtt_us: rtt_p95_us,
+            sample_count,
+            quality: quality.to_string(),
+        })
+        .await
+    }
+
+    pub async fn send_control_request(
+        &self,
+        request_id: String,
+        action: String,
+        parameters: serde_json::Value,
+    ) -> Result<ServerResponse, QuicError> {
+        self.send_control(ClientRequest::ControlRequest {
+            seq: self.next_seq(),
+            sender: self.identity.device_id.clone(),
+            request_id,
+            action,
+            parameters,
+        })
+        .await
+    }
+
     pub async fn upload_synthetic_payload(
         &self,
         bytes: u64,
@@ -375,6 +865,163 @@ impl QuicClient {
             }),
             _ => Err(QuicError::UnexpectedResponse),
         }
+    }
+
+    pub async fn send_control(&self, request: ClientRequest) -> Result<ServerResponse, QuicError> {
+        self.send_request(request).await
+    }
+
+    pub async fn send_ready_state(
+        &self,
+        ready: bool,
+        buffer_ahead_ms: u64,
+    ) -> Result<ServerResponse, QuicError> {
+        self.send_control(ClientRequest::ReadyState {
+            seq: self.next_seq(),
+            sender: self.identity.device_id.clone(),
+            ready,
+            buffer_ahead_ms,
+        })
+        .await
+    }
+
+    pub async fn send_chat_message(
+        &self,
+        message_id: Uuid,
+        body: String,
+        created_host_time_us: u64,
+    ) -> Result<ServerResponse, QuicError> {
+        self.send_control(ClientRequest::ChatMessage {
+            seq: self.next_seq(),
+            sender: self.identity.device_id.clone(),
+            message_id: message_id.to_string(),
+            body,
+            created_host_time_us,
+        })
+        .await
+    }
+
+    pub async fn send_reaction(
+        &self,
+        reaction_id: Uuid,
+        reaction: String,
+    ) -> Result<ServerResponse, QuicError> {
+        self.send_control(ClientRequest::Reaction {
+            seq: self.next_seq(),
+            sender: self.identity.device_id.clone(),
+            reaction_id: reaction_id.to_string(),
+            reaction,
+        })
+        .await
+    }
+
+    pub async fn send_call_signal(
+        &self,
+        signal_type: String,
+        data: String,
+    ) -> Result<ServerResponse, QuicError> {
+        self.send_control(ClientRequest::CallSignal {
+            seq: self.next_seq(),
+            sender: self.identity.device_id.clone(),
+            signal_type,
+            data,
+        })
+        .await
+    }
+
+    /// Report local buffer starvation/recovery to the host.
+    ///
+    /// The host treats this as canonical strict-sync input: `stalled: true`
+    /// pauses the room at the reported position, `stalled: false` resumes it.
+    pub async fn send_buffer_status(
+        &self,
+        position_ms: u64,
+        buffer_ahead_ms: u64,
+        stalled: bool,
+    ) -> Result<ServerResponse, QuicError> {
+        self.send_control(ClientRequest::BufferStatus {
+            seq: self.next_seq(),
+            sender: self.identity.device_id.clone(),
+            position_ms,
+            buffer_ahead_ms,
+            stalled,
+        })
+        .await
+    }
+
+    /// M3: Fetch the media manifest from the host for Local Perfect transfer.
+    pub async fn fetch_local_media_manifest(
+        &self,
+    ) -> Result<crate::media::manifest::MediaManifest, QuicError> {
+        let response = self
+            .send_control(ClientRequest::ManifestRequest {
+                seq: self.next_seq(),
+                sender: self.identity.device_id.clone(),
+            })
+            .await?;
+        match response {
+            ServerResponse::ManifestResponse { manifest } => Ok(manifest),
+            ServerResponse::MediaError { message: _, .. } => Err(QuicError::UnexpectedResponse),
+            _ => Err(QuicError::UnexpectedResponse),
+        }
+    }
+
+    /// M3: Fetch a single chunk from the host by index.
+    pub async fn fetch_local_media_chunk(
+        &self,
+        media_id: &str,
+        chunk_index: u64,
+    ) -> Result<crate::media::transfer::ChunkPacket, QuicError> {
+        let response = self
+            .send_control(ClientRequest::ChunkRequest {
+                seq: self.next_seq(),
+                sender: self.identity.device_id.clone(),
+                media_id: media_id.to_string(),
+                chunk_index,
+            })
+            .await?;
+        match response {
+            ServerResponse::ChunkResponse {
+                media_id,
+                chunk_index,
+                hash,
+                payload,
+            } => {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&payload)
+                    .map_err(|_| QuicError::UnexpectedResponse)?;
+                Ok(crate::media::transfer::ChunkPacket {
+                    media_id,
+                    chunk_index,
+                    hash,
+                    payload: bytes,
+                })
+            }
+            ServerResponse::ChunkUnavailable { .. } => Err(QuicError::UnexpectedResponse),
+            ServerResponse::MediaError { message: _, .. } => Err(QuicError::UnexpectedResponse),
+            _ => Err(QuicError::UnexpectedResponse),
+        }
+    }
+
+    /// Receive the next event opened by the host.
+    ///
+    /// The Host opens one bidirectional stream per [`EventEnvelope`] (see
+    /// `handle_connection`'s dispatcher task) and writes a single envelope
+    /// into the stream before half-closing the send side. The Guest side
+    /// therefore calls [`Connection::accept_bi`] to receive the next
+    /// server-opened stream, reads a single envelope from it, then discards
+    /// the unused `send` half.
+    ///
+    /// Using `accept_bi` for receiving host-originated events is critical:
+    /// the alternative (Guest opens a stream and reads from it) would
+    /// race against the host's accept loop for client→host requests.
+    pub async fn listen_for_server_event(&self) -> Result<EventEnvelope, QuicError> {
+        let (_send, mut recv) = self.connection.accept_bi().await?;
+        let envelope = read_event_envelope(&mut recv).await?;
+        // Drain any trailing EOF and discard the unused send half. Errors here
+        // are tolerated — the envelope was already received.
+        let _ = recv.read_to_end(0).await;
+        Ok(envelope)
     }
 
     pub async fn wait_idle(&self) {
@@ -434,7 +1081,7 @@ fn is_tailscale_ipv4(ipv4: Ipv4Addr) -> bool {
     octets[0] == 100 && (64..=127).contains(&octets[1])
 }
 
-pub fn certificate_fingerprint(certificate: &CertificateDer<'static>) -> String {
+pub fn certificate_fingerprint(certificate: &rustls::pki_types::CertificateDer<'_>) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(certificate.as_ref()))
 }
 
@@ -468,17 +1115,57 @@ fn configure_server() -> Result<(ServerConfig, CertificateDer<'static>), QuicErr
     Ok((ServerConfig::with_crypto(Arc::new(crypto)), cert_der))
 }
 
-fn make_client_endpoint(
-    server_certificate: CertificateDer<'static>,
-) -> Result<Endpoint, QuicError> {
-    ensure_crypto_provider();
-    let mut roots = RootCertStore::empty();
-    roots
-        .add(server_certificate)
-        .map_err(|error| QuicError::Tls(error.to_string()))?;
+#[derive(Debug)]
+struct FingerprintVerifier {
+    fingerprint: String,
+}
+impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let actual = certificate_fingerprint(end_entity);
+        if actual == self.fingerprint {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General("fingerprint mismatch".into()))
+        }
+    }
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
 
+fn make_client_endpoint(server_certificate_fingerprint: String) -> Result<Endpoint, QuicError> {
+    ensure_crypto_provider();
+    let verifier = std::sync::Arc::new(FingerprintVerifier {
+        fingerprint: server_certificate_fingerprint,
+    });
     let mut crypto = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
     crypto.alpn_protocols = MOVE_PARTY_ALPN.iter().map(|value| value.to_vec()).collect();
 
@@ -494,25 +1181,82 @@ fn ensure_crypto_provider() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     connection: Connection,
     credentials: RoomCredentials,
     replay_guard: AuthReplayGuard,
+    host_display_name: String,
+    host_device_id: String,
+    event_callback: Option<std::sync::Arc<dyn Fn(QuicHostEvent) + Send + Sync>>,
+    local_media: Option<String>,
+    event_tx: Option<std::sync::Arc<broadcast::Sender<EventEnvelope>>>,
+    coordinator: std::option::Option<
+        std::sync::Arc<std::sync::Mutex<crate::sync::local::LocalSyncCoordinator>>,
+    >,
+    shared_controls: Option<std::sync::Arc<AtomicBool>>,
 ) -> Result<(), QuicError> {
     let session = Arc::new(Mutex::new(ConnectionSession::default()));
+
+    if let Some(ref tx) = event_tx {
+        let connection_for_events = connection.clone();
+        let tx_for_events = tx.clone();
+        tokio::spawn(async move {
+            let mut rx = tx_for_events.subscribe();
+            loop {
+                let Ok(envelope) = rx.recv().await else { break };
+                let Ok((mut send, _)) = connection_for_events.open_bi().await else {
+                    break;
+                };
+                if write_event_envelope(&mut send, &envelope).await.is_err() {
+                    break;
+                }
+                if send.finish().is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
     loop {
         let stream = connection.accept_bi().await;
         let stream = match stream {
             Ok(stream) => stream,
-            Err(quinn::ConnectionError::ApplicationClosed { .. }) => return Ok(()),
-            Err(error) => return Err(QuicError::Connection(error)),
+            Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
+                fire_peer_disconnected(&session, &event_callback);
+                return Ok(());
+            }
+            Err(error) => {
+                fire_peer_disconnected(&session, &event_callback);
+                return Err(QuicError::Connection(error));
+            }
         };
 
         let credentials = credentials.clone();
         let replay_guard = replay_guard.clone();
         let session = session.clone();
+        let host_display_name = host_display_name.clone();
+        let host_device_id = host_device_id.clone();
+        let event_callback = event_callback.clone();
+        let local_media = local_media.clone();
+        let coordinator = coordinator.clone();
+        let event_tx = event_tx.clone();
+        let shared_controls = shared_controls.clone();
         tokio::spawn(async move {
-            let _ = handle_request(stream, credentials, replay_guard, session).await;
+            let _ = handle_request(
+                stream,
+                credentials,
+                replay_guard,
+                host_display_name,
+                host_device_id,
+                event_callback,
+                local_media,
+                session,
+                coordinator,
+                event_tx,
+                shared_controls,
+            )
+            .await;
         });
     }
 }
@@ -520,23 +1264,89 @@ async fn handle_connection(
 #[derive(Debug, Default)]
 struct ConnectionSession {
     authenticated_device_id: Option<String>,
+    authenticated_display_name: Option<String>,
     sequence_tracker: SequenceTracker,
+    guest_clock_offset_to_host_us: i64,
+    guest_clock_rtt_p95_us: u64,
+    guest_clock_sample_count: u64,
+    guest_clock_quality: String,
 }
 
+fn fire_peer_disconnected(
+    session: &Arc<Mutex<ConnectionSession>>,
+    event_callback: &Option<std::sync::Arc<dyn Fn(QuicHostEvent) + Send + Sync>>,
+) {
+    let session = lock_session(session);
+    if let Some(device_id) = session.authenticated_device_id.clone() {
+        if let Some(ref cb) = event_callback {
+            cb(QuicHostEvent::PeerDisconnected { device_id });
+        }
+    }
+}
+
+fn guest_display_name(session: &Arc<Mutex<ConnectionSession>>) -> String {
+    lock_session(session)
+        .authenticated_display_name
+        .clone()
+        .unwrap_or_else(|| "Guest".to_string())
+}
+
+fn broadcast_guest_event(
+    event_tx: &Option<std::sync::Arc<broadcast::Sender<EventEnvelope>>>,
+    seq: u64,
+    sender_device_id: &str,
+    event: ServerEvent,
+) {
+    if let Some(tx) = event_tx {
+        let _ = tx.send(EventEnvelope {
+            seq,
+            sender: sender_device_id.to_string(),
+            sent_mono_us: monotonic_us(),
+            event,
+        });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_request(
     (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
     credentials: RoomCredentials,
     replay_guard: AuthReplayGuard,
+    host_display_name: String,
+    host_device_id: String,
+    event_callback: Option<std::sync::Arc<dyn Fn(QuicHostEvent) + Send + Sync>>,
+    _local_media: Option<String>,
     session: Arc<Mutex<ConnectionSession>>,
+    coordinator: std::option::Option<
+        std::sync::Arc<std::sync::Mutex<crate::sync::local::LocalSyncCoordinator>>,
+    >,
+    event_tx: Option<std::sync::Arc<broadcast::Sender<EventEnvelope>>>,
+    shared_controls: Option<std::sync::Arc<AtomicBool>>,
 ) -> Result<(), QuicError> {
     let request = read_request(&mut recv).await?;
     let response = match request {
         ClientRequest::HelloAuth { hello, auth } => {
-            let device_id = hello.device_id.clone();
-            let response = validate_handshake(&credentials, &replay_guard, *hello, *auth);
+            let authenticated_device_id = hello.device_id.clone();
+            let guest_display_name = hello.display_name.clone();
+            let response = validate_handshake(
+                &credentials,
+                &replay_guard,
+                *hello,
+                *auth,
+                host_display_name,
+                host_device_id,
+            );
             if matches!(response, ServerResponse::AuthAccept(_)) {
                 let mut session = lock_session(&session);
-                session.authenticated_device_id = Some(device_id);
+                session.authenticated_device_id = Some(authenticated_device_id.clone());
+                session.authenticated_display_name = Some(guest_display_name.clone());
+
+                if let Some(ref cb) = event_callback {
+                    cb(QuicHostEvent::PeerAuthenticated {
+                        device_id: authenticated_device_id,
+                        display_name: guest_display_name,
+                    });
+                }
             }
             response
         }
@@ -596,6 +1406,361 @@ async fn handle_request(
             }
             Err(code) => ServerResponse::AuthReject { code },
         },
+        ClientRequest::ReadyState {
+            seq,
+            sender,
+            ready,
+            buffer_ahead_ms,
+        } => match validate_authenticated_sequence(&session, &sender, seq) {
+            Ok(()) => {
+                // Readiness consensus ONLY: pressing Ready must never by-pass
+                // the distributed play protocol (PLAY_PREPARE → PLAY_READY →
+                // PLAY_COMMIT). The coordinator records guest readiness and —
+                // once BOTH participants are ready — enters READY_CHECK so
+                // both sides can see the consensus. PLAYING only ever arrives
+                // via a committed play operation.
+                if let Some(ref coord) = coordinator {
+                    if let Ok(mut guard) = coord.lock() {
+                        if ready {
+                            guard.guest_ready(crate::sync::consensus::ParticipantReadiness::ready(
+                                5_000,
+                            ));
+                        } else {
+                            guard.guest_ready(
+                                crate::sync::consensus::ParticipantReadiness::not_ready("guest"),
+                            );
+                        }
+                        guard.update_readiness_consensus(5_000);
+                    }
+                }
+                if let Some(ref cb) = event_callback {
+                    cb(QuicHostEvent::GuestReadyState {
+                        broadcaster_device_id: sender,
+                        coordinator_play_state: coordinator
+                            .as_ref()
+                            .and_then(|c| c.lock().ok())
+                            .map(|c| format!("{:?}", c.room_state))
+                            .unwrap_or_default(),
+                        coordinator_ready: ready,
+                        coordinator_buffer_ahead_ms: buffer_ahead_ms,
+                    });
+                }
+                ServerResponse::ReadyAck { ready }
+            }
+            Err(code) => ServerResponse::AuthReject { code },
+        },
+        ClientRequest::PlayReady {
+            seq,
+            sender,
+            operation_id,
+            ready,
+            position_ms,
+            buffer_ahead_ms,
+        } => match validate_authenticated_sequence(&session, &sender, seq) {
+            Ok(()) => {
+                if let Some(ref cb) = event_callback {
+                    cb(QuicHostEvent::GuestPlayReady {
+                        broadcaster_device_id: sender,
+                        operation_id: operation_id.clone(),
+                        ready,
+                        position_ms,
+                        buffer_ahead_ms,
+                    });
+                }
+                ServerResponse::PlayReadyAck {
+                    operation_id,
+                    accepted: true,
+                }
+            }
+            Err(code) => ServerResponse::AuthReject { code },
+        },
+        ClientRequest::PauseReady {
+            seq,
+            sender,
+            operation_id,
+            ready,
+        } => match validate_authenticated_sequence(&session, &sender, seq) {
+            Ok(()) => {
+                if let Some(ref cb) = event_callback {
+                    cb(QuicHostEvent::GuestPauseReady {
+                        broadcaster_device_id: sender,
+                        operation_id: operation_id.clone(),
+                        ready,
+                    });
+                }
+                ServerResponse::PauseReadyAck {
+                    operation_id,
+                    accepted: true,
+                }
+            }
+            Err(code) => ServerResponse::AuthReject { code },
+        },
+        ClientRequest::SeekReady {
+            seq,
+            sender,
+            operation_id,
+            ready,
+            buffer_ahead_ms,
+        } => match validate_authenticated_sequence(&session, &sender, seq) {
+            Ok(()) => {
+                if let Some(ref cb) = event_callback {
+                    cb(QuicHostEvent::GuestSeekReady {
+                        broadcaster_device_id: sender,
+                        operation_id: operation_id.clone(),
+                        ready,
+                        buffer_ahead_ms,
+                    });
+                }
+                ServerResponse::SeekReadyAck {
+                    operation_id,
+                    accepted: true,
+                }
+            }
+            Err(code) => ServerResponse::AuthReject { code },
+        },
+        ClientRequest::ClockResult {
+            seq,
+            sender,
+            offset_to_host_us,
+            rtt_us,
+            sample_count,
+            quality,
+        } => match validate_authenticated_sequence(&session, &sender, seq) {
+            Ok(()) => {
+                {
+                    let mut session = lock_session(&session);
+                    session.guest_clock_offset_to_host_us = offset_to_host_us;
+                    session.guest_clock_rtt_p95_us = rtt_us;
+                    session.guest_clock_sample_count = sample_count;
+                    session.guest_clock_quality = quality.clone();
+                }
+                if let Some(ref cb) = event_callback {
+                    cb(QuicHostEvent::ClockResultReceived {
+                        broadcaster_device_id: sender,
+                        offset_to_host_us,
+                        rtt_p95_us: rtt_us,
+                        sample_count,
+                        quality,
+                    });
+                }
+                ServerResponse::ClockResultAck { accepted: true }
+            }
+            Err(code) => ServerResponse::AuthReject { code },
+        },
+        ClientRequest::BufferStatus {
+            seq,
+            sender,
+            position_ms,
+            buffer_ahead_ms,
+            stalled,
+        } => match validate_authenticated_sequence(&session, &sender, seq) {
+            Ok(()) => {
+                if stalled {
+                    broadcast_guest_event(
+                        &event_tx,
+                        seq,
+                        &sender,
+                        ServerEvent::BufferLow {
+                            position_ms,
+                            buffer_ahead_ms,
+                        },
+                    );
+                } else {
+                    broadcast_guest_event(
+                        &event_tx,
+                        seq,
+                        &sender,
+                        ServerEvent::BufferRecovered { buffer_ahead_ms },
+                    );
+                }
+                ServerResponse::BufferAck { accepted: true }
+            }
+            Err(code) => ServerResponse::AuthReject { code },
+        },
+        ClientRequest::ChatMessage {
+            seq,
+            sender,
+            message_id,
+            body,
+            created_host_time_us,
+        } => match validate_authenticated_sequence(&session, &sender, seq) {
+            Ok(()) => {
+                broadcast_guest_event(
+                    &event_tx,
+                    seq,
+                    &sender,
+                    ServerEvent::ChatMessage {
+                        message_id: message_id.clone(),
+                        sender: guest_display_name(&session),
+                        body: body.clone(),
+                        created_host_time_us,
+                    },
+                );
+                ServerResponse::ChatAccepted { message_id }
+            }
+            Err(code) => ServerResponse::AuthReject { code },
+        },
+        ClientRequest::Reaction {
+            seq,
+            sender,
+            reaction_id,
+            reaction,
+        } => match validate_authenticated_sequence(&session, &sender, seq) {
+            Ok(()) => {
+                broadcast_guest_event(
+                    &event_tx,
+                    seq,
+                    &sender,
+                    ServerEvent::Reaction {
+                        reaction_id: reaction_id.clone(),
+                        sender: guest_display_name(&session),
+                        reaction: reaction.clone(),
+                    },
+                );
+                ServerResponse::ReactionAccepted { reaction_id }
+            }
+            Err(code) => ServerResponse::AuthReject { code },
+        },
+        ClientRequest::ControlRequest {
+            seq,
+            sender,
+            request_id,
+            action,
+            parameters,
+        } => match validate_authenticated_sequence(&session, &sender, seq) {
+            Ok(()) => {
+                let granted = shared_controls
+                    .as_ref()
+                    .map(|flag| flag.load(Ordering::SeqCst))
+                    .unwrap_or(false);
+                if granted {
+                    // GRANT means "host will consider it": the host AppRuntime
+                    // performs the normal authoritative PREPARE/READY/COMMIT
+                    // operation. The guest never commits anything itself.
+                    if let Some(ref cb) = event_callback {
+                        cb(QuicHostEvent::GuestControlRequest {
+                            broadcaster_device_id: sender,
+                            request_id: request_id.clone(),
+                            action,
+                            parameters,
+                        });
+                    }
+                    ServerResponse::ControlResponse {
+                        request_id,
+                        granted: true,
+                        reason: None,
+                    }
+                } else {
+                    // The denial must ALSO reach the guest as an event: the
+                    // in-band response alone is invisible to the guest
+                    // AppRuntime (its control requests are fire-and-forget).
+                    // The seq comes from the coordinator's monotonic counter
+                    // so the guest's stale/duplicate guard stays consistent.
+                    let seq = coordinator
+                        .as_ref()
+                        .and_then(|c| c.lock().ok())
+                        .map(|mut guard| {
+                            guard.coordinator_event_seq =
+                                guard.coordinator_event_seq.wrapping_add(1);
+                            guard.coordinator_event_seq
+                        })
+                        .unwrap_or(1);
+                    if let Some(ref tx) = event_tx {
+                        let envelope = EventEnvelope {
+                            seq,
+                            sender: host_device_id.clone(),
+                            sent_mono_us: monotonic_us(),
+                            event: ServerEvent::ControlDeny {
+                                request_id: request_id.clone(),
+                                reason: "host_only_controls".to_string(),
+                            },
+                        };
+                        let _ = tx.send(envelope);
+                    }
+                    ServerResponse::ControlResponse {
+                        request_id,
+                        granted: false,
+                        reason: Some("host_only_controls".to_string()),
+                    }
+                }
+            }
+            Err(code) => ServerResponse::AuthReject { code },
+        },
+        ClientRequest::CallSignal {
+            seq,
+            sender,
+            signal_type,
+            data,
+        } => match validate_authenticated_sequence(&session, &sender, seq) {
+            Ok(()) => {
+                broadcast_guest_event(
+                    &event_tx,
+                    seq,
+                    &sender,
+                    ServerEvent::CallSignal { signal_type, data },
+                );
+                ServerResponse::ReadyAck { ready: true }
+            }
+            Err(code) => ServerResponse::AuthReject { code },
+        },
+        // M3: Guest requests the media manifest for Local Perfect transfer.
+        ClientRequest::ManifestRequest { seq, sender } => {
+            match validate_authenticated_sequence(&session, &sender, seq) {
+                Ok(()) => {
+                    if let Some(ref media_path) = _local_media {
+                        let path = std::path::Path::new(media_path);
+                        match crate::media::manifest::build_manifest(path) {
+                            Ok(manifest) => ServerResponse::ManifestResponse { manifest },
+                            Err(e) => ServerResponse::MediaError {
+                                code: "MP-MEDIA-001".to_string(),
+                                message: format!("manifest build failed: {e}"),
+                                operation_id: None,
+                            },
+                        }
+                    } else {
+                        ServerResponse::MediaError {
+                            code: "MP-MEDIA-002".to_string(),
+                            message: "no local media available".to_string(),
+                            operation_id: None,
+                        }
+                    }
+                }
+                Err(code) => ServerResponse::AuthReject { code },
+            }
+        }
+        // M3: Guest requests a specific chunk. The chunk is read from the
+        // local file, hashed, and sent back as base64-encoded JSON.
+        ClientRequest::ChunkRequest {
+            seq,
+            sender,
+            media_id,
+            chunk_index,
+        } => match validate_authenticated_sequence(&session, &sender, seq) {
+            Ok(()) => {
+                if let Some(ref media_path) = _local_media {
+                    let path = std::path::Path::new(media_path);
+                    match read_chunk_from_file(path, chunk_index) {
+                        Ok((hash, payload)) => ServerResponse::ChunkResponse {
+                            media_id,
+                            chunk_index: chunk_index as u32,
+                            hash,
+                            payload: base64::engine::general_purpose::STANDARD.encode(&payload),
+                        },
+                        Err(e) => ServerResponse::MediaError {
+                            code: "MP-MEDIA-002".to_string(),
+                            message: format!("chunk read failed: {e}"),
+                            operation_id: None,
+                        },
+                    }
+                } else {
+                    ServerResponse::ChunkUnavailable {
+                        media_id,
+                        chunk_index,
+                    }
+                }
+            }
+            Err(code) => ServerResponse::AuthReject { code },
+        },
     };
 
     write_response(&mut send, &response).await?;
@@ -636,6 +1801,8 @@ fn validate_handshake(
     replay_guard: &AuthReplayGuard,
     hello: HelloPayload,
     auth: AuthRequest,
+    host_display_name: String,
+    host_device_id: String,
 ) -> ServerResponse {
     if hello.protocol_major != crate::PROTOCOL_MAJOR {
         return ServerResponse::AuthReject {
@@ -711,6 +1878,8 @@ fn validate_handshake(
     ServerResponse::AuthAccept(AuthAccept {
         session_id: Uuid::now_v7().to_string(),
         room_role: "guest".to_string(),
+        host_display_name,
+        host_device_id,
     })
 }
 
@@ -718,13 +1887,13 @@ fn is_uuid_v7(value: &str) -> bool {
     Uuid::parse_str(value).is_ok_and(|uuid| uuid.get_version_num() == 7)
 }
 
-fn is_base64url_128bit(value: &str) -> bool {
+pub fn is_base64url_128bit(value: &str) -> bool {
     URL_SAFE_NO_PAD
         .decode(value)
         .is_ok_and(|bytes| bytes.len() == 16)
 }
 
-fn is_base64url_256bit(value: &str) -> bool {
+pub fn is_base64url_256bit(value: &str) -> bool {
     URL_SAFE_NO_PAD
         .decode(value)
         .is_ok_and(|bytes| bytes.len() == 32)
@@ -781,10 +1950,67 @@ async fn read_json_bytes(recv: &mut quinn::RecvStream) -> Result<Vec<u8>, QuicEr
     Ok(bytes)
 }
 
-fn monotonic_us() -> u64 {
-    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    let start = START.get_or_init(Instant::now);
-    start.elapsed().as_micros() as u64
+async fn write_event_envelope(
+    send: &mut quinn::SendStream,
+    envelope: &EventEnvelope,
+) -> Result<(), QuicError> {
+    write_json(send, envelope).await
+}
+
+async fn read_event_envelope(recv: &mut quinn::RecvStream) -> Result<EventEnvelope, QuicError> {
+    let bytes = read_json_bytes(recv).await?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+static MONO_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Monotonic microseconds since the first call in this process.
+/// Used for protocol timestamps and scheduling; never wall-clock.
+pub fn monotonic_us() -> u64 {
+    MONO_START.get_or_init(std::time::Instant::now);
+    mono_start().elapsed().as_micros() as u64
+}
+
+fn mono_start() -> std::time::Instant {
+    *MONO_START.get_or_init(std::time::Instant::now)
+}
+
+/// Convert a HOST-monotonic microsecond deadline into this process's
+/// [`std::time::Instant`], applying the guest↔host clock offset.
+///
+/// Hosts call with `offset_to_host_us = 0`. Guests pass their calibrated
+/// `offset_to_host_us` (host time = guest time + offset).
+pub fn instant_for_host_mono(host_mono_us: u64, offset_to_host_us: i64) -> std::time::Instant {
+    let guest_mono_us = (host_mono_us as i64).saturating_sub(offset_to_host_us);
+    mono_start() + std::time::Duration::from_micros(guest_mono_us.max(0) as u64)
+}
+
+/// M3: Read a single chunk from the host's local media file.
+/// Returns (blake3_hash, raw_bytes).
+fn read_chunk_from_file(
+    path: &std::path::Path,
+    chunk_index: u64,
+) -> Result<(String, Vec<u8>), std::io::Error> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    const CHUNK_SIZE: u64 = 1_048_576; // 1 MiB
+
+    let mut file = std::fs::File::open(path)?;
+    let file_size = file.metadata()?.len();
+    let offset = chunk_index * CHUNK_SIZE;
+    if offset >= file_size {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "chunk index out of range",
+        ));
+    }
+    let len = CHUNK_SIZE.min(file_size - offset) as usize;
+    let mut buf = vec![0u8; len];
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(&mut buf)?;
+    let hash =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(blake3::hash(&buf).as_bytes());
+    Ok((hash, buf))
 }
 
 fn goodput_bps(bytes: u64, elapsed: Duration) -> u64 {
@@ -849,17 +2075,23 @@ mod tests {
     #[tokio::test]
     async fn authenticates_heartbeat_and_measures_rtt() {
         let credentials = RoomCredentials::new_for_tests();
-        let server = QuicServer::bind(loopback_bind_addr(), credentials.clone()).expect("server");
+        let server = QuicServer::bind(
+            loopback_bind_addr(),
+            credentials.clone(),
+            "Host".to_string(),
+            TEST_DEVICE_ID.to_string(),
+        )
+        .expect("server");
         let addr = server.local_addr().expect("addr");
-        let certificate = server.certificate.clone();
-        let server_task = tokio::spawn(server.run());
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
 
-        let client = QuicClient::connect(
+        let (client, _) = QuicClient::connect(
             addr,
-            certificate,
+            fingerprint,
             credentials,
             test_identity(),
-            "Test Guest",
+            "Test Guest".to_string(),
         )
         .await
         .expect("client");
@@ -874,15 +2106,27 @@ mod tests {
     #[tokio::test]
     async fn rejects_wrong_join_secret() {
         let credentials = RoomCredentials::new_for_tests();
-        let server = QuicServer::bind(loopback_bind_addr(), credentials.clone()).expect("server");
+        let server = QuicServer::bind(
+            loopback_bind_addr(),
+            credentials.clone(),
+            "Host".to_string(),
+            TEST_DEVICE_ID.to_string(),
+        )
+        .expect("server");
         let addr = server.local_addr().expect("addr");
-        let certificate = server.certificate.clone();
-        let server_task = tokio::spawn(server.run());
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
 
         let mut wrong = credentials;
         wrong.join_secret = "wrong".to_string();
-        let result =
-            QuicClient::connect(addr, certificate, wrong, test_identity(), "Test Guest").await;
+        let result = QuicClient::connect(
+            addr,
+            fingerprint,
+            wrong,
+            test_identity(),
+            "Test Guest".to_string(),
+        )
+        .await;
 
         assert!(result.is_err());
         server_task.abort();
@@ -891,12 +2135,18 @@ mod tests {
     #[tokio::test]
     async fn rejects_malformed_room_id() {
         let credentials = RoomCredentials::new_for_tests();
-        let server = QuicServer::bind(loopback_bind_addr(), credentials.clone()).expect("server");
+        let server = QuicServer::bind(
+            loopback_bind_addr(),
+            credentials.clone(),
+            "Host".to_string(),
+            TEST_DEVICE_ID.to_string(),
+        )
+        .expect("server");
         let addr = server.local_addr().expect("addr");
-        let certificate = server.certificate.clone();
-        let server_task = tokio::spawn(server.run());
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
         let identity = test_identity();
-        let endpoint = super::make_client_endpoint(certificate).expect("endpoint");
+        let endpoint = super::make_client_endpoint(fingerprint).expect("endpoint");
         let connection = endpoint
             .connect(addr, "localhost")
             .expect("connect")
@@ -909,7 +2159,7 @@ mod tests {
             identity: identity.clone(),
             next_seq: Arc::new(AtomicU64::new(1)),
         };
-        let hello = HelloPayload::local("Test Guest", &identity);
+        let hello = HelloPayload::local("Test Guest".to_string(), &identity);
         let malformed_room_id = "not-base64url-room-id".to_string();
         let join_secret_hash = credentials.join_secret_hash();
         let invite_nonce = "nonce".to_string();
@@ -945,12 +2195,18 @@ mod tests {
     #[tokio::test]
     async fn rejects_malformed_join_secret_hash() {
         let credentials = RoomCredentials::new_for_tests();
-        let server = QuicServer::bind(loopback_bind_addr(), credentials.clone()).expect("server");
+        let server = QuicServer::bind(
+            loopback_bind_addr(),
+            credentials.clone(),
+            "Host".to_string(),
+            TEST_DEVICE_ID.to_string(),
+        )
+        .expect("server");
         let addr = server.local_addr().expect("addr");
-        let certificate = server.certificate.clone();
-        let server_task = tokio::spawn(server.run());
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
         let identity = test_identity();
-        let endpoint = super::make_client_endpoint(certificate).expect("endpoint");
+        let endpoint = super::make_client_endpoint(fingerprint).expect("endpoint");
         let connection = endpoint
             .connect(addr, "localhost")
             .expect("connect")
@@ -963,7 +2219,7 @@ mod tests {
             identity: identity.clone(),
             next_seq: Arc::new(AtomicU64::new(1)),
         };
-        let hello = HelloPayload::local("Test Guest", &identity);
+        let hello = HelloPayload::local("Test Guest".to_string(), &identity);
         let malformed_hash = "short".to_string();
         let invite_nonce = "nonce".to_string();
         let auth = AuthRequest {
@@ -998,12 +2254,18 @@ mod tests {
     #[tokio::test]
     async fn rejects_malformed_public_key() {
         let credentials = RoomCredentials::new_for_tests();
-        let server = QuicServer::bind(loopback_bind_addr(), credentials.clone()).expect("server");
+        let server = QuicServer::bind(
+            loopback_bind_addr(),
+            credentials.clone(),
+            "Host".to_string(),
+            TEST_DEVICE_ID.to_string(),
+        )
+        .expect("server");
         let addr = server.local_addr().expect("addr");
-        let certificate = server.certificate.clone();
-        let server_task = tokio::spawn(server.run());
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
         let identity = test_identity();
-        let endpoint = super::make_client_endpoint(certificate).expect("endpoint");
+        let endpoint = super::make_client_endpoint(fingerprint).expect("endpoint");
         let connection = endpoint
             .connect(addr, "localhost")
             .expect("connect")
@@ -1016,7 +2278,7 @@ mod tests {
             identity: identity.clone(),
             next_seq: Arc::new(AtomicU64::new(1)),
         };
-        let mut hello = HelloPayload::local("Test Guest", &identity);
+        let mut hello = HelloPayload::local("Test Guest".to_string(), &identity);
         hello.public_key = "short".to_string();
         let join_secret_hash = credentials.join_secret_hash();
         let invite_nonce = "nonce".to_string();
@@ -1052,12 +2314,18 @@ mod tests {
     #[tokio::test]
     async fn rejects_tampered_device_signature() {
         let credentials = RoomCredentials::new_for_tests();
-        let server = QuicServer::bind(loopback_bind_addr(), credentials.clone()).expect("server");
+        let server = QuicServer::bind(
+            loopback_bind_addr(),
+            credentials.clone(),
+            "Host".to_string(),
+            TEST_DEVICE_ID.to_string(),
+        )
+        .expect("server");
         let addr = server.local_addr().expect("addr");
-        let certificate = server.certificate.clone();
-        let server_task = tokio::spawn(server.run());
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
         let identity = test_identity();
-        let endpoint = super::make_client_endpoint(certificate).expect("endpoint");
+        let endpoint = super::make_client_endpoint(fingerprint).expect("endpoint");
         let connection = endpoint
             .connect(addr, "localhost")
             .expect("connect")
@@ -1070,7 +2338,7 @@ mod tests {
             identity: identity.clone(),
             next_seq: Arc::new(AtomicU64::new(1)),
         };
-        let hello = HelloPayload::local("Test Guest", &identity);
+        let hello = HelloPayload::local("Test Guest".to_string(), &identity);
         let join_secret_hash = credentials.join_secret_hash();
         let auth = AuthRequest {
             room_id: credentials.room_id.clone(),
@@ -1104,12 +2372,18 @@ mod tests {
     #[tokio::test]
     async fn rejects_unsupported_hello_platform() {
         let credentials = RoomCredentials::new_for_tests();
-        let server = QuicServer::bind(loopback_bind_addr(), credentials.clone()).expect("server");
+        let server = QuicServer::bind(
+            loopback_bind_addr(),
+            credentials.clone(),
+            "Host".to_string(),
+            TEST_DEVICE_ID.to_string(),
+        )
+        .expect("server");
         let addr = server.local_addr().expect("addr");
-        let certificate = server.certificate.clone();
-        let server_task = tokio::spawn(server.run());
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
         let identity = test_identity();
-        let endpoint = super::make_client_endpoint(certificate).expect("endpoint");
+        let endpoint = super::make_client_endpoint(fingerprint).expect("endpoint");
         let connection = endpoint
             .connect(addr, "localhost")
             .expect("connect")
@@ -1122,7 +2396,7 @@ mod tests {
             identity: identity.clone(),
             next_seq: Arc::new(AtomicU64::new(1)),
         };
-        let mut hello = HelloPayload::local("Test Guest", &identity);
+        let mut hello = HelloPayload::local("Test Guest".to_string(), &identity);
         hello.platform = "linux".to_string();
         let join_secret_hash = credentials.join_secret_hash();
         let invite_nonce = "nonce".to_string();
@@ -1158,12 +2432,18 @@ mod tests {
     #[tokio::test]
     async fn rejects_future_hello_minor_version() {
         let credentials = RoomCredentials::new_for_tests();
-        let server = QuicServer::bind(loopback_bind_addr(), credentials.clone()).expect("server");
+        let server = QuicServer::bind(
+            loopback_bind_addr(),
+            credentials.clone(),
+            "Host".to_string(),
+            TEST_DEVICE_ID.to_string(),
+        )
+        .expect("server");
         let addr = server.local_addr().expect("addr");
-        let certificate = server.certificate.clone();
-        let server_task = tokio::spawn(server.run());
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
         let identity = test_identity();
-        let endpoint = super::make_client_endpoint(certificate).expect("endpoint");
+        let endpoint = super::make_client_endpoint(fingerprint).expect("endpoint");
         let connection = endpoint
             .connect(addr, "localhost")
             .expect("connect")
@@ -1176,7 +2456,7 @@ mod tests {
             identity: identity.clone(),
             next_seq: Arc::new(AtomicU64::new(1)),
         };
-        let mut hello = HelloPayload::local("Test Guest", &identity);
+        let mut hello = HelloPayload::local("Test Guest".to_string(), &identity);
         hello.protocol_minor = crate::PROTOCOL_MINOR + 1;
         let join_secret_hash = credentials.join_secret_hash();
         let invite_nonce = "nonce".to_string();
@@ -1212,12 +2492,18 @@ mod tests {
     #[tokio::test]
     async fn rejects_non_uuid_v7_device_id() {
         let credentials = RoomCredentials::new_for_tests();
-        let server = QuicServer::bind(loopback_bind_addr(), credentials.clone()).expect("server");
+        let server = QuicServer::bind(
+            loopback_bind_addr(),
+            credentials.clone(),
+            "Host".to_string(),
+            TEST_DEVICE_ID.to_string(),
+        )
+        .expect("server");
         let addr = server.local_addr().expect("addr");
-        let certificate = server.certificate.clone();
-        let server_task = tokio::spawn(server.run());
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
         let identity = DeviceIdentity::from_seed_for_tests("not-a-uuid", [9; 32]);
-        let endpoint = super::make_client_endpoint(certificate).expect("endpoint");
+        let endpoint = super::make_client_endpoint(fingerprint).expect("endpoint");
         let connection = endpoint
             .connect(addr, "localhost")
             .expect("connect")
@@ -1230,7 +2516,7 @@ mod tests {
             identity: identity.clone(),
             next_seq: Arc::new(AtomicU64::new(1)),
         };
-        let hello = HelloPayload::local("Test Guest", &identity);
+        let hello = HelloPayload::local("Test Guest".to_string(), &identity);
         let join_secret_hash = credentials.join_secret_hash();
         let invite_nonce = "nonce".to_string();
         let auth = AuthRequest {
@@ -1265,12 +2551,18 @@ mod tests {
     #[tokio::test]
     async fn rejects_replayed_auth_nonce() {
         let credentials = RoomCredentials::new_for_tests();
-        let server = QuicServer::bind(loopback_bind_addr(), credentials.clone()).expect("server");
+        let server = QuicServer::bind(
+            loopback_bind_addr(),
+            credentials.clone(),
+            "Host".to_string(),
+            TEST_DEVICE_ID.to_string(),
+        )
+        .expect("server");
         let addr = server.local_addr().expect("addr");
-        let certificate = server.certificate.clone();
-        let server_task = tokio::spawn(server.run());
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
         let identity = test_identity();
-        let endpoint = super::make_client_endpoint(certificate).expect("endpoint");
+        let endpoint = super::make_client_endpoint(fingerprint).expect("endpoint");
         let connection = endpoint
             .connect(addr, "localhost")
             .expect("connect")
@@ -1283,7 +2575,7 @@ mod tests {
             identity: identity.clone(),
             next_seq: Arc::new(AtomicU64::new(1)),
         };
-        let hello = HelloPayload::local("Test Guest", &identity);
+        let hello = HelloPayload::local("Test Guest".to_string(), &identity);
         let join_secret_hash = credentials.join_secret_hash();
         let auth = AuthRequest {
             room_id: credentials.room_id.clone(),
@@ -1325,11 +2617,17 @@ mod tests {
     #[tokio::test]
     async fn rejects_requests_before_authentication() {
         let credentials = RoomCredentials::new_for_tests();
-        let server = QuicServer::bind(loopback_bind_addr(), credentials).expect("server");
+        let server = QuicServer::bind(
+            loopback_bind_addr(),
+            credentials,
+            "Host".to_string(),
+            TEST_DEVICE_ID.to_string(),
+        )
+        .expect("server");
         let addr = server.local_addr().expect("addr");
-        let certificate = server.certificate.clone();
-        let server_task = tokio::spawn(server.run());
-        let endpoint = super::make_client_endpoint(certificate).expect("endpoint");
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
+        let endpoint = super::make_client_endpoint(fingerprint).expect("endpoint");
         let connection = endpoint
             .connect(addr, "localhost")
             .expect("connect")
@@ -1367,16 +2665,22 @@ mod tests {
     #[tokio::test]
     async fn rejects_duplicate_or_stale_authenticated_sequence() {
         let credentials = RoomCredentials::new_for_tests();
-        let server = QuicServer::bind(loopback_bind_addr(), credentials.clone()).expect("server");
+        let server = QuicServer::bind(
+            loopback_bind_addr(),
+            credentials.clone(),
+            "Host".to_string(),
+            TEST_DEVICE_ID.to_string(),
+        )
+        .expect("server");
         let addr = server.local_addr().expect("addr");
-        let certificate = server.certificate.clone();
-        let server_task = tokio::spawn(server.run());
-        let client = QuicClient::connect(
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
+        let (client, _) = QuicClient::connect(
             addr,
-            certificate,
+            fingerprint,
             credentials,
             test_identity(),
-            "Test Guest",
+            "Test Guest".to_string(),
         )
         .await
         .expect("client");
@@ -1416,17 +2720,23 @@ mod tests {
     #[tokio::test]
     async fn transfers_synthetic_payload() {
         let credentials = RoomCredentials::new_for_tests();
-        let server = QuicServer::bind(loopback_bind_addr(), credentials.clone()).expect("server");
+        let server = QuicServer::bind(
+            loopback_bind_addr(),
+            credentials.clone(),
+            "Host".to_string(),
+            TEST_DEVICE_ID.to_string(),
+        )
+        .expect("server");
         let addr = server.local_addr().expect("addr");
-        let certificate = server.certificate.clone();
-        let server_task = tokio::spawn(server.run());
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
 
-        let client = QuicClient::connect(
+        let (client, _) = QuicClient::connect(
             addr,
-            certificate,
+            fingerprint,
             credentials,
             test_identity(),
-            "Test Guest",
+            "Test Guest".to_string(),
         )
         .await
         .expect("client");
@@ -1438,6 +2748,42 @@ mod tests {
         assert_eq!(result.bytes, 512 * 1024);
         assert!(result.goodput_bps > 0);
         client.wait_idle().await;
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn rejects_server_with_wrong_certificate_fingerprint() {
+        let wrong_fingerprint = "mSncRHUcatB8mqTKA0jVJPmc0JaWJsm4u17SWO9M-q0".to_string();
+
+        let credentials = RoomCredentials::new_for_tests();
+        let server = QuicServer::bind(
+            loopback_bind_addr(),
+            credentials.clone(),
+            "Host".to_string(),
+            TEST_DEVICE_ID.to_string(),
+        )
+        .expect("server");
+        let addr = server.local_addr().expect("addr");
+        let real_fingerprint = server.certificate_fingerprint();
+
+        assert_ne!(wrong_fingerprint, real_fingerprint);
+        assert!(super::is_base64url_256bit(&wrong_fingerprint));
+
+        let server_task = tokio::spawn(server.run(None));
+
+        let result = QuicClient::connect(
+            addr,
+            wrong_fingerprint,
+            credentials,
+            test_identity(),
+            "Test Guest".to_string(),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "wrong certificate fingerprint must cause TLS/QUIC connect to fail"
+        );
         server_task.abort();
     }
 }

@@ -1,19 +1,20 @@
 use std::{cmp::Ordering, collections::BinaryHeap};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use serde::{Deserialize, Serialize};
 
 use crate::media::{cache::chunk_len, manifest::MediaManifest};
 
 pub const CHUNK_MAGIC: &[u8; 4] = b"MPCK";
 pub const CHUNK_STREAM_VERSION: u8 = 1;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkRequest {
     pub index: u64,
     pub priority: ChunkPriority,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ChunkPriority {
     Critical = 0,
     ImmediateFuture = 1,
@@ -22,7 +23,7 @@ pub enum ChunkPriority {
     Speculative = 4,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkPacket {
     pub media_id: String,
     pub chunk_index: u32,
@@ -30,7 +31,7 @@ pub struct ChunkPacket {
     pub payload: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferProgress {
     pub media_id: String,
     pub bytes_available: u64,

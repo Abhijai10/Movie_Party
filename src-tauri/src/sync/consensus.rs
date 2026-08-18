@@ -15,6 +15,14 @@ impl ParticipantReadiness {
             stalled: false,
         }
     }
+
+    pub fn not_ready(_reason: &str) -> Self {
+        Self {
+            player_ready: false,
+            buffer_ahead_ms: 0,
+            stalled: false,
+        }
+    }
 }
 
 pub fn all_participants_ready(

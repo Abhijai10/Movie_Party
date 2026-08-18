@@ -1,56 +1,67 @@
 import { enumerateCallDevices, type CallDeviceInventory } from "../call/mediaDevices";
-import type { CallMode } from "../call/webrtc";
+import { runLocalPeerConnectionLoopback, type CallMode } from "../call/webrtc";
+import {
+  pausePlayback,
+  resumePlayback,
+  sendChatMessage,
+  sendReaction as sendBackendReaction,
+  seekRelative,
+  setCallMode,
+  setCameraEnabled,
+  setGhostMode,
+  setMicrophoneEnabled,
+  setPrivacyMode,
+  setSharedControls,
+  submitCallSignal,
+  type AppSnapshot,
+} from "../backend/appRuntime";
 import type { KeyboardEvent as ReactKeyboardEvent, SyntheticEvent } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type CinemaModeProps = {
+  snapshot: AppSnapshot;
+  onSnapshot: (snapshot: AppSnapshot) => void;
   onLeave: () => void;
 };
 
-type ChatMessage = {
-  id: string;
-  sender: string;
-  body: string;
-};
-
-type FloatingReaction = {
-  id: string;
-  sender: string;
-  reaction: string;
-};
-
-const initialMessages: ChatMessage[] = [
-  { id: "chat-1", sender: "Rahul", body: "BRO WHAT" },
-  { id: "chat-2", sender: "Abhijai", body: "Paused so we stay together." },
-  { id: "chat-3", sender: "Rahul", body: "Ready when you are." },
-];
-
 const reactions = ["😂", "❤️", "😮", "🔥", "😭", "👏"] as const;
-const maxReactionEvents = 5;
-const reactionWindowMs = 3_000;
 const chatBodyLimitBytes = 2_000;
 const privacyNoticeMs = 2_200;
 const ghostNoticeMs = 800;
 
-export function CinemaMode({ onLeave }: CinemaModeProps) {
-  const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
+function formatMs(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1_000);
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${String(hours)}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  return `${String(minutes)}:${String(seconds).padStart(2, "0")}`;
+}
+
+export function CinemaMode({ snapshot, onSnapshot, onLeave }: CinemaModeProps) {
   const [draft, setDraft] = useState("");
   const [isComposing, setIsComposing] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
-  const [floatingReactions, setFloatingReactions] = useState<FloatingReaction[]>([
-    { id: "reaction-seed", sender: "Rahul", reaction: "😮" },
-  ]);
-  const [reactionEvents, setReactionEvents] = useState<number[]>([]);
   const [reactionWarning, setReactionWarning] = useState("");
-  const [isGhostMode, setIsGhostMode] = useState(false);
-  const [isPrivacyMode, setIsPrivacyMode] = useState(false);
-  const [cameraEnabled, setCameraEnabled] = useState(true);
-  const [microphoneEnabled, setMicrophoneEnabled] = useState(false);
-  const [callMode, setCallMode] = useState<CallMode>("VIDEO_VOICE");
   const [callDevices, setCallDevices] = useState<CallDeviceInventory | null>(null);
   const [isCameraCardMinimized, setIsCameraCardMinimized] = useState(false);
   const [isCameraCardHidden, setIsCameraCardHidden] = useState(false);
   const [privacyNotice, setPrivacyNotice] = useState("");
+  const callSessionKey = useRef("");
+  const messages = snapshot.chat;
+  const floatingReactions = snapshot.reactions.slice(-4);
+  const isGhostMode = snapshot.ghostMode;
+  const isPrivacyMode = snapshot.privacyMode;
+  const isHost = snapshot.room.role === "HOST";
+  const sharedControls = snapshot.room.sharedControls;
+  const cameraEnabled = snapshot.call.camera.enabled;
+  const microphoneEnabled = snapshot.call.microphone.enabled;
+  const callMode = snapshot.call.mode;
+  const movieTitle = snapshot.media?.filename ?? snapshot.provider.url ?? "Movie";
+  const peer = snapshot.participants.find((participant) => participant.role !== snapshot.room.role);
+  const peerName = peer?.displayName ?? "Peer";
   const visibleMessages = messages.slice(-3);
   const encodedDraftLength = useMemo(() => new TextEncoder().encode(draft).length, [draft]);
   const isDraftTooLong = encodedDraftLength > chatBodyLimitBytes;
@@ -68,6 +79,30 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
       isMounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    const nextKey = `${callMode}:${String(cameraEnabled)}:${String(microphoneEnabled)}:${String(isPrivacyMode)}`;
+    if (callMode === "OFF" || isPrivacyMode || callSessionKey.current === nextKey) {
+      return;
+    }
+
+    callSessionKey.current = nextKey;
+    void runLocalPeerConnectionLoopback(
+      callMode,
+      cameraEnabled,
+      microphoneEnabled,
+      async (signal) => {
+        const next = await submitCallSignal(signal);
+        if (next) {
+          onSnapshot(next);
+        }
+      },
+    ).then((result) => {
+      if (!result.connected) {
+        setPrivacyNotice("Call signalling is ready. Waiting for media connection.");
+      }
+    });
+  }, [callMode, cameraEnabled, microphoneEnabled, isPrivacyMode, onSnapshot]);
 
   useEffect(() => {
     let noticeTimeout: number | undefined;
@@ -99,10 +134,12 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
           return;
         }
 
-        setIsGhostMode((current) => {
-          const next = !current;
-          showNotice(next ? "Ghost Mode on" : "Ghost Mode off", ghostNoticeMs);
-          return next;
+        const nextGhostMode = !isGhostMode;
+        void setGhostMode(nextGhostMode).then((next) => {
+          if (next) {
+            onSnapshot(next);
+          }
+          showNotice(nextGhostMode ? "Ghost Mode on" : "Ghost Mode off", ghostNoticeMs);
         });
         setIsComposing(false);
         setIsHistoryOpen(false);
@@ -111,23 +148,21 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
 
       if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "p") {
         event.preventDefault();
-        setIsPrivacyMode((current) => {
-          if (current) {
-            setIsGhostMode(false);
+        void setPrivacyMode(!isPrivacyMode).then((next) => {
+          if (next) {
+            onSnapshot(next);
+          }
+          if (isPrivacyMode) {
             showNotice(
               "Privacy Mode ended. Camera and microphone remain disabled.",
               privacyNoticeMs,
             );
-            return false;
+            return;
           }
 
-          setCameraEnabled(false);
-          setMicrophoneEnabled(false);
-          setIsGhostMode(true);
           setIsComposing(false);
           setIsHistoryOpen(false);
           showNotice("Privacy Mode on", ghostNoticeMs);
-          return true;
         });
         return;
       }
@@ -153,7 +188,7 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
       window.removeEventListener("keydown", handleKeyDown);
       window.clearTimeout(noticeTimeout);
     };
-  }, [isPrivacyMode]);
+  }, [isGhostMode, isPrivacyMode, onSnapshot]);
 
   const sendMessage = (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -162,16 +197,13 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
       return;
     }
 
-    setMessages((current) => [
-      ...current,
-      {
-        id: `chat-${String(Date.now())}`,
-        sender: "Abhijai",
-        body: draft.trim(),
-      },
-    ]);
-    setDraft("");
-    setIsComposing(false);
+    void sendChatMessage(draft.trim()).then((next) => {
+      if (next) {
+        onSnapshot(next);
+        setDraft("");
+        setIsComposing(false);
+      }
+    });
   };
 
   const handleDraftKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
@@ -185,44 +217,27 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
       return;
     }
 
-    const now = Date.now();
-    const recentEvents = reactionEvents.filter((eventTime) => now - eventTime < reactionWindowMs);
-
-    if (recentEvents.length >= maxReactionEvents) {
-      setReactionWarning("Reaction limit reached");
-      return;
-    }
-
     setReactionWarning("");
-    setReactionEvents([...recentEvents, now]);
-
-    const nowText = String(now);
-    const floatingReaction = {
-      id: `reaction-${nowText}-${reaction}`,
-      sender: "Abhijai",
-      reaction,
-    };
-
-    setFloatingReactions((current) => [...current.slice(-3), floatingReaction]);
-    window.setTimeout(() => {
-      setFloatingReactions((current) =>
-        current.filter((candidate) => candidate.id !== floatingReaction.id),
-      );
-    }, 2_400);
+    void sendBackendReaction(reaction).then(
+      (next) => {
+        if (next) {
+          onSnapshot(next);
+          return;
+        }
+        setReactionWarning("Reaction limit reached");
+      },
+      () => {
+        setReactionWarning("Reaction limit reached");
+      },
+    );
   };
 
   const chooseCallMode = (mode: CallMode) => {
-    setCallMode(mode);
-
-    if (mode === "OFF") {
-      setCameraEnabled(false);
-      setMicrophoneEnabled(false);
-      return;
-    }
-
-    if (mode === "VOICE_ONLY") {
-      setCameraEnabled(false);
-    }
+    void setCallMode(mode).then((next) => {
+      if (next) {
+        onSnapshot(next);
+      }
+    });
   };
 
   return (
@@ -233,7 +248,17 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
       >
         <div className="movie-frame">
           <div className="movie-light" />
-          <span>Interstellar</span>
+          <span>{movieTitle}</span>
+          <span className="player-position">
+            {formatMs(snapshot.player.positionMs)}
+            {snapshot.player.durationMs != null
+              ? ` / ${formatMs(snapshot.player.durationMs)}`
+              : ""}
+            {snapshot.player.state === "BUFFERING" && " (Buffering...)"}
+            {snapshot.player.errorMessage && (
+              <span className="player-error">{snapshot.player.errorMessage}</span>
+            )}
+          </span>
         </div>
         {isCameraCardHidden ? (
           <button
@@ -246,9 +271,9 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
             Show Call
           </button>
         ) : (
-          <article className="camera-card" aria-label="Rahul camera" draggable>
+          <article className="camera-card" aria-label={`${peerName} camera`} draggable>
             <div className="camera-card-header">
-              <strong>Rahul</strong>
+              <strong>{peerName}</strong>
               <div>
                 <button
                   type="button"
@@ -334,18 +359,22 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
             </span>
           ))}
         </div>
-        <section className="buffer-overlay" aria-live="polite">
-          <h1>Paused to keep you together</h1>
-          <p>Rahul is buffering</p>
-          <div className="meter">
-            <span style={{ width: "64%" }} />
-          </div>
-          <small>Camera and chat are still available.</small>
-        </section>
-        <section className="reconnect-overlay" aria-live="polite">
-          <h2>Rahul disconnected.</h2>
-          <p>The movie has been paused. Reconnecting...</p>
-        </section>
+        {snapshot.sync.strictSyncPaused || snapshot.buffer.bufferingParticipant ? (
+          <section className="buffer-overlay" aria-live="polite">
+            <h1>Paused to keep you together</h1>
+            <p>{snapshot.buffer.bufferingParticipant ?? peerName} is buffering</p>
+            <div className="meter">
+              <span style={{ width: `${String(snapshot.buffer.percent)}%` }} />
+            </div>
+            <small>Camera and chat are still available.</small>
+          </section>
+        ) : null}
+        {snapshot.sync.roomState === "RECONNECTING" ? (
+          <section className="reconnect-overlay" aria-live="polite">
+            <h2>{peerName} disconnected.</h2>
+            <p>The movie has been paused. Reconnecting...</p>
+          </section>
+        ) : null}
         {privacyNotice ? (
           <div className="privacy-toast" role="status" aria-live="polite">
             {privacyNotice}
@@ -410,21 +439,56 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
           {reactionWarning ? <span role="status">{reactionWarning}</span> : null}
         </div>
         <nav className="control-dock" aria-label="Cinema controls">
-          <button type="button" aria-label="Back 10 seconds">
+          <button
+            type="button"
+            aria-label="Back 10 seconds"
+            onClick={() => {
+              void seekRelative(-10_000).then((next) => {
+                if (next) {
+                  onSnapshot(next);
+                }
+              });
+            }}
+          >
             -10
           </button>
-          <button type="button" aria-label="Pause for both participants">
-            Pause
+          <button
+            type="button"
+            aria-label="Pause for both participants"
+            onClick={() => {
+              const action =
+                snapshot.sync.roomState === "PLAYING" ? pausePlayback : resumePlayback;
+              void action().then((next) => {
+                if (next) {
+                  onSnapshot(next);
+                }
+              });
+            }}
+          >
+            {snapshot.sync.roomState === "PLAYING" ? "Pause" : "Resume"}
           </button>
-          <button type="button" aria-label="Forward 10 seconds">
+          <button
+            type="button"
+            aria-label="Forward 10 seconds"
+            onClick={() => {
+              void seekRelative(10_000).then((next) => {
+                if (next) {
+                  onSnapshot(next);
+                }
+              });
+            }}
+          >
             +10
           </button>
           <button
             type="button"
             aria-label="Mute microphone"
             onClick={() => {
-              setMicrophoneEnabled((current) => !current);
-              setCallMode((current) => (current === "OFF" ? "VOICE_ONLY" : current));
+              void setMicrophoneEnabled(!microphoneEnabled).then((next) => {
+                if (next) {
+                  onSnapshot(next);
+                }
+              });
             }}
           >
             {microphoneEnabled ? "Mic On" : "Mic"}
@@ -433,11 +497,12 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
             type="button"
             aria-label="Toggle camera"
             onClick={() => {
-              setCameraEnabled((current) => !current);
-              setCallMode((current) =>
-                current === "OFF" || current === "VOICE_ONLY" ? "VIDEO_VOICE" : current,
-              );
-              setIsCameraCardHidden(false);
+              void setCameraEnabled(!cameraEnabled).then((next) => {
+                if (next) {
+                  onSnapshot(next);
+                  setIsCameraCardHidden(false);
+                }
+              });
             }}
           >
             {cameraEnabled ? "Camera" : "Camera Off"}
@@ -460,6 +525,21 @@ export function CinemaMode({ onLeave }: CinemaModeProps) {
           >
             React
           </button>
+          {isHost && (
+            <button
+              type="button"
+              aria-label={sharedControls ? "Switch to Host Only" : "Switch to Shared Controls"}
+              onClick={() => {
+                void setSharedControls(!sharedControls).then((next) => {
+                  if (next) {
+                    onSnapshot(next);
+                  }
+                });
+              }}
+            >
+              {sharedControls ? "Shared" : "Host Only"}
+            </button>
+          )}
           <button type="button" onClick={onLeave} aria-label="Open party menu">
             More
           </button>

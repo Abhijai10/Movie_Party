@@ -1,6 +1,6 @@
 use std::{net::Ipv4Addr, path::PathBuf};
 
-use serde::Deserialize;
+use serde::{self, Deserialize};
 use tokio::process::Command;
 
 pub const DEFAULT_TAILSCALE_PORT: u16 = 47_821;
@@ -97,10 +97,11 @@ pub fn parse_status_json(bytes: &[u8]) -> Result<TailscaleStatus, TailscaleError
         Some("Running" | "Starting" | "NeedsLogin")
     ) && !matches!(raw.backend_state.as_deref(), Some("NeedsLogin"));
 
-    let local_ipv4 = raw
+    let local_ipv4: Option<Ipv4Addr> = raw
         .self_node
         .as_ref()
-        .and_then(|node| first_ipv4(&node.tailscale_ips));
+        .map(|node: &RawNode| node.tailscale_ips.clone())
+        .and_then(|ips: Vec<String>| first_ipv4(&ips));
 
     let peers = raw
         .peer
@@ -165,9 +166,17 @@ struct RawStatus {
     peer: Option<std::collections::BTreeMap<String, RawNode>>,
 }
 
+fn option_vec_string_null_as_empty<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<Vec<String>> = Deserialize::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
+
 #[derive(Debug, Deserialize)]
 struct RawNode {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "option_vec_string_null_as_empty")]
     #[serde(rename = "TailscaleIPs")]
     tailscale_ips: Vec<String>,
     #[serde(rename = "DNSName")]
@@ -205,6 +214,24 @@ mod tests {
         assert!(status.signed_in);
         assert_eq!(status.local_ipv4.expect("ipv4").to_string(), "100.64.0.10");
         assert_eq!(status.peers[0].path, TailscalePath::Direct);
+    }
+
+    #[test]
+    fn parses_real_macos_tailscale_json_with_nulls() {
+        let json_str = r#"{"BackendState": "Running", "TailscaleIPs": null, "Self": {"TailscaleIPs": null, "DNSName": "", "Online": false, "CurAddr": "", "Relay": ""}, "Peer": null}"#;
+        let result = parse_status_json(json_str.as_bytes());
+        assert!(
+            result.is_ok(),
+            "null-valued fields must not fail to parse: {:?}",
+            result.err()
+        );
+        let status = result.unwrap();
+        assert!(
+            status.signed_in,
+            "BackendState=Running means tailscale is signed in"
+        );
+        assert!(status.local_ipv4.is_none(), "null IPs → None");
+        assert!(status.peers.is_empty());
     }
 
     #[test]

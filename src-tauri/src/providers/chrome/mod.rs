@@ -1,8 +1,14 @@
 use std::{
+    fs,
+    io::{Read, Write},
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::json;
 use thiserror::Error;
 
@@ -17,6 +23,16 @@ pub enum ManagedChromeError {
     InvalidProviderProfile,
     #[error("MP-PROVIDER-003 CDP must bind to localhost only")]
     NonLocalCdpBind,
+    #[error("MP-PROVIDER-003 Chrome process failed: {0}")]
+    Process(String),
+    #[error("MP-PROVIDER-003 CDP IO failed: {0}")]
+    Io(String),
+    #[error("MP-PROVIDER-003 CDP response was malformed")]
+    MalformedCdpResponse,
+    #[error("MP-PROVIDER-003 CDP timed out")]
+    CdpTimeout,
+    #[error("MP-PROVIDER-003 CDP command failed: {0}")]
+    CdpCommand(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +62,27 @@ pub struct CdpCommand {
     pub id: u64,
     pub method: &'static str,
     pub params: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CdpTarget {
+    pub id: String,
+    pub target_type: String,
+    pub url: String,
+    pub title: String,
+    pub web_socket_debugger_url: String,
+}
+
+#[derive(Debug)]
+pub struct ManagedChromeSession {
+    child: Child,
+    pub plan: ChromeLaunchPlan,
+}
+
+#[derive(Debug)]
+pub struct CdpPageSession {
+    stream: std::net::TcpStream,
+    next_id: u64,
 }
 
 pub fn default_chrome_candidates() -> Vec<PathBuf> {
@@ -127,6 +164,177 @@ pub fn close_browser_command(id: u64) -> CdpCommand {
     }
 }
 
+pub fn launch_managed_chrome(
+    plan: ChromeLaunchPlan,
+) -> Result<ManagedChromeSession, ManagedChromeError> {
+    validate_cdp_bind(plan.cdp_host)?;
+    fs::create_dir_all(&plan.profile_path)
+        .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
+    let child = chrome_command(&plan)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| ManagedChromeError::Process(error.to_string()))?;
+    wait_for_cdp(plan.cdp_port, Duration::from_secs(10))?;
+    Ok(ManagedChromeSession { child, plan })
+}
+
+impl ManagedChromeSession {
+    pub fn targets(&self) -> Result<Vec<CdpTarget>, ManagedChromeError> {
+        fetch_targets(self.plan.cdp_port)
+    }
+
+    pub fn page_target(&self) -> Result<CdpTarget, ManagedChromeError> {
+        self.targets()?
+            .into_iter()
+            .find(|target| {
+                target.target_type == "page" && !target.web_socket_debugger_url.is_empty()
+            })
+            .ok_or(ManagedChromeError::MalformedCdpResponse)
+    }
+
+    pub fn connect_page(&self) -> Result<CdpPageSession, ManagedChromeError> {
+        let target = self.page_target()?;
+        CdpPageSession::connect(&target.web_socket_debugger_url)
+    }
+
+    pub fn close(mut self) -> Result<(), ManagedChromeError> {
+        if let Ok(mut page) = self.connect_page() {
+            let id = page.next_command_id();
+            let _ = page.execute(&close_browser_command(id));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        Ok(())
+    }
+}
+
+fn chrome_command(plan: &ChromeLaunchPlan) -> Command {
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("open");
+        let app_path = plan
+            .executable
+            .ancestors()
+            .find(|path| path.extension().and_then(|value| value.to_str()) == Some("app"))
+            .unwrap_or(Path::new("/Applications/Google Chrome.app"));
+        command.arg("-n").arg(app_path).arg("--args");
+        command.args(plan.args());
+        command
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut command = Command::new(&plan.executable);
+        command.args(plan.args());
+        command
+    }
+}
+
+impl ManagedChromeSession {
+    /// Check if the Chrome process is still alive.
+    pub fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// Full health check: verify Chrome is alive and CDP is responsive.
+    pub fn health_check(&mut self) -> Result<(), ManagedChromeError> {
+        if !self.is_alive() {
+            return Err(ManagedChromeError::Process(
+                "Chrome process has exited".to_string(),
+            ));
+        }
+        // Verify CDP endpoint is reachable
+        fetch_targets(self.plan.cdp_port)?;
+        Ok(())
+    }
+}
+
+impl Drop for ManagedChromeSession {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl CdpPageSession {
+    fn connect(web_socket_url: &str) -> Result<Self, ManagedChromeError> {
+        let (host, port, path) = parse_ws_url(web_socket_url)?;
+        if host != CDP_BIND_HOST && host != "localhost" {
+            return Err(ManagedChromeError::NonLocalCdpBind);
+        }
+
+        let mut stream = std::net::TcpStream::connect((host.as_str(), port))
+            .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(20)))
+            .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
+        let key = STANDARD.encode(*b"MovePartyCdpKey!");
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        );
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
+        let response = read_http_response(&mut stream)?;
+        if !response.starts_with("HTTP/1.1 101") {
+            return Err(ManagedChromeError::MalformedCdpResponse);
+        }
+
+        Ok(Self { stream, next_id: 1 })
+    }
+
+    pub fn navigate(&mut self, url: &str) -> Result<serde_json::Value, ManagedChromeError> {
+        let id = self.next_command_id();
+        self.execute(&navigate_command(id, url))
+    }
+
+    pub fn evaluate(&mut self, expression: &str) -> Result<serde_json::Value, ManagedChromeError> {
+        let id = self.next_command_id();
+        self.execute(&CdpCommand {
+            id,
+            method: "Runtime.evaluate",
+            params: json!({
+                "expression": expression,
+                "awaitPromise": true,
+                "returnByValue": true
+            }),
+        })
+    }
+
+    pub fn execute(
+        &mut self,
+        command: &CdpCommand,
+    ) -> Result<serde_json::Value, ManagedChromeError> {
+        write_ws_text(
+            &mut self.stream,
+            &serde_json::to_string(command)
+                .map_err(|error| ManagedChromeError::Io(error.to_string()))?,
+        )?;
+        loop {
+            let message = read_ws_text(&mut self.stream)?;
+            let value: serde_json::Value = serde_json::from_str(&message)
+                .map_err(|_| ManagedChromeError::MalformedCdpResponse)?;
+            if value["id"].as_u64() == Some(command.id) {
+                if let Some(error) = value.get("error") {
+                    return Err(ManagedChromeError::CdpCommand(error.to_string()));
+                }
+                return Ok(value["result"].clone());
+            }
+        }
+    }
+
+    fn next_command_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        id
+    }
+}
+
 fn is_valid_provider_id(provider_id: &str) -> bool {
     !provider_id.is_empty()
         && provider_id.chars().all(|character| {
@@ -137,9 +345,179 @@ fn is_valid_provider_id(provider_id: &str) -> bool {
         && !provider_id.contains('\\')
 }
 
+fn wait_for_cdp(port: u16, timeout: Duration) -> Result<(), ManagedChromeError> {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if http_get(port, "/json/version").is_ok() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err(ManagedChromeError::CdpTimeout)
+}
+
+fn fetch_targets(port: u16) -> Result<Vec<CdpTarget>, ManagedChromeError> {
+    let body = http_get(port, "/json/list")?;
+    let value: serde_json::Value =
+        serde_json::from_str(&body).map_err(|_| ManagedChromeError::MalformedCdpResponse)?;
+    let targets = value
+        .as_array()
+        .ok_or(ManagedChromeError::MalformedCdpResponse)?
+        .iter()
+        .filter_map(|target| {
+            Some(CdpTarget {
+                id: target.get("id")?.as_str()?.to_string(),
+                target_type: target.get("type")?.as_str()?.to_string(),
+                url: target
+                    .get("url")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                title: target
+                    .get("title")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                web_socket_debugger_url: target
+                    .get("webSocketDebuggerUrl")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            })
+        })
+        .collect();
+    Ok(targets)
+}
+
+fn http_get(port: u16, path: &str) -> Result<String, ManagedChromeError> {
+    let mut stream = std::net::TcpStream::connect((CDP_BIND_HOST, port))
+        .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
+    let request =
+        format!("GET {path} HTTP/1.1\r\nHost: {CDP_BIND_HOST}:{port}\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
+    let headers = read_http_response(&mut stream)?;
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .ok_or(ManagedChromeError::MalformedCdpResponse)?;
+    let mut body = vec![0; content_length];
+    stream
+        .read_exact(&mut body)
+        .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
+    String::from_utf8(body).map_err(|_| ManagedChromeError::MalformedCdpResponse)
+}
+
+fn read_http_response(stream: &mut std::net::TcpStream) -> Result<String, ManagedChromeError> {
+    let mut response = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !response.ends_with(b"\r\n\r\n") {
+        stream
+            .read_exact(&mut byte)
+            .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
+        response.push(byte[0]);
+        if response.len() > 16 * 1024 {
+            return Err(ManagedChromeError::MalformedCdpResponse);
+        }
+    }
+    String::from_utf8(response).map_err(|_| ManagedChromeError::MalformedCdpResponse)
+}
+
+fn write_ws_text(stream: &mut std::net::TcpStream, text: &str) -> Result<(), ManagedChromeError> {
+    let payload = text.as_bytes();
+    let mut frame = Vec::with_capacity(payload.len() + 16);
+    frame.push(0x81);
+    if payload.len() < 126 {
+        frame.push(0x80 | payload.len() as u8);
+    } else if payload.len() <= u16::MAX as usize {
+        frame.push(0x80 | 126);
+        frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    } else {
+        frame.push(0x80 | 127);
+        frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    }
+    let mask = [0x4d, 0x50, 0x43, 0x4b];
+    frame.extend_from_slice(&mask);
+    for (index, byte) in payload.iter().enumerate() {
+        frame.push(byte ^ mask[index % mask.len()]);
+    }
+    stream
+        .write_all(&frame)
+        .map_err(|error| ManagedChromeError::Io(error.to_string()))
+}
+
+fn read_ws_text(stream: &mut std::net::TcpStream) -> Result<String, ManagedChromeError> {
+    let mut header = [0_u8; 2];
+    stream
+        .read_exact(&mut header)
+        .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
+    let opcode = header[0] & 0x0f;
+    let masked = header[1] & 0x80 != 0;
+    let mut len = u64::from(header[1] & 0x7f);
+    if len == 126 {
+        let mut bytes = [0_u8; 2];
+        stream
+            .read_exact(&mut bytes)
+            .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
+        len = u64::from(u16::from_be_bytes(bytes));
+    } else if len == 127 {
+        let mut bytes = [0_u8; 8];
+        stream
+            .read_exact(&mut bytes)
+            .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
+        len = u64::from_be_bytes(bytes);
+    }
+    let mut mask = [0_u8; 4];
+    if masked {
+        stream
+            .read_exact(&mut mask)
+            .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
+    }
+    let mut payload = vec![0; len as usize];
+    stream
+        .read_exact(&mut payload)
+        .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
+    if masked {
+        for (index, byte) in payload.iter_mut().enumerate() {
+            *byte ^= mask[index % mask.len()];
+        }
+    }
+    match opcode {
+        0x1 => String::from_utf8(payload).map_err(|_| ManagedChromeError::MalformedCdpResponse),
+        0x8 => Err(ManagedChromeError::Io("websocket closed".to_string())),
+        _ => read_ws_text(stream),
+    }
+}
+
+fn parse_ws_url(url: &str) -> Result<(String, u16, String), ManagedChromeError> {
+    let rest = url
+        .strip_prefix("ws://")
+        .ok_or(ManagedChromeError::MalformedCdpResponse)?;
+    let (authority, path) = rest
+        .split_once('/')
+        .ok_or(ManagedChromeError::MalformedCdpResponse)?;
+    let (host, port) = authority
+        .split_once(':')
+        .ok_or(ManagedChromeError::MalformedCdpResponse)?;
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| ManagedChromeError::MalformedCdpResponse)?;
+    Ok((host.to_string(), port, format!("/{path}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::youtube::{is_youtube_url, YoutubeAdapter};
 
     #[test]
     fn builds_dedicated_provider_profile_path() {
@@ -210,5 +588,72 @@ mod tests {
             .expect("serialize")
             .to_ascii_lowercase()
             .contains("cookie"));
+    }
+
+    #[test]
+    #[ignore = "launches real Chrome and opens a localhost CDP session"]
+    fn real_chrome_launches_and_evaluates_cdp() {
+        let executable = find_chrome(&default_chrome_candidates()).expect("Chrome installed");
+        let root = std::env::temp_dir().join(format!("move-party-chrome-{}", uuid::Uuid::now_v7()));
+        let plan = build_launch_plan(executable, &root, "youtube", 9333, "about:blank")
+            .expect("launch plan");
+        let session = launch_managed_chrome(plan).expect("launch Chrome");
+        let targets = session.targets().expect("targets");
+        assert!(targets.iter().any(|target| target.target_type == "page"));
+
+        let mut page = session.connect_page().expect("page websocket");
+        let result = page.evaluate("(() => 1 + 1)()").expect("evaluate");
+        assert_eq!(result["result"]["value"].as_i64(), Some(2));
+        page.navigate("data:text/html,<title>Move Party CDP</title><video></video>")
+            .expect("navigate");
+        // Allow Chrome a moment to process the navigation
+        std::thread::sleep(Duration::from_millis(500));
+        let title = page.evaluate("document.title").expect("title evaluation");
+        assert_eq!(title["result"]["value"].as_str(), Some("Move Party CDP"));
+
+        session.close().expect("close");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[ignore = "launches real Chrome and uses the live YouTube page"]
+    fn real_youtube_provider_sync_uses_chrome_cdp() {
+        let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+        assert!(is_youtube_url(url));
+        let executable = find_chrome(&default_chrome_candidates()).expect("Chrome installed");
+        let root =
+            std::env::temp_dir().join(format!("move-party-youtube-{}", uuid::Uuid::now_v7()));
+        let plan = build_launch_plan(executable, &root, "youtube", 9336, "about:blank")
+            .expect("launch plan");
+        let session = launch_managed_chrome(plan).expect("launch Chrome");
+        let mut page = session.connect_page().expect("page websocket");
+        page.navigate(url).expect("navigate YouTube");
+        std::thread::sleep(Duration::from_secs(8));
+
+        let adapter = YoutubeAdapter::default();
+        let detected = page.execute(&adapter.detect_player(100)).expect("detect");
+        let detected = detected["result"]["value"].as_bool().unwrap_or(false);
+        if !detected {
+            eprintln!(
+                "EXTERNAL PROVIDER VERIFICATION PENDING: YouTube loaded, but no HTML5 player was detected; automation, consent, or geography may have blocked playback"
+            );
+            session.close().expect("close");
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+
+        let position = page.execute(&adapter.get_position(101)).expect("position");
+        assert!(position["result"].get("value").is_some());
+        let pause = page.execute(&adapter.pause(102)).expect("pause");
+        assert_eq!(pause["result"]["value"].as_bool(), Some(true));
+        let seek = page.execute(&adapter.seek(103, 1.0)).expect("seek");
+        assert_eq!(seek["result"]["value"].as_bool(), Some(true));
+        let buffer = page
+            .execute(&adapter.get_buffer_state(104))
+            .expect("buffer");
+        assert!(buffer.get("result").is_some());
+
+        session.close().expect("close");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

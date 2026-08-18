@@ -1,7 +1,9 @@
 use super::{
     chrome::CdpCommand,
     generic::GenericProviderAdapter,
-    hotstar, netflix, prime,
+    hotstar::{self, HotstarAdapter},
+    netflix::{self, NetflixAdapter},
+    prime::{self, PrimeAdapter},
     youtube::{self, YoutubeAdapter},
 };
 
@@ -55,6 +57,15 @@ pub enum ProviderRecoveryAction {
     StrictGlobalPause,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderRuntimeError {
+    LoginRequired,
+    MediaNotDetected,
+    PlayerCommandRejected,
+    ProviderPageClosed,
+    Unknown,
+}
+
 pub fn provider_id_from_str(provider_id: &str) -> Option<ProviderId> {
     match provider_id {
         youtube::PROVIDER_ID => Some(ProviderId::YouTube),
@@ -97,6 +108,68 @@ pub fn command_for_action(
             generic_command(command_id, action)
         }
     }
+}
+
+pub fn login_required_command(provider: ProviderId, command_id: u64) -> CdpCommand {
+    match provider {
+        ProviderId::YouTube => GenericProviderAdapter.detect_page(command_id),
+        ProviderId::Netflix => NetflixAdapter::default().login_required(command_id),
+        ProviderId::Prime => PrimeAdapter::default().login_required(command_id),
+        ProviderId::JioHotstar => HotstarAdapter::default().login_required(command_id),
+    }
+}
+
+pub fn detect_media_command(provider: ProviderId, command_id: u64) -> CdpCommand {
+    match provider {
+        ProviderId::YouTube => YoutubeAdapter::default().detect_player(command_id),
+        ProviderId::Netflix => NetflixAdapter::default().detect_media(command_id),
+        ProviderId::Prime => PrimeAdapter::default().detect_media(command_id),
+        ProviderId::JioHotstar => HotstarAdapter::default().detect_media(command_id),
+    }
+}
+
+pub fn media_identity_command(provider: ProviderId, command_id: u64) -> CdpCommand {
+    match provider {
+        ProviderId::YouTube => GenericProviderAdapter.identify_media(command_id),
+        ProviderId::Netflix => NetflixAdapter::default().media_identity(command_id),
+        ProviderId::Prime => PrimeAdapter::default().media_identity(command_id),
+        ProviderId::JioHotstar => HotstarAdapter::default().media_identity(command_id),
+    }
+}
+
+pub fn position_command(provider: ProviderId, command_id: u64) -> CdpCommand {
+    match provider {
+        ProviderId::YouTube => YoutubeAdapter::default().get_position(command_id),
+        ProviderId::Netflix | ProviderId::Prime | ProviderId::JioHotstar => {
+            GenericProviderAdapter.get_position(command_id)
+        }
+    }
+}
+
+pub fn buffer_command(provider: ProviderId, command_id: u64) -> CdpCommand {
+    match provider {
+        ProviderId::YouTube => YoutubeAdapter::default().get_buffer_state(command_id),
+        ProviderId::Netflix | ProviderId::Prime | ProviderId::JioHotstar => {
+            GenericProviderAdapter.get_buffer_state(command_id)
+        }
+    }
+}
+
+pub fn map_provider_error(
+    login_required: bool,
+    media_detected: bool,
+    target_open: bool,
+) -> Option<ProviderRuntimeError> {
+    if !target_open {
+        return Some(ProviderRuntimeError::ProviderPageClosed);
+    }
+    if login_required {
+        return Some(ProviderRuntimeError::LoginRequired);
+    }
+    if !media_detected {
+        return Some(ProviderRuntimeError::MediaNotDetected);
+    }
+    None
 }
 
 pub fn recovery_action(
@@ -180,6 +253,45 @@ mod tests {
 
         assert!(expression(&play).contains(".play()"));
         assert!(expression(&seek).contains("currentTime = 120"));
+    }
+
+    #[test]
+    fn provider_runtime_commands_cover_detection_identity_position_and_buffer() {
+        for provider in [
+            ProviderId::YouTube,
+            ProviderId::Netflix,
+            ProviderId::Prime,
+            ProviderId::JioHotstar,
+        ] {
+            assert_eq!(
+                login_required_command(provider, 1).method,
+                "Runtime.evaluate"
+            );
+            assert_eq!(detect_media_command(provider, 2).method, "Runtime.evaluate");
+            assert_eq!(
+                media_identity_command(provider, 3).method,
+                "Runtime.evaluate"
+            );
+            assert_eq!(position_command(provider, 4).method, "Runtime.evaluate");
+            assert_eq!(buffer_command(provider, 5).method, "Runtime.evaluate");
+        }
+    }
+
+    #[test]
+    fn maps_provider_runtime_errors_without_claiming_support() {
+        assert_eq!(
+            map_provider_error(false, true, false),
+            Some(ProviderRuntimeError::ProviderPageClosed)
+        );
+        assert_eq!(
+            map_provider_error(true, false, true),
+            Some(ProviderRuntimeError::LoginRequired)
+        );
+        assert_eq!(
+            map_provider_error(false, false, true),
+            Some(ProviderRuntimeError::MediaNotDetected)
+        );
+        assert_eq!(map_provider_error(false, true, true), None);
     }
 
     #[test]

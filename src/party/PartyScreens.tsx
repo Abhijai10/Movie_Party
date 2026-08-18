@@ -1,3 +1,6 @@
+import type { AppSnapshot, ParticipantSnapshot } from "../backend/appRuntime";
+import { useState } from "react";
+
 type PartyNavProps = {
   onBack: () => void;
 };
@@ -58,10 +61,13 @@ export function CreatePartyScreen({ onBack, onStart }: CreatePartyScreenProps) {
 }
 
 type JoinPartyScreenProps = PartyNavProps & {
-  onJoin: () => void;
+  snapshot: AppSnapshot;
+  onJoin: (inviteCode: string) => void;
 };
 
 export function JoinPartyScreen({ onBack, onJoin }: JoinPartyScreenProps) {
+  const [inviteCode, setInviteCode] = useState("");
+
   return (
     <main className="app-shell centered-shell">
       <section className="setup-panel" aria-labelledby="join-title">
@@ -71,13 +77,25 @@ export function JoinPartyScreen({ onBack, onJoin }: JoinPartyScreenProps) {
         <h1 id="join-title">Join Move Party</h1>
         <label className="url-field">
           <span>Invite code</span>
-          <input placeholder="moveparty://join/..." />
+          <input
+            value={inviteCode}
+            onChange={(event) => {
+              setInviteCode(event.target.value);
+            }}
+            placeholder="moveparty://join/..."
+          />
         </label>
         <div className="invite-preview">
-          <strong>Abhijai invited you</strong>
-          <span>Interstellar - Local Movie - Strict Sync enabled</span>
+          <strong>Invite preview</strong>
+          <span>{inviteCode.trim().length > 0 ? inviteCode : "Waiting for invite code"}</span>
         </div>
-        <button className="primary-action" type="button" onClick={onJoin}>
+        <button
+          className="primary-action"
+          type="button"
+          onClick={() => {
+            onJoin(inviteCode);
+          }}
+        >
           Join Party
         </button>
       </section>
@@ -86,11 +104,30 @@ export function JoinPartyScreen({ onBack, onJoin }: JoinPartyScreenProps) {
 }
 
 type LobbyScreenProps = PartyNavProps & {
+  snapshot: AppSnapshot;
   onReady: () => void;
   onCinema: () => void;
+  onToggleSharedControls: (enabled: boolean) => void;
 };
 
-export function LobbyScreen({ onBack, onReady, onCinema }: LobbyScreenProps) {
+export function LobbyScreen({
+  snapshot,
+  onBack,
+  onReady,
+  onCinema,
+  onToggleSharedControls,
+}: LobbyScreenProps) {
+  const title = snapshot.media?.filename ?? snapshot.provider.url ?? "Local party";
+  const mode = snapshot.provider.mode.replaceAll("_", " ");
+  const bufferPercent = `${String(snapshot.buffer.percent)}%`;
+  const bufferSeconds = Math.round(snapshot.buffer.guestBufferAheadMs / 1_000);
+  const network = snapshot.network.connected
+    ? `${snapshot.network.transport} - ${snapshot.network.path}`
+    : snapshot.network.path;
+
+  const isHost = snapshot.room.role === "HOST";
+  const sharedControls = snapshot.room.sharedControls;
+
   return (
     <main className="app-shell centered-shell">
       <section className="lobby-panel" aria-labelledby="lobby-title">
@@ -102,22 +139,48 @@ export function LobbyScreen({ onBack, onReady, onCinema }: LobbyScreenProps) {
             Preview Cinema
           </button>
         </div>
-        <h1 id="lobby-title">Interstellar</h1>
-        <p className="mode-line">Local Perfect Mode</p>
+        <h1 id="lobby-title">{title}</h1>
+        <p className="mode-line">{mode}</p>
         <div className="participant-grid">
-          <Participant name="Abhijai" media="Ready" camera="On" mic="Muted" />
-          <Participant name="Rahul" media="Preparing" camera="On" mic="Muted" />
+          {snapshot.participants.map((participant) => (
+            <Participant key={participant.id} participant={participant} />
+          ))}
         </div>
+
+        <fieldset className="segmented-field">
+          <legend>Controls</legend>
+          <button
+            type="button"
+            aria-pressed={!sharedControls}
+            disabled={!isHost}
+            onClick={() => {
+              onToggleSharedControls(false);
+            }}
+          >
+            Host Only
+          </button>
+          <button
+            type="button"
+            aria-pressed={sharedControls}
+            disabled={!isHost}
+            onClick={() => {
+              onToggleSharedControls(true);
+            }}
+          >
+            Shared Controls
+          </button>
+        </fieldset>
+
         <section className="network-summary" aria-label="Network">
           <strong>Network</strong>
-          <span>Direct - 8.4 Mbps - Good</span>
+          <span>{network}</span>
         </section>
         <section className="buffer-summary" aria-label="Guest buffer">
           <strong>Guest Buffer</strong>
           <div className="meter">
-            <span style={{ width: "72%" }} />
+            <span style={{ width: bufferPercent }} />
           </div>
-          <span>2m 41s prepared</span>
+          <span>{bufferSeconds}s prepared</span>
         </section>
         <button className="primary-action" type="button" onClick={onReady}>
           Start When Ready
@@ -128,53 +191,49 @@ export function LobbyScreen({ onBack, onReady, onCinema }: LobbyScreenProps) {
 }
 
 type ParticipantProps = {
-  name: string;
-  media: string;
-  camera: string;
-  mic: string;
+  participant: ParticipantSnapshot;
 };
 
-function Participant({ name, media, camera, mic }: ParticipantProps) {
+function Participant({ participant }: ParticipantProps) {
   return (
     <article className="participant">
-      <h2>{name}</h2>
-      <span>Connected</span>
-      <span>Media {media}</span>
-      <span>Camera {camera}</span>
-      <span>Mic {mic}</span>
+      <h2>{participant.displayName}</h2>
+      <span>{participant.connected ? "Connected" : "Disconnected"}</span>
+      <span>Media {participant.mediaReady ? "Ready" : "Preparing"}</span>
+      <span>Camera {participant.cameraEnabled ? "On" : "Off"}</span>
+      <span>Mic {participant.microphoneEnabled ? "On" : "Muted"}</span>
     </article>
   );
 }
 
 type ReadyCheckScreenProps = {
+  snapshot: AppSnapshot;
   onStart: () => void;
 };
 
-export function ReadyCheckScreen({ onStart }: ReadyCheckScreenProps) {
+export function ReadyCheckScreen({ snapshot, onStart }: ReadyCheckScreenProps) {
   return (
     <main className="app-shell centered-shell">
       <section className="ready-panel" aria-labelledby="ready-title">
         <h1 id="ready-title">Almost ready</h1>
         <ul>
-          <li>
-            <span>Abhijai</span>
-            <strong>READY</strong>
-          </li>
-          <li>
-            <span>Rahul</span>
-            <strong>READY</strong>
-          </li>
+          {snapshot.participants.map((participant) => (
+            <li key={participant.id}>
+              <span>{participant.displayName}</span>
+              <strong>{participant.mediaReady ? "READY" : "WAITING"}</strong>
+            </li>
+          ))}
           <li>
             <span>Media</span>
-            <strong>READY</strong>
+            <strong>{snapshot.media || snapshot.provider.url ? "READY" : "WAITING"}</strong>
           </li>
           <li>
             <span>Network</span>
-            <strong>GOOD</strong>
+            <strong>{snapshot.network.connected ? "CONNECTED" : "WAITING"}</strong>
           </li>
           <li>
             <span>Sync</span>
-            <strong>LOCKED</strong>
+            <strong>{snapshot.room.strictSync ? "LOCKED" : "WAITING"}</strong>
           </li>
         </ul>
         <div className="countdown">3</div>

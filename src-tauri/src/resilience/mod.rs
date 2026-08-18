@@ -1,33 +1,44 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum FailureEvent {
     ChromeCrash,
     HostCrash,
     GuestCrash,
+    TransferInterrupted,
+    TransferResumed,
     TailscaleDisconnect,
     TailscaleReconnect,
     NetworkChange,
     WifiDisconnect,
     SleepWake,
     ProviderLogout,
+    ProviderPageClosed,
+    PlayerFailure,
     CacheCorruption,
     MissingLocalFile,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RecoveryAction {
     RelaunchChromeAndRequireReadiness,
     RestoreHostSessionIfPossible,
     PauseBothAndWaitForGuestReconnect,
+    RestoreTransferAndRebuildBuffer,
+    ResumeAfterTransferCatchesUp,
     PauseBothAndWaitForTailscale,
     RevalidateNetworkAndRebuildBuffers,
     PauseBothAndWaitForNetwork,
     RecheckDevicesAndClocks,
     RequireProviderLoginInChrome,
+    ReopenProviderTargetAndRequireReadiness,
+    ReopenPlayerAndRequireReadiness,
     RemoveCorruptCacheAndReRequestChunks,
     AskHostToLocateFile,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RecoveryPlan {
     pub action: RecoveryAction,
     pub pauses_playback_for_both: bool,
@@ -49,6 +60,16 @@ pub fn recovery_plan(event: FailureEvent) -> RecoveryPlan {
         FailureEvent::GuestCrash => RecoveryPlan {
             action: RecoveryAction::PauseBothAndWaitForGuestReconnect,
             pauses_playback_for_both: true,
+            requires_user_action: false,
+        },
+        FailureEvent::TransferInterrupted => RecoveryPlan {
+            action: RecoveryAction::RestoreTransferAndRebuildBuffer,
+            pauses_playback_for_both: true,
+            requires_user_action: false,
+        },
+        FailureEvent::TransferResumed => RecoveryPlan {
+            action: RecoveryAction::ResumeAfterTransferCatchesUp,
+            pauses_playback_for_both: false,
             requires_user_action: false,
         },
         FailureEvent::TailscaleDisconnect => RecoveryPlan {
@@ -76,6 +97,16 @@ pub fn recovery_plan(event: FailureEvent) -> RecoveryPlan {
             pauses_playback_for_both: true,
             requires_user_action: true,
         },
+        FailureEvent::ProviderPageClosed => RecoveryPlan {
+            action: RecoveryAction::ReopenProviderTargetAndRequireReadiness,
+            pauses_playback_for_both: true,
+            requires_user_action: false,
+        },
+        FailureEvent::PlayerFailure => RecoveryPlan {
+            action: RecoveryAction::ReopenPlayerAndRequireReadiness,
+            pauses_playback_for_both: true,
+            requires_user_action: false,
+        },
         FailureEvent::CacheCorruption => RecoveryPlan {
             action: RecoveryAction::RemoveCorruptCacheAndReRequestChunks,
             pauses_playback_for_both: true,
@@ -99,12 +130,15 @@ mod tests {
             FailureEvent::ChromeCrash,
             FailureEvent::HostCrash,
             FailureEvent::GuestCrash,
+            FailureEvent::TransferInterrupted,
             FailureEvent::TailscaleDisconnect,
             FailureEvent::TailscaleReconnect,
             FailureEvent::NetworkChange,
             FailureEvent::WifiDisconnect,
             FailureEvent::SleepWake,
             FailureEvent::ProviderLogout,
+            FailureEvent::ProviderPageClosed,
+            FailureEvent::PlayerFailure,
             FailureEvent::CacheCorruption,
             FailureEvent::MissingLocalFile,
         ];
@@ -114,6 +148,7 @@ mod tests {
 
             assert!(plan.pauses_playback_for_both);
         }
+        assert!(!recovery_plan(FailureEvent::TransferResumed).pauses_playback_for_both);
     }
 
     #[test]

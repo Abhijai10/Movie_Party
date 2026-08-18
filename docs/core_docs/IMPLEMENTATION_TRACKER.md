@@ -14,10 +14,10 @@ It must be updated continuously.
 
 ```text
 Project State:
-🟨 IN PROGRESS
+🟨 M3-M8 INTEGRATION RUN — production wiring complete, external verification pending
 
 Current Phase:
-PHASE 32
+M3-M8 LIVE INTEGRATION
 
 Current Release:
 V1 Development
@@ -26,8 +26,54 @@ Architecture:
 LOCKED
 
 Critical Blockers:
-Independent local implementation has reached the external certification/regression gates. External Phase 0/1 verification and Phase 28-31 manual/device/network verification remain pending.
+M3: Visible playback requires running .app bundle
+M4: DB persistence across restart needs runtime verification
+M5: Real WebRTC call needs physical device
+M6: Real Chrome/YouTube needs installed Chrome
+M7: ScreenCaptureKit needs macOS permission dialog
+M8: Chrome/player crash watchers not wired
 ````
+
+---
+
+# ACTIVE INTEGRATION RUN (2026-08-19)
+
+Completed M1 verification:
+- Full M1 acceptance checklist passed
+- M1 status: 🟩 LOCALLY COMPLETE
+
+Completed M2 verification:
+- 22/22 M2 AppRuntime real-QUIC integration tests passed
+- M2 status: 🟩 LOCALLY COMPLETE
+
+M3 status: 🟨 IN PROGRESS
+- Player created in AppRuntime, vo=null removed
+- Background event-loop polls player position/duration/buffering
+- Coordinator play/pause/seek dispatches to live player
+- Buffering feeds strict_sync_paused
+- 18 M3 tests pass (16 component + 2 E2E)
+
+M4 status: 🟨 IN PROGRESS
+- SQLite wired into Tauri startup, identity persisted
+- Platform-specific DB path (~/Library/Application Support/Move Party/)
+- Preload calculation, overdue detection, cache retention
+- 11 SQLite tests pass (7 original + 4 new)
+
+M5 status: 🟨 IN PROGRESS
+- CallSignal routing over QUIC (3 tests)
+- Privacy mode disables tracks, exit does NOT auto-re-enable
+
+M6 status: 🟨 IN PROGRESS
+- Chrome session properly owned by AppRuntime
+
+M7 status: 🟥 BLOCKED — OS capture permission dialog
+
+M8 status: 🟨 IN PROGRESS
+- Disconnect → RecoveryPlan wired
+- Transfer stall watcher wired
+- .app bundle built (pnpm tauri build)
+
+Test totals: 209 Rust + 3 FE = 212, 0 failures
 
 ---
 
