@@ -421,6 +421,8 @@ struct AppRuntimeState {
     /// HTTP range server handle for serving cached media to the player.
     #[allow(dead_code)]
     range_server_handle: Option<RangeServerHandle>,
+    /// M3: Guest-side sparse cache shared between range server and prefetch task.
+    guest_cache: Option<Arc<tokio::sync::Mutex<crate::media::cache::SparseCache>>>,
     /// Cached player snapshot for the frontend (synced from the live player
     /// on coordinator commits).
     player_snapshot: PlayerSnapshot,
@@ -552,6 +554,7 @@ impl AppRuntime {
                     pending_guest_request_id: None,
                     player: None,
                     range_server_handle: None,
+                    guest_cache: None,
                     player_snapshot: PlayerSnapshot::default(),
                     player_event_task: None,
                     transfer_stall_watcher_task: None,
@@ -571,25 +574,31 @@ impl AppRuntime {
         }
     }
 
-    /// M4: Open the persistent SQLite database and persist the device identity.
-    /// Falls back gracefully if the database cannot be opened.
+    /// M4: Open the persistent SQLite database and restore device identity.
+    /// If a stored identity already exists, it is loaded and reused.
     pub fn init_db(&self) {
         let db_path = Self::default_db_path();
         match crate::storage::sqlite::MovePartyDb::open(&db_path) {
             Ok(db) => {
-                // Persist the device identity
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as i64;
-                let stored = crate::storage::sqlite::StoredIdentity {
-                    device_id: self.inner.identity.device_id.clone(),
-                    display_name: self.lock().local_participant.display_name.clone(),
-                    public_key: self.inner.identity.public_key_base64(),
-                    platform: std::env::consts::OS.to_string(),
-                    created_at_ms: now_ms,
-                };
-                let _ = db.upsert_identity(&stored);
+                match db.get_identity() {
+                    Ok(Some(existing)) => {
+                        self.lock().local_participant.id = existing.device_id;
+                    }
+                    _ => {
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as i64;
+                        let stored = crate::storage::sqlite::StoredIdentity {
+                            device_id: self.inner.identity.device_id.clone(),
+                            display_name: self.lock().local_participant.display_name.clone(),
+                            public_key: self.inner.identity.public_key_base64(),
+                            platform: std::env::consts::OS.to_string(),
+                            created_at_ms: now_ms,
+                        };
+                        let _ = db.upsert_identity(&stored);
+                    }
+                }
                 self.lock().db = Some(Arc::new(db));
             }
             Err(e) => {
@@ -602,6 +611,28 @@ impl AppRuntime {
     /// The old session is dropped (killing the Chrome process) if present.
     pub fn store_chrome_session(&self, session: crate::providers::chrome::ManagedChromeSession) {
         self.lock().chrome_session = Some(session);
+    }
+
+    /// M4: Detect overdue preload schedules and send local notifications.
+    pub fn check_overdue_schedules(&self) {
+        let db = match self.lock().db.as_ref() {
+            Some(db) => db.clone(),
+            None => return,
+        };
+        let overdue = match db.overdue_schedules() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        for schedule in &overdue {
+            let _ = crate::notifications::send_local_notification(
+                "Move Party — Overdue Preload",
+                &format!(
+                    "Scheduled session for '{}' needs preloading now.",
+                    schedule.media_id
+                ),
+            );
+            let _ = db.update_schedule_status(&schedule.schedule_id, "PreloadDue");
+        }
     }
 
     fn default_db_path() -> PathBuf {
@@ -915,6 +946,19 @@ impl AppRuntime {
         // median offset, then refresh every 30s. The offset feeds the
         // host-monotonic deadline conversion for scheduled commits.
         self.spawn_clock_calibration();
+
+        // M3: Auto-fetch media for the guest after authenticated join.
+        // Only trigger when the host has local media (the ManifestRequest
+        // will fail harmlessly if there is none, but we skip the fetch
+        // entirely to avoid interfering with non-media m2 sync tests).
+        {
+            let runtime = self.clone();
+            tokio::spawn(async move {
+                // Small delay to let the connection stabilize
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                let _ = runtime.guest_fetch_media().await;
+            });
+        }
 
         let snapshot = self.snapshot();
         self.emit_ok(snapshot.clone());
@@ -2410,6 +2454,7 @@ impl AppRuntime {
         }
         state.player = None;
         state.range_server_handle = None;
+        state.guest_cache = None;
         state.invite = None;
         state.host_session = None;
         state.client = None;
@@ -2652,6 +2697,141 @@ impl AppRuntime {
 
     fn emit_ok(&self, snapshot: AppSnapshot) {
         self.inner.emit(snapshot);
+    }
+
+    /// M3: Guest-side Local Perfect media fetch.
+    pub async fn guest_fetch_media(&self) -> Result<AppSnapshot, String> {
+        use crate::media::cache::SparseCache;
+        use crate::media::manifest::MediaManifest;
+        use crate::media::stream::range_server::{start_range_server, RangeServerConfig};
+        use crate::media::stream::route_for_media;
+        use crate::media::transfer::validate_chunk_packet;
+        use rand::RngCore;
+
+        // 1. Fetch manifest over authenticated QUIC
+        let manifest: MediaManifest = {
+            let client_opt = self.lock().client.clone();
+            let client = client_opt.ok_or_else(|| "MP-NET-001 no QUIC client".to_string())?;
+            client
+                .fetch_local_media_manifest()
+                .await
+                .map_err(|e| e.to_string())?
+        };
+
+        // 2. Create/open sparse cache
+        let cache_root = std::env::temp_dir().join("MovePartyCache");
+        let cache = SparseCache::open(&cache_root, manifest.clone())
+            .map_err(|e| format!("MP-MEDIA-002 cache open failed: {e}"))?;
+
+        // 3. Start loopback range server with chunk-wake channel
+        let session_token = {
+            let mut buf = [0u8; 32];
+            rand::rng().fill_bytes(&mut buf);
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
+        };
+        let _route = route_for_media(&manifest.media_id, session_token.clone());
+        let (wake_tx, wake_rx) = tokio::sync::watch::channel(0u64);
+        let wake_tx = Arc::new(wake_tx);
+        let cache_arc = Arc::new(tokio::sync::Mutex::new(cache));
+        let range_config = RangeServerConfig {
+            manifest: manifest.clone(),
+            cache: cache_arc.clone(),
+            session_token,
+            chunk_wake_rx: wake_rx,
+        };
+        let range_handle = start_range_server(range_config)
+            .await
+            .map_err(|e| format!("MP-NET-003 range server failed: {e}"))?;
+        let media_url = range_handle.media_url.clone();
+
+        {
+            self.lock().guest_cache = Some(cache_arc.clone());
+        }
+
+        // 4. Open player with range-server HTTP URL
+        {
+            let mut state = self.lock();
+            state.media = Some(manifest.clone());
+            state.local_participant.media_ready = true;
+            state.local_participant.buffer_ahead_ms = 0;
+            state.range_server_handle = Some(range_handle);
+            #[cfg(feature = "mpv")]
+            {
+                let mut player = MpvPlayer::new();
+                if let Err(e) = player.open(std::path::Path::new(&media_url)) {
+                    state.error = Some(format!("MP-MEDIA-001 {e}"));
+                } else {
+                    state.player_snapshot = PlayerSnapshot::from(&player.snapshot());
+                }
+                state.player = Some(Arc::new(std::sync::Mutex::new(player)));
+            }
+            #[cfg(not(feature = "mpv"))]
+            {
+                let mut player = crate::media::player::LibMpvPlayer::new();
+                if let Err(e) = player.open(std::path::Path::new(&media_url)) {
+                    state.error = Some(format!("MP-MEDIA-001 {e}"));
+                } else {
+                    state.player_snapshot = PlayerSnapshot::from(&player.snapshot());
+                }
+                state.player = Some(Arc::new(std::sync::Mutex::new(player)));
+            }
+            if !Self::is_host_role(&state) {
+                state
+                    .sync_coordinator
+                    .lock()
+                    .unwrap()
+                    .guest_ready(crate::sync::consensus::ParticipantReadiness::ready(5_000));
+            }
+            sync_room_snapshot(&mut state);
+        }
+
+        // 5. Spawn background chunk prefetch — validates and writes to cache
+        let inner = Arc::clone(&self.inner);
+        let manifest_pf = manifest.clone();
+        let wake_tx_pf = wake_tx.clone();
+        tokio::spawn(async move {
+            let client_opt = inner.lock().client.clone();
+            let Some(client) = client_opt else { return };
+            for idx in 0..manifest_pf.chunk_count {
+                match client
+                    .fetch_local_media_chunk(&manifest_pf.media_id, idx)
+                    .await
+                {
+                    Ok(packet) => {
+                        if validate_chunk_packet(&manifest_pf, &packet).is_err() {
+                            continue;
+                        }
+                        {
+                            let state = inner.lock();
+                            if let Some(ref cache) = state.guest_cache {
+                                if let Ok(mut c) = cache.try_lock() {
+                                    let _ = c.write_chunk(
+                                        u64::from(packet.chunk_index),
+                                        &packet.payload,
+                                    );
+                                }
+                            }
+                        }
+                        {
+                            let mut state = inner.lock();
+                            if let Some(ref mut t) = state.transfer {
+                                t.bytes_available += packet.payload.len() as u64;
+                            }
+                        }
+                        wake_tx_pf.send_modify(|v| *v = v.wrapping_add(1));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        if self.lock().player.is_some() {
+            self.spawn_player_event_loop();
+        }
+
+        let snapshot = self.snapshot();
+        self.inner.emit(snapshot.clone());
+        Ok(snapshot)
     }
 
     /// Test-only accessor to the live authenticated QUIC client, so

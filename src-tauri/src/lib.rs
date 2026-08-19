@@ -30,6 +30,7 @@ pub fn run() {
             // M4: Initialize the SQLite database on startup
             let runtime = app.state::<app_runtime::AppRuntime>();
             runtime.init_db();
+            runtime.check_overdue_schedules();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
