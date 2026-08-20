@@ -483,7 +483,7 @@ struct AppRuntimeState {
     /// Root directory for Move Party's own cache (guest Local Perfect data).
     cache_root: Option<PathBuf>,
     /// Background scheduler worker (M4.3). Owned so it can be aborted.
-    scheduler_task: Option<tokio::task::JoinHandle<()>>,
+    scheduler_task: Option<tauri::async_runtime::JoinHandle<()>>,
     // ── M6: Managed Chrome session ownership ────────────────────────────
     /// Owned Chrome child process (previously leaked via forget).
     chrome_session: Option<crate::providers::chrome::ManagedChromeSession>,
@@ -1104,7 +1104,7 @@ impl AppRuntime {
 
     fn spawn_scheduler_worker_inner(&self, now_fn: fn() -> i64, poll_interval_ms: u64) {
         let inner = Arc::clone(&self.inner);
-        let task = tokio::spawn(async move {
+        let task = tauri::async_runtime::spawn(async move {
             loop {
                 let now = now_fn();
                 let db_opt = {
@@ -3960,6 +3960,14 @@ mod tests {
         assert!(snapshot.privacy_mode);
         assert!(!snapshot.call.camera.enabled);
         assert!(!snapshot.call.microphone.enabled);
+    }
+
+    #[test]
+    fn scheduler_spawn_is_safe_without_entered_tokio_reactor() {
+        let runtime = AppRuntime::new();
+
+        runtime.spawn_scheduler_worker();
+        runtime.stop_scheduler_for_test();
     }
 
     #[test]
