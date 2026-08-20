@@ -59,6 +59,7 @@ export function CinemaMode({ snapshot, onSnapshot, onLeave }: CinemaModeProps) {
   const cameraEnabled = snapshot.call.camera.enabled;
   const microphoneEnabled = snapshot.call.microphone.enabled;
   const callMode = snapshot.call.mode;
+  const callStatus = snapshot.call.status;
   const movieTitle = snapshot.media?.filename ?? snapshot.provider.url ?? "Movie";
   const peer = snapshot.participants.find((participant) => participant.role !== snapshot.room.role);
   const peerName = peer?.displayName ?? "Peer";
@@ -85,11 +86,16 @@ export function CinemaMode({ snapshot, onSnapshot, onLeave }: CinemaModeProps) {
 
   useEffect(() => {
     const nextKey = `${callMode}:${String(cameraEnabled)}:${String(microphoneEnabled)}:${String(isPrivacyMode)}`;
-    if (callMode === "OFF" || isPrivacyMode || callSessionKey.current === nextKey) {
+    if (callMode === "OFF" || isPrivacyMode) {
+      callSessionKey.current = "";
+      return;
+    }
+    if (callSessionKey.current === nextKey) {
       return;
     }
 
     callSessionKey.current = nextKey;
+    const controller = new AbortController();
     void runLocalPeerConnectionLoopback(
       callMode,
       cameraEnabled,
@@ -100,11 +106,23 @@ export function CinemaMode({ snapshot, onSnapshot, onLeave }: CinemaModeProps) {
           onSnapshot(next);
         }
       },
+      controller.signal,
     ).then((result) => {
+      if (controller.signal.aborted) {
+        return;
+      }
       if (!result.connected) {
-        setPrivacyNotice("Call signalling is ready. Waiting for media connection.");
+        setPrivacyNotice(
+          result.status === "unavailable"
+            ? `Call unavailable${result.errorCode ? ` (${result.errorCode})` : ""}.`
+            : "Call degraded. Movie playback remains prioritized.",
+        );
       }
     });
+
+    return () => {
+      controller.abort();
+    };
   }, [callMode, cameraEnabled, microphoneEnabled, isPrivacyMode, onSnapshot]);
 
   useEffect(() => {
@@ -301,7 +319,9 @@ export function CinemaMode({ snapshot, onSnapshot, onLeave }: CinemaModeProps) {
             <span>
               {callMode === "OFF"
                 ? "Call off"
-                : `Camera ${cameraEnabled ? "on" : "off"} - Mic ${microphoneEnabled ? "on" : "muted"}`}
+                : `Call ${callStatus} - Camera ${cameraEnabled ? "on" : "off"} - Mic ${
+                    microphoneEnabled ? "on" : "muted"
+                  }`}
             </span>
             {isCameraCardMinimized ? null : (
               <>

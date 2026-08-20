@@ -267,29 +267,37 @@ fn launch_provider(
     runtime: tauri::State<'_, app_runtime::AppRuntime>,
 ) -> Result<app_runtime::AppSnapshot, String> {
     use crate::providers::chrome::{
-        build_launch_plan, default_chrome_candidates, find_chrome, launch_managed_chrome,
+        allocate_local_cdp_port, build_launch_plan, default_chrome_candidates, find_chrome,
+        launch_managed_chrome,
+    };
+    use crate::providers::sync::{provider_accepts_url, provider_id_from_str};
+
+    let provider = provider_id_from_str(&provider_id)
+        .ok_or_else(|| "MP-PROVIDER-002 unsupported provider".to_string())?;
+    if !provider_accepts_url(provider, &url) {
+        return Err("MP-PROVIDER-002 provider URL mismatch".to_string());
+    }
+    let candidates = default_chrome_candidates();
+    let chrome_path = match find_chrome(&candidates) {
+        Ok(path) => path,
+        Err(error) => return Ok(runtime.provider_unavailable(provider_id, url, error.to_string())),
+    };
+    let profiles_root = std::env::temp_dir().join("MovePartyProfiles");
+    let cdp_port = match allocate_local_cdp_port() {
+        Ok(port) => port,
+        Err(error) => return Ok(runtime.provider_unavailable(provider_id, url, error.to_string())),
+    };
+    let plan = match build_launch_plan(chrome_path, &profiles_root, &provider_id, cdp_port, &url) {
+        Ok(plan) => plan,
+        Err(error) => return Ok(runtime.provider_unavailable(provider_id, url, error.to_string())),
+    };
+    runtime.close_provider_session();
+    let session = match launch_managed_chrome(plan) {
+        Ok(session) => session,
+        Err(error) => return Ok(runtime.provider_unavailable(provider_id, url, error.to_string())),
     };
 
-    let candidates = default_chrome_candidates();
-    let chrome_path = find_chrome(&candidates).map_err(|e| e.to_string())?;
-    let profiles_root = std::env::temp_dir().join("MovePartyProfiles");
-    let plan = build_launch_plan(chrome_path, &profiles_root, &provider_id, 0, &url)
-        .map_err(|e| e.to_string())?;
-    let session = launch_managed_chrome(plan).map_err(|e| e.to_string())?;
-
-    let cdp_port = session.plan.cdp_port;
-
-    // M6: Store the session in AppRuntime instead of leaking
-    runtime.store_chrome_session(session);
-
-    // Return a snapshot indicating the provider is launched
-    let mut snap = runtime.snapshot();
-    snap.provider.mode = "PROVIDER_SYNC".to_string();
-    snap.provider.provider_id = Some(provider_id);
-    snap.provider.url = Some(url);
-    snap.provider.state = format!("Chrome launched on CDP port {}", cdp_port);
-
-    Ok(snap)
+    Ok(runtime.store_launched_provider(provider_id, url, session))
 }
 
 #[tauri::command]

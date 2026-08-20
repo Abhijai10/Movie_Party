@@ -16,7 +16,10 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::{
-    call::{validate_signal, CallMode, CallSignal, CameraState, MicState},
+    call::{
+        validate_signal, CallMode, CallRuntimeStatus, CallSignal, CallSignalLedger, CallSignalType,
+        CameraState, MicState,
+    },
     chat::{
         allowed_reactions, validate_chat_message, validate_reaction, ChatMessage, ReactionMessage,
         ReactionRateLimiter,
@@ -139,6 +142,7 @@ impl Default for AppSnapshot {
             },
             call: CallSnapshot {
                 mode: CallMode::VideoVoice,
+                status: CallRuntimeStatus::Unavailable,
                 connected: false,
                 camera: CameraState::tier_b_enabled(),
                 microphone: MicState::default(),
@@ -216,6 +220,7 @@ pub struct NetworkSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct CallSnapshot {
     pub mode: CallMode,
+    pub status: CallRuntimeStatus,
     pub connected: bool,
     pub camera: CameraState,
     pub microphone: MicState,
@@ -394,6 +399,7 @@ struct AppRuntimeState {
     network: NetworkSnapshot,
     call: CallSnapshot,
     call_signals: Vec<CallSignalSnapshot>,
+    call_signal_ledger: CallSignalLedger,
     provider: ProviderSnapshot,
     chat: Vec<ChatSnapshot>,
     reactions: Vec<ReactionSnapshot>,
@@ -592,11 +598,13 @@ impl AppRuntime {
                     },
                     call: CallSnapshot {
                         mode: CallMode::VideoVoice,
+                        status: CallRuntimeStatus::Unavailable,
                         connected: false,
                         camera: CameraState::tier_b_enabled(),
                         microphone: MicState::default(),
                     },
                     call_signals: Vec::new(),
+                    call_signal_ledger: CallSignalLedger::default(),
                     provider: ProviderSnapshot {
                         mode: "LOCAL_PERFECT".to_string(),
                         provider_id: None,
@@ -824,6 +832,42 @@ impl AppRuntime {
     /// The old session is dropped (killing the Chrome process) if present.
     pub fn store_chrome_session(&self, session: crate::providers::chrome::ManagedChromeSession) {
         self.lock().chrome_session = Some(session);
+    }
+
+    pub fn close_provider_session(&self) {
+        self.lock().chrome_session = None;
+    }
+
+    pub fn store_launched_provider(
+        &self,
+        provider_id: String,
+        url: String,
+        session: crate::providers::chrome::ManagedChromeSession,
+    ) -> AppSnapshot {
+        let cdp_port = session.plan.cdp_port;
+        let mut state = self.lock();
+        state.chrome_session = Some(session);
+        state.provider.mode = "PROVIDER_SYNC".to_string();
+        state.provider.provider_id = Some(provider_id);
+        state.provider.url = Some(url);
+        state.provider.state = format!("Chrome launched on CDP port {cdp_port}");
+        state.error = None;
+        snapshot_from_state(&state)
+    }
+
+    pub fn provider_unavailable(
+        &self,
+        provider_id: String,
+        url: String,
+        reason: String,
+    ) -> AppSnapshot {
+        let mut state = self.lock();
+        state.provider.mode = "PROVIDER_SYNC".to_string();
+        state.provider.provider_id = Some(provider_id);
+        state.provider.url = Some(url);
+        state.provider.state = format!("Unavailable: {reason}");
+        state.error = Some(reason);
+        snapshot_from_state(&state)
     }
 
     /// M4: Detect overdue preload schedules and send local notifications.
@@ -2066,6 +2110,16 @@ impl AppRuntime {
         Ok(())
     }
 
+    fn call_signal_type_from_wire(signal_type: &str) -> Option<CallSignalType> {
+        match signal_type {
+            "OFFER" => Some(CallSignalType::Offer),
+            "ANSWER" => Some(CallSignalType::Answer),
+            "ICE" => Some(CallSignalType::Ice),
+            "RENEGOTIATE" => Some(CallSignalType::Renegotiate),
+            _ => None,
+        }
+    }
+
     fn apply_peer_event(
         inner: &Arc<RuntimeInner>,
         envelope: &EventEnvelope,
@@ -2450,11 +2504,49 @@ impl AppRuntime {
                 }
                 QuicServerEvent::CallSignal { signal_type, data } => {
                     // M5: Forward received call signal to the frontend
-                    state.call_signals.push(CallSignalSnapshot {
-                        signal_type,
-                        data,
-                        created_host_time_us: crate::network::quic::monotonic_us(),
-                    });
+                    match Self::call_signal_type_from_wire(&signal_type) {
+                        Some(parsed_type) => {
+                            let signal = CallSignal {
+                                signal_type: parsed_type,
+                                data: data.clone(),
+                            };
+                            match validate_signal(&signal, &mut state.call_signal_ledger) {
+                                Ok(()) => {
+                                    state.call.status = match parsed_type {
+                                        CallSignalType::Answer => CallRuntimeStatus::Connected,
+                                        CallSignalType::Ice if state.call.connected => {
+                                            CallRuntimeStatus::Connected
+                                        }
+                                        CallSignalType::Offer | CallSignalType::Renegotiate => {
+                                            if state.call.connected {
+                                                CallRuntimeStatus::Reconnecting
+                                            } else {
+                                                CallRuntimeStatus::Connecting
+                                            }
+                                        }
+                                        CallSignalType::Ice => CallRuntimeStatus::Connecting,
+                                    };
+                                    state.call.connected =
+                                        state.call.status == CallRuntimeStatus::Connected;
+                                    state.call_signals.push(CallSignalSnapshot {
+                                        signal_type,
+                                        data,
+                                        created_host_time_us: crate::network::quic::monotonic_us(),
+                                    });
+                                }
+                                Err(error) => {
+                                    state.call.status = CallRuntimeStatus::Degraded;
+                                    state.call.connected = false;
+                                    state.error = Some(error);
+                                }
+                            }
+                        }
+                        None => {
+                            state.call.status = CallRuntimeStatus::Degraded;
+                            state.call.connected = false;
+                            state.error = Some("MP-CALL-001 invalid call signal".to_string());
+                        }
+                    }
                 }
             }
             snapshot_from_state(&state)
@@ -3103,8 +3195,17 @@ impl AppRuntime {
         if let Some(range) = state.range_server_handle.take() {
             range.shutdown();
         }
+        state.chrome_session = None;
         state.player = None;
         state.guest_cache = None;
+        state.call.status = CallRuntimeStatus::Ended;
+        state.call.connected = false;
+        state.call.camera = CameraState::disabled();
+        state.call.microphone.enabled = false;
+        state.call_signals.clear();
+        state.call_signal_ledger.reset();
+        state.local_participant.camera_enabled = false;
+        state.local_participant.microphone_enabled = false;
         state.invite = None;
         state.host_session = None;
         state.client = None;
@@ -3238,17 +3339,38 @@ impl AppRuntime {
     pub fn set_call_mode(&self, mode: CallMode) -> AppSnapshot {
         let mut state = self.lock();
         state.call.mode = mode;
+        state.call.connected = false;
+        state.call_signals.clear();
+        state.call_signal_ledger.reset();
         match mode {
             CallMode::VideoVoice => {
-                state.call.camera = CameraState::tier_b_enabled();
+                state.call.status = if state.privacy_mode {
+                    CallRuntimeStatus::Unavailable
+                } else {
+                    CallRuntimeStatus::Connecting
+                };
+                state.call.camera = if state.privacy_mode {
+                    CameraState::disabled()
+                } else {
+                    CameraState::tier_b_enabled()
+                };
             }
             CallMode::VoiceOnly => {
+                state.call.status = if state.privacy_mode {
+                    CallRuntimeStatus::Unavailable
+                } else {
+                    CallRuntimeStatus::Connecting
+                };
                 state.call.camera = CameraState::disabled();
             }
             CallMode::Off => {
+                state.call.status = CallRuntimeStatus::Ended;
                 state.call.camera = CameraState::disabled();
                 state.call.microphone.enabled = false;
             }
+        }
+        if state.privacy_mode {
+            state.call.microphone.enabled = false;
         }
         state.local_participant.camera_enabled = state.call.camera.enabled;
         state.local_participant.microphone_enabled = state.call.microphone.enabled;
@@ -3256,15 +3378,29 @@ impl AppRuntime {
     }
 
     pub fn submit_call_signal(&self, signal: CallSignal) -> Result<AppSnapshot, String> {
-        if !validate_signal(&signal) {
-            return Err("MP-CALL-001 invalid call signal".to_string());
-        }
-
         let signal_type_str = format!("{:?}", signal.signal_type).to_ascii_uppercase();
         let data = signal.data.clone();
         let snapshot = {
             let mut state = self.lock();
-            state.call.connected = true;
+            if state.call.mode == CallMode::Off || state.privacy_mode {
+                state.call.status = CallRuntimeStatus::Unavailable;
+                state.call.connected = false;
+                return Err("MP-CALL-009 call unavailable".to_string());
+            }
+            validate_signal(&signal, &mut state.call_signal_ledger)?;
+            state.call.status = match signal.signal_type {
+                CallSignalType::Answer => CallRuntimeStatus::Connected,
+                CallSignalType::Ice if state.call.connected => CallRuntimeStatus::Connected,
+                CallSignalType::Offer | CallSignalType::Renegotiate => {
+                    if state.call.connected {
+                        CallRuntimeStatus::Reconnecting
+                    } else {
+                        CallRuntimeStatus::Connecting
+                    }
+                }
+                CallSignalType::Ice => CallRuntimeStatus::Connecting,
+            };
+            state.call.connected = state.call.status == CallRuntimeStatus::Connected;
             state.call_signals.push(CallSignalSnapshot {
                 signal_type: signal_type_str.clone(),
                 data: data.clone(),
@@ -3295,6 +3431,10 @@ impl AppRuntime {
     pub fn set_microphone_enabled(&self, enabled: bool) -> AppSnapshot {
         let mut state = self.lock();
         state.call.microphone.enabled = enabled && !state.privacy_mode;
+        if state.privacy_mode {
+            state.call.status = CallRuntimeStatus::Unavailable;
+            state.call.connected = false;
+        }
         state.local_participant.microphone_enabled = state.call.microphone.enabled;
         snapshot_from_state(&state)
     }
@@ -3306,6 +3446,10 @@ impl AppRuntime {
         } else {
             CameraState::disabled()
         };
+        if state.privacy_mode {
+            state.call.status = CallRuntimeStatus::Unavailable;
+            state.call.connected = false;
+        }
         state.local_participant.camera_enabled = state.call.camera.enabled;
         snapshot_from_state(&state)
     }
@@ -3317,6 +3461,10 @@ impl AppRuntime {
             state.ghost_mode = true;
             state.call.camera = CameraState::disabled();
             state.call.microphone.enabled = false;
+            state.call.connected = false;
+            state.call.status = CallRuntimeStatus::Unavailable;
+            state.call_signals.clear();
+            state.call_signal_ledger.reset();
             state.local_participant.camera_enabled = false;
             state.local_participant.microphone_enabled = false;
         }
@@ -3820,13 +3968,35 @@ mod tests {
         let snapshot = runtime
             .submit_call_signal(CallSignal {
                 signal_type: CallSignalType::Offer,
-                data: "{\"type\":\"offer\"}".to_string(),
+                data: r#"{"type":"offer","sdp":"v=0\r\n"}"#.to_string(),
             })
             .expect("signal");
 
-        assert!(snapshot.call.connected);
+        assert_eq!(
+            snapshot.call.status,
+            crate::call::CallRuntimeStatus::Connecting
+        );
+        assert!(!snapshot.call.connected);
         assert_eq!(snapshot.call_signals.len(), 1);
         assert_eq!(snapshot.call_signals[0].signal_type, "OFFER");
+    }
+
+    #[test]
+    fn privacy_mode_blocks_call_mode_from_reenabling_devices() {
+        let runtime = AppRuntime::new();
+        let private = runtime.set_privacy_mode(true);
+        assert!(!private.call.camera.enabled);
+        assert!(!private.call.microphone.enabled);
+
+        let snapshot = runtime.set_call_mode(crate::call::CallMode::VideoVoice);
+
+        assert!(snapshot.privacy_mode);
+        assert!(!snapshot.call.camera.enabled);
+        assert!(!snapshot.call.microphone.enabled);
+        assert_eq!(
+            snapshot.call.status,
+            crate::call::CallRuntimeStatus::Unavailable
+        );
     }
 
     #[test]

@@ -64,6 +64,7 @@ export type AppSnapshot = {
   };
   call: {
     mode: CallMode;
+    status: "connecting" | "connected" | "degraded" | "reconnecting" | "unavailable" | "ended";
     connected: boolean;
     camera: {
       enabled: boolean;

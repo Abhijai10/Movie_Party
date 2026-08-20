@@ -33,6 +33,8 @@ pub enum ManagedChromeError {
     CdpTimeout,
     #[error("MP-PROVIDER-003 CDP command failed: {0}")]
     CdpCommand(String),
+    #[error("MP-PROVIDER-004 invalid CDP port")]
+    InvalidCdpPort,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,6 +131,9 @@ pub fn build_launch_plan(
     cdp_port: u16,
     url: &str,
 ) -> Result<ChromeLaunchPlan, ManagedChromeError> {
+    if cdp_port == 0 {
+        return Err(ManagedChromeError::InvalidCdpPort);
+    }
     let profile_path = provider_profile_path(profiles_root, provider_id)?;
 
     Ok(ChromeLaunchPlan {
@@ -138,6 +143,15 @@ pub fn build_launch_plan(
         cdp_port,
         url: url.to_owned(),
     })
+}
+
+pub fn allocate_local_cdp_port() -> Result<u16, ManagedChromeError> {
+    let listener = std::net::TcpListener::bind((CDP_BIND_HOST, 0))
+        .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
+    listener
+        .local_addr()
+        .map(|addr| addr.port())
+        .map_err(|error| ManagedChromeError::Io(error.to_string()))
 }
 
 pub fn validate_cdp_bind(host: IpAddr) -> Result<(), ManagedChromeError> {
@@ -211,25 +225,9 @@ impl ManagedChromeSession {
 }
 
 fn chrome_command(plan: &ChromeLaunchPlan) -> Command {
-    #[cfg(target_os = "macos")]
-    {
-        let mut command = Command::new("open");
-        let app_path = plan
-            .executable
-            .ancestors()
-            .find(|path| path.extension().and_then(|value| value.to_str()) == Some("app"))
-            .unwrap_or(Path::new("/Applications/Google Chrome.app"));
-        command.arg("-n").arg(app_path).arg("--args");
-        command.args(plan.args());
-        command
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let mut command = Command::new(&plan.executable);
-        command.args(plan.args());
-        command
-    }
+    let mut command = Command::new(&plan.executable);
+    command.args(plan.args());
+    command
 }
 
 impl ManagedChromeSession {
@@ -565,6 +563,36 @@ mod tests {
         assert!(!args
             .iter()
             .any(|arg| arg.to_ascii_lowercase().contains("cookie")));
+    }
+
+    #[test]
+    fn launch_plan_rejects_ephemeral_cdp_port_zero() {
+        let plan = build_launch_plan(
+            PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            Path::new("/tmp/MovePartyProfiles"),
+            "youtube",
+            0,
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        );
+
+        assert_eq!(plan, Err(ManagedChromeError::InvalidCdpPort));
+    }
+
+    #[test]
+    fn chrome_command_owns_the_browser_executable() {
+        let executable =
+            PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
+        let plan = build_launch_plan(
+            executable.clone(),
+            Path::new("/tmp/MovePartyProfiles"),
+            "youtube",
+            DEFAULT_CDP_PORT,
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        )
+        .expect("launch plan");
+        let command = chrome_command(&plan);
+
+        assert_eq!(command.get_program(), executable.as_os_str());
     }
 
     #[test]

@@ -76,6 +76,42 @@ pub fn provider_id_from_str(provider_id: &str) -> Option<ProviderId> {
     }
 }
 
+pub fn provider_accepts_url(provider: ProviderId, url: &str) -> bool {
+    let host = match host_from_url(url) {
+        Some(host) => host.to_ascii_lowercase(),
+        None => return false,
+    };
+
+    match provider {
+        ProviderId::YouTube => youtube::is_youtube_url(url),
+        ProviderId::Netflix => host == "netflix.com" || host.ends_with(".netflix.com"),
+        ProviderId::Prime => {
+            host == "primevideo.com"
+                || host.ends_with(".primevideo.com")
+                || host == "amazon.com"
+                || host.ends_with(".amazon.com")
+        }
+        ProviderId::JioHotstar => {
+            host == "hotstar.com"
+                || host.ends_with(".hotstar.com")
+                || host == "jiocinema.com"
+                || host.ends_with(".jiocinema.com")
+        }
+    }
+}
+
+fn host_from_url(url: &str) -> Option<&str> {
+    let trimmed = url.trim();
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))?;
+    let end = without_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(without_scheme.len());
+    let host = &without_scheme[..end];
+    (!host.is_empty()).then_some(host)
+}
+
 pub fn unverified_compatibility_matrix() -> Vec<CompatibilityRecord> {
     [
         ProviderId::YouTube,
@@ -240,6 +276,26 @@ mod tests {
             Some(ProviderId::JioHotstar)
         );
         assert_eq!(provider_id_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn provider_launch_rejects_mismatched_urls() {
+        assert!(provider_accepts_url(
+            ProviderId::YouTube,
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        ));
+        assert!(provider_accepts_url(
+            ProviderId::Netflix,
+            "https://www.netflix.com/watch/1"
+        ));
+        assert!(!provider_accepts_url(
+            ProviderId::Netflix,
+            "https://example.com/watch/1"
+        ));
+        assert!(!provider_accepts_url(
+            ProviderId::YouTube,
+            "https://www.youtube.com/watch?v=too-short"
+        ));
     }
 
     #[test]

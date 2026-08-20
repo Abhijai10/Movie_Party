@@ -14,10 +14,10 @@ It must be updated continuously.
 
 ```text
 Project State:
-🟨 M3-M4 PRODUCTION CLOSURE — local closure implemented, external verification pending
+🟨 M6 PRODUCTION CLOSURE — local provider/Chrome hardening implemented, external verification pending
 
 Current Phase:
-M3-M4 PRODUCTION CLOSURE
+M6 PRODUCTION CLOSURE
 
 Current Release:
 V1 Development
@@ -28,11 +28,63 @@ LOCKED
 Critical Blockers:
 M3: Native mpv render host attachment requires platform-window integration verification
 M4: OS Keychain/Credential Manager and notification dispatch require platform verification
-M5: Real WebRTC call needs physical device
-M6: Real Chrome/YouTube needs installed Chrome
+M5: Real two-device WebRTC call needs physical devices and OS permission prompts
+M6: Real Chrome/provider login and media playback require external verification
 M7: ScreenCaptureKit needs macOS permission dialog
 M8: Chrome/player crash watchers not wired
 ````
+
+---
+
+# M6 FINAL CLOSURE PASS (2026-08-21)
+
+## Implemented in this pass
+
+- **Managed Chrome launch correctness**: provider launch now allocates an
+  actual localhost CDP port instead of passing port `0`, and launch plans
+  reject invalid CDP port `0`.
+- **Provider launch boundary**: launch validates provider IDs and provider URL
+  ownership before opening Chrome.
+- **Runtime truthfulness**: Chrome discovery, CDP port allocation, launch, and
+  plan failures now return an explicit provider `Unavailable` snapshot instead
+  of disappearing as frontend `null`.
+- **Chrome lifecycle ownership**: managed Chrome is launched directly via the
+  executable so the runtime owns the process; previous sessions are closed
+  before replacement and on party leave.
+
+## External Verification Pending
+
+- Installed Chrome discovery and launch on macOS and Windows.
+- Dedicated provider profile login/session reuse with real accounts.
+- Live YouTube, Netflix, Prime, and JioHotstar playback detection/control.
+
+---
+
+# M5 FINAL CLOSURE PASS (2026-08-21)
+
+## Implemented in this pass
+
+- **WebRTC lifecycle**: Cinema Mode now aborts superseded call attempts, closes
+  peer connections, detaches handlers, and stops tracks on privacy/call-mode
+  changes or setup failure.
+- **Truthful call state**: runtime snapshots now expose explicit call status:
+  `connecting`, `connected`, `degraded`, `reconnecting`, `unavailable`, and
+  `ended`.
+- **Permission/runtime failures**: browser media acquisition no longer silently
+  reports synthetic success in the cinema connection path; permission and media
+  failures become unavailable/degraded call states without interrupting movie
+  playback.
+- **Signaling hardening**: SDP and ICE payloads are parsed, bounded, and checked
+  for duplicate or stale offer/answer/ICE transitions before entering runtime
+  state.
+- **Privacy protection**: Privacy Mode continues to force camera off and mic
+  muted; changing call mode while private can no longer re-enable devices.
+
+## External Verification Pending
+
+- Real macOS camera/microphone permission prompt and recovery behavior.
+- Real Windows camera/microphone permission prompt and recovery behavior.
+- Two-device WebRTC media flow and reconnect across supported OS pairs.
 
 ---
 
