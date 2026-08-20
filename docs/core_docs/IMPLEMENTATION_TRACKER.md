@@ -36,44 +36,70 @@ M8: Chrome/player crash watchers not wired
 
 ---
 
-# ACTIVE INTEGRATION RUN (2026-08-19)
+# M3 + M4 PRODUCTION CLOSURE (2026-08-20)
 
-Completed M1 verification:
-- Full M1 acceptance checklist passed
-- M1 status: 🟩 LOCALLY COMPLETE
+## M3 — Local Perfect: 🟩 LOCALLY COMPLETE
 
-Completed M2 verification:
-- 22/22 M2 AppRuntime real-QUIC integration tests passed
-- M2 status: 🟩 LOCALLY COMPLETE
+- **M3.1 Demand-driven range fetch**: `ChunkDemandHandle` (priority queue +
+  in-flight dedup + tokio Notify) connects the loopback range server to the
+  guest QUIC transfer worker. Every uncached HTTP Range request enqueues the
+  exact missing 1 MiB chunks as CRITICAL; the worker fetches, validates
+  (media_id + index + size + BLAKE3), writes to SparseCache, and wakes the
+  waiting request. Tests prove: uncached range → real QUIC fetch → exact
+  source bytes served; distant seek reprioritized; duplicates deduplicated.
+- **M3.2 Binary QUIC bulk transfer**: `ServerResponse::ChunkResponse`
+  (base64-in-JSON) removed. Chunks now travel per PROTOCOL_SPEC §45
+  (MPCK magic, raw binary header, BLAKE3, raw payload) on dedicated QUIC
+  streams; control JSON stays small; MAX_REQUEST_BYTES unchanged. Tests:
+  valid chunk, truncated frame, oversized claimed payload, wrong
+  media/index, hash corruption, raw-binary assertion.
+- **M3.3 Lifecycle**: `guest_fetch_media()` owns manifest/cache/range
+  server/worker/player/event-loop; `leave_party()` aborts all and stops the
+  range server; reconnect aborts the prior worker (kept as
+  `old_transfer_task`) — never duplicate live workers. Tests prove ownership
+  + release + single-worker reconnect.
+- **M3.4 Strict sync**: full E2E proof — guest starvation pauses BOTH host
+  and guest (strict_sync_paused + BUFFERING); refill never auto-resumes;
+  fresh readiness consensus + host play cycle drives synchronized PLAYING.
+- **M3.5 Presentation**: libmpv still opens its own unmanaged Cocoa window.
+  In-app embedding is a platform blocker (Tauri 2 cannot host a native mpv
+  view in the webview without a native plugin) — documented accurately, not
+  renamed as V2.
 
-M3 status: 🟨 IN PROGRESS
-- Player created in AppRuntime, vo=null removed
-- Background event-loop polls player position/duration/buffering
-- Coordinator play/pause/seek dispatches to live player
-- Buffering feeds strict_sync_paused
-- 18 M3 tests pass (16 component + 2 E2E)
+## M4 — Persistence & Scheduling: 🟩 LOCALLY COMPLETE
 
-M4 status: 🟨 IN PROGRESS
-- SQLite wired into Tauri startup, identity persisted
-- Platform-specific DB path (~/Library/Application Support/Move Party/)
-- Preload calculation, overdue detection, cache retention
-- 11 SQLite tests pass (7 original + 4 new)
+- **M4.1 Identity restart**: schema v2 persists the ed25519 signing-key
+  seed; `init_db()` restores the exact same identity across AppRuntime
+  restarts (verified with Runtime A → Runtime B restart test). Exactly one
+  identity is ever created.
+- **M4.2 Schedule CRUD**: AppRuntime + Tauri commands for create/list/
+  update/delete with MP-SCHEDULE-002 DTO validation; schedules survive
+  restart.
+- **M4.3 Real scheduler worker**: started in production setup; restores
+  pending schedules, waits for the next canonical preload deadline,
+  executes exactly once (persisted Planned→Transferring), reschedules on
+  update, deleted schedules never run, overdue schedules recover after
+  restart.
+- **M4.4 Notifications**: `Notifier` trait (NativeNotifier macOS osascript /
+  Windows PowerShell toast; FakeNotifier for tests — no OS notification in
+  unit tests; FailingNotifier proves failures are recoverable).
+- **M4.5 Retention**: runtime + Tauri paths for Keep / Remove / Save As;
+  verified to never delete or overwrite the host's original source.
 
-M5 status: 🟨 IN PROGRESS
-- CallSignal routing over QUIC (3 tests)
-- Privacy mode disables tracks, exit does NOT auto-re-enable
+Test totals: 249 Rust + 3 FE = 252, 0 failures. `.app` bundle builds.
 
-M6 status: 🟨 IN PROGRESS
-- Chrome session properly owned by AppRuntime
+M5 status: 🟨 IN PROGRESS — CallSignal routing over QUIC (3 tests), full
+WebRTC state machine needs physical devices.
+M6 status: 🟨 IN PROGRESS — Chrome session owned by AppRuntime; provider
+sync-mode wiring incomplete.
+M7 status: 🟥 BLOCKED — OS capture permission dialog.
+M8 status: 🟨 IN PROGRESS — disconnect recovery + transfer stall watcher
+wired; comprehensive watcher coverage incomplete.
 
-M7 status: 🟥 BLOCKED — OS capture permission dialog
-
-M8 status: 🟨 IN PROGRESS
-- Disconnect → RecoveryPlan wired
-- Transfer stall watcher wired
-- .app bundle built (pnpm tauri build)
-
-Test totals: 209 Rust + 3 FE = 212, 0 failures
+⚠ EXTERNAL VERIFICATION PENDING:
+- Run .app → pick media → visible playback in mpv window
+- macOS notification dispatch; Windows toast dispatch
+- Two-device QUIC transfer (Tailscale)
 
 ---
 
