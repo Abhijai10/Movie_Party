@@ -114,15 +114,14 @@ async fn uncached_http_range_triggers_real_quic_fetch_and_serves() {
     let cache = SparseCache::open(&cache_root, manifest.clone()).expect("cache");
     let cache_arc = Arc::new(Mutex::new(cache));
     let demand = ChunkDemandHandle::new();
-    let (wake_tx, wake_rx) = tokio::sync::watch::channel(0u64);
-    let _wake_tx = Arc::new(wake_tx);
+    let chunk_wake = Arc::new(move_party_lib::media::stream::range_server::ChunkWake::new());
 
     let token = "m3c-token";
     let range = start_range_server(RangeServerConfig {
         manifest: manifest.clone(),
         cache: cache_arc.clone(),
         session_token: token.to_string(),
-        chunk_wake_rx: wake_rx,
+        chunk_wake: chunk_wake.clone(),
         demand: demand.clone(),
         wait_timeout_ms: 5_000,
     })
@@ -134,6 +133,7 @@ async fn uncached_http_range_triggers_real_quic_fetch_and_serves() {
     let worker_client = client.clone();
     let worker_cache = cache_arc.clone();
     let worker_manifest = manifest.clone();
+    let worker_wake = chunk_wake.clone();
     let worker = tokio::spawn(async move {
         loop {
             let Some(request) = worker_demand.pop_next() else {
@@ -148,6 +148,7 @@ async fn uncached_http_range_triggers_real_quic_fetch_and_serves() {
                     if validate_chunk_packet(&worker_manifest, &packet).is_ok() {
                         let mut c = worker_cache.lock().await;
                         let _ = c.write_chunk(u64::from(packet.chunk_index), &packet.payload);
+                        worker_wake.notify();
                     }
                     worker_demand.finish_fetch(request.index);
                 }
@@ -175,6 +176,132 @@ async fn uncached_http_range_triggers_real_quic_fetch_and_serves() {
     assert_eq!(body.len() as u64, first_chunk_len, "served full chunk");
     let expected = &source[..first_chunk_len as usize];
     assert_eq!(body, expected, "served bytes must match the source file");
+
+    worker.abort();
+    range.shutdown();
+    client.wait_idle().await;
+    host.leave_party();
+    let _ = std::fs::remove_dir_all(&cache_root);
+    let _ = std::fs::remove_file(&path);
+    std::env::remove_var("MOVE_PARTY_DEV_LOOPBACK");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cache_write_contention_eventually_persists_chunk() {
+    let _guard = env_lock().lock().await;
+    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+    let path = temp_media(1_200_000);
+    let source = std::fs::read(&path).expect("read source");
+
+    let host = AppRuntime::new();
+    let host_snap = host
+        .create_local_party(Some(path.to_str().unwrap().to_string()))
+        .await
+        .expect("host");
+    let invite_code = host_snap.room.invite_code.clone().expect("invite");
+    let (invite, addr) = invite_details(&invite_code);
+    let credentials = invite_to_credentials(&invite);
+    let guest_identity = DeviceIdentity::new_ephemeral();
+    let (client, _auth) = QuicClient::connect(
+        addr,
+        invite.server_certificate_fingerprint.clone(),
+        credentials,
+        guest_identity,
+        "M3 Contention Guest".to_string(),
+    )
+    .await
+    .expect("connect");
+
+    let manifest = client.fetch_local_media_manifest().await.expect("manifest");
+    let cache_root = std::env::temp_dir().join(format!("m3c_cont_{}", uuid::Uuid::now_v7()));
+    let cache = SparseCache::open(&cache_root, manifest.clone()).expect("cache");
+    let cache_arc = Arc::new(Mutex::new(cache));
+    let demand = ChunkDemandHandle::new();
+    let chunk_wake = Arc::new(move_party_lib::media::stream::range_server::ChunkWake::new());
+
+    let token = "cont-token";
+    let range = start_range_server(RangeServerConfig {
+        manifest: manifest.clone(),
+        cache: cache_arc.clone(),
+        session_token: token.to_string(),
+        chunk_wake: chunk_wake.clone(),
+        demand: demand.clone(),
+        wait_timeout_ms: 5_000,
+    })
+    .await
+    .expect("range server");
+
+    // Pre-enqueue chunk 0 so the worker picks it up immediately.
+    demand.request(0, ChunkPriority::Critical);
+
+    // Spawn a task that holds the cache lock for 300ms, simulating
+    // contention from the range server or a concurrent operation.
+    let lock_holder = {
+        let held_cache = cache_arc.clone();
+        tokio::spawn(async move {
+            let _guard = held_cache.lock().await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        })
+    };
+
+    // Wait until the lock is held, then start the worker.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let worker_demand = demand.clone();
+    let worker_client = client.clone();
+    let worker_cache = cache_arc.clone();
+    let worker_manifest = manifest.clone();
+    let worker_wake = chunk_wake.clone();
+    let worker = tokio::spawn(async move {
+        loop {
+            let Some(request) = worker_demand.pop_next() else {
+                worker_demand.notified().await;
+                continue;
+            };
+            match worker_client
+                .fetch_local_media_chunk(&worker_manifest.media_id, request.index)
+                .await
+            {
+                Ok(packet) => {
+                    if validate_chunk_packet(&worker_manifest, &packet).is_ok() {
+                        let mut c = worker_cache.lock().await;
+                        let _ = c.write_chunk(u64::from(packet.chunk_index), &packet.payload);
+                        worker_wake.notify();
+                    }
+                    worker_demand.finish_fetch(request.index);
+                }
+                Err(_) => {
+                    worker_demand.finish_fetch(request.index);
+                    break;
+                }
+            }
+        }
+    });
+
+    // Wait for the lock holder to release and the worker to complete.
+    let _ = lock_holder.await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Verify the chunk was eventually persisted despite the contention.
+    let mut available = false;
+    for _ in 0..20 {
+        let c = cache_arc.lock().await;
+        if c.chunk_map().is_available(0) {
+            let read = c
+                .read_range(0, manifest.chunk_size.min(manifest.file_size))
+                .expect("read")
+                .expect("data");
+            assert_eq!(
+                read,
+                &source[..read.len()],
+                "persisted bytes must match source"
+            );
+            available = true;
+            break;
+        }
+        drop(c);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(available, "chunk 0 must be persisted after contention");
 
     worker.abort();
     range.shutdown();

@@ -2,27 +2,99 @@
 //!
 //! Binds to `127.0.0.1:<random>` with an unguessable session token.
 //! Serves validated byte ranges from the guest's `SparseCache`.
+//!
+//! Waiters sleep on a [`ChunkWake`] condition variable — the transfer worker
+//! notifies it after each chunk is persisted, so range requests wake
+//! immediately instead of busy-polling.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 
 use tokio::net::TcpListener;
-use tokio::sync::{watch, Mutex, Notify};
+use tokio::sync::{Mutex, Notify};
 
 use crate::media::cache::SparseCache;
 use crate::media::manifest::MediaManifest;
 use crate::media::stream::parse_http_range;
 use crate::media::transfer::{ChunkDemandHandle, ChunkPriority};
 
-const WAIT_POLL_MS: u64 = 20;
+/// Bounded condition variable shared between the transfer worker (writer) and
+/// waiting HTTP range requests (readers). The worker bumps a generation
+/// counter and notifies all waiters after persisting a chunk; waiters wake,
+/// re-check the cache, and either serve the bytes or sleep again until the
+/// overall bounded wait expires.
+///
+/// `wait_timeout` is a safety net against spurious wakeups; the fast path is
+/// a genuine notify from the writer.
+#[derive(Debug, Default)]
+pub struct ChunkWake {
+    generation: StdMutex<u64>,
+    condvar: Condvar,
+}
+
+impl ChunkWake {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Signal that a chunk may have been written.
+    pub fn notify(&self) {
+        let mut generation = match self.generation.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *generation = generation.wrapping_add(1);
+        drop(generation);
+        self.condvar.notify_all();
+    }
+
+    /// Current generation counter.
+    pub fn generation(&self) -> u64 {
+        match self.generation.lock() {
+            Ok(g) => *g,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+
+    /// Wait until the generation moves past `from` or `timeout` elapses.
+    /// Returns `true` if the generation changed (a chunk was written).
+    ///
+    /// Uses `wait_timeout_while`, so a notification that arrives before this
+    /// call (lost-wakeup protection) returns immediately, and spurious
+    /// wakeups loop internally until the deadline.
+    fn wait_until_changed(&self, from: u64, timeout: Duration) -> bool {
+        let mut generation = match self.generation.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let (guard, _wait_result) = self
+            .condvar
+            .wait_timeout_while(generation, timeout, |current| *current == from)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        generation = guard;
+        *generation != from
+    }
+}
+
+/// Result of a bounded wait for a byte range.
+enum RangeServe {
+    /// The full requested range is available.
+    Available(Vec<u8>),
+    /// Some (but not all) requested bytes are available.
+    Partial(Vec<u8>),
+    /// No requested bytes became available within the bounded wait.
+    Unavailable,
+}
 
 pub struct RangeServerConfig {
     pub manifest: MediaManifest,
     pub cache: Arc<Mutex<SparseCache>>,
     pub session_token: String,
-    pub chunk_wake_rx: watch::Receiver<u64>,
+    /// Wake source notified by the transfer worker after each chunk write.
+    pub chunk_wake: Arc<ChunkWake>,
     /// Shared demand channel: missing ranges are enqueued here as Critical
     /// chunk requests for the guest transfer worker.
     pub demand: ChunkDemandHandle,
@@ -34,7 +106,7 @@ pub struct RangeServerHandle {
     pub addr: SocketAddr,
     pub media_url: String,
     shutdown: Arc<Notify>,
-    pub chunk_wake: Arc<watch::Sender<u64>>,
+    pub chunk_wake: Arc<ChunkWake>,
 }
 
 impl std::fmt::Debug for RangeServerHandle {
@@ -51,7 +123,7 @@ impl RangeServerHandle {
         self.shutdown.notify_waiters();
     }
     pub fn notify_chunk_written(&self) {
-        self.chunk_wake.send_modify(|v| *v = v.wrapping_add(1));
+        self.chunk_wake.notify();
     }
 }
 
@@ -67,7 +139,9 @@ pub async fn start_range_server(
     let manifest = Arc::new(config.manifest);
     let cache = config.cache;
     let demand = config.demand;
+    let chunk_wake = config.chunk_wake;
     let wait_timeout_ms = config.wait_timeout_ms;
+    let chunk_wake_for_task = chunk_wake.clone();
     let media_url = format!(
         "http://127.0.0.1:{}/media/{}?token={}",
         addr.port(),
@@ -85,10 +159,11 @@ pub async fn start_range_server(
                             let cache = cache.clone();
                             let token = token.clone();
                             let demand = demand.clone();
+                            let chunk_wake = chunk_wake_for_task.clone();
                             tokio::task::spawn_blocking(move || {
                                 if let Ok(std_stream) = tokio_stream.into_std() {
                                     let _ = std_stream.set_nonblocking(false);
-                                    handle_connection(std_stream, peer_addr, &manifest, &cache, &token, &demand, wait_timeout_ms);
+                                    handle_connection(std_stream, peer_addr, &manifest, &cache, &token, &demand, &chunk_wake, wait_timeout_ms);
                                 }
                             });
                         }
@@ -100,9 +175,6 @@ pub async fn start_range_server(
         }
     });
 
-    let (chunk_wake_tx, _) = watch::channel(0u64);
-    let chunk_wake = Arc::new(chunk_wake_tx);
-
     Ok(RangeServerHandle {
         addr,
         media_url,
@@ -111,6 +183,7 @@ pub async fn start_range_server(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_connection(
     mut stream: std::net::TcpStream,
     _peer_addr: SocketAddr,
@@ -118,6 +191,7 @@ fn handle_connection(
     cache: &Arc<Mutex<SparseCache>>,
     valid_token: &str,
     demand: &ChunkDemandHandle,
+    chunk_wake: &Arc<ChunkWake>,
     wait_timeout_ms: u64,
 ) {
     let mut method = String::new();
@@ -169,25 +243,39 @@ fn handle_connection(
     match headers.get("range").cloned() {
         Some(range_value) => match parse_http_range(&range_value, manifest.file_size) {
             Ok(range_request) => {
-                let bytes = wait_for_range(
+                let serve = wait_for_range(
                     cache,
                     manifest,
                     range_request.start,
                     range_request.len(),
                     demand,
+                    chunk_wake,
                     wait_timeout_ms,
                 );
-                let end = range_request.start + bytes.len() as u64 - 1;
-                let content_range = format!(
-                    "bytes {}-{}/{}",
-                    range_request.start, end, manifest.file_size
-                );
-                let response = format!(
-                        "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nContent-Range: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
-                        bytes.len(), content_range
-                    );
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.write_all(&bytes);
+                match serve {
+                    RangeServe::Available(bytes) | RangeServe::Partial(bytes) => {
+                        // Never computed on an empty body: an empty result is
+                        // served as a retriable 503, not a bogus 206.
+                        let end = range_request.start + bytes.len() as u64 - 1;
+                        let content_range = format!(
+                            "bytes {}-{}/{}",
+                            range_request.start, end, manifest.file_size
+                        );
+                        let response = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nContent-Range: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                            bytes.len(), content_range
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.write_all(&bytes);
+                    }
+                    RangeServe::Unavailable => {
+                        // Requested bytes could not be produced within the
+                        // bounded wait — tell the player to retry rather than
+                        // fabricate an empty partial response.
+                        let response = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                        let _ = stream.write_all(response.as_bytes());
+                    }
+                }
             }
             Err(_) => {
                 let _ = stream
@@ -195,20 +283,29 @@ fn handle_connection(
             }
         },
         None => {
-            let bytes = wait_for_range(
+            let serve = wait_for_range(
                 cache,
                 manifest,
                 0,
                 manifest.file_size,
                 demand,
+                chunk_wake,
                 wait_timeout_ms,
             );
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
-                bytes.len()
-            );
-            let _ = stream.write_all(response.as_bytes());
-            let _ = stream.write_all(&bytes);
+            match serve {
+                RangeServe::Available(bytes) | RangeServe::Partial(bytes) => {
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        bytes.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.write_all(&bytes);
+                }
+                RangeServe::Unavailable => {
+                    let response = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            }
         }
     }
 }
@@ -231,9 +328,10 @@ fn wait_for_range(
     start: u64,
     len: u64,
     demand: &ChunkDemandHandle,
+    chunk_wake: &Arc<ChunkWake>,
     wait_timeout_ms: u64,
-) -> Vec<u8> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_timeout_ms);
+) -> RangeServe {
+    let deadline = Instant::now() + Duration::from_millis(wait_timeout_ms);
     let mut demand_enqueued = false;
     loop {
         let result = {
@@ -241,19 +339,35 @@ fn wait_for_range(
             g.read_range(start, len)
         };
         match result {
-            Ok(Some(bytes)) => return bytes,
+            Ok(Some(bytes)) => return RangeServe::Available(bytes),
             Ok(None) => {
                 if !demand_enqueued {
                     enqueue_missing_chunks(cache, manifest, start, len, demand);
                     demand_enqueued = true;
                 }
-                if std::time::Instant::now() >= deadline {
-                    return read_available_portion(cache, manifest, start, len);
+                let now = Instant::now();
+                if now >= deadline {
+                    let partial = read_available_portion(cache, manifest, start, len);
+                    return if partial.is_empty() {
+                        RangeServe::Unavailable
+                    } else {
+                        RangeServe::Partial(partial)
+                    };
                 }
-                std::thread::sleep(std::time::Duration::from_millis(WAIT_POLL_MS));
+                // Record the generation BEFORE sleeping; the transfer worker
+                // bumps it after each chunk write, so a genuine notify wakes
+                // us immediately (no polling).
+                let from = chunk_wake.generation();
+                let remaining = deadline - now;
+                chunk_wake.wait_until_changed(from, remaining);
             }
             Err(_) => {
-                return read_available_portion(cache, manifest, start, len);
+                let partial = read_available_portion(cache, manifest, start, len);
+                return if partial.is_empty() {
+                    RangeServe::Unavailable
+                } else {
+                    RangeServe::Partial(partial)
+                };
             }
         }
     }
@@ -373,12 +487,11 @@ mod tests {
     }
 
     fn make_config(m: MediaManifest, c: Arc<Mutex<SparseCache>>, t: &str) -> RangeServerConfig {
-        let (_, rx) = watch::channel(0u64);
         RangeServerConfig {
             manifest: m,
             cache: c,
             session_token: t.to_string(),
-            chunk_wake_rx: rx,
+            chunk_wake: Arc::new(ChunkWake::new()),
             demand: ChunkDemandHandle::new(),
             wait_timeout_ms: 500,
         }
@@ -531,6 +644,78 @@ mod tests {
             .all(|r| r.priority == ChunkPriority::Critical));
         assert!(demanded.iter().any(|r| r.index == 0));
         assert!(demanded.iter().any(|r| r.index == 1));
+        h.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn range_server_returns_503_when_no_data_after_timeout() {
+        let root = std::env::temp_dir().join(Uuid::now_v7().to_string());
+        std::fs::create_dir_all(&root).expect("temp");
+        let m = test_manifest();
+        let cache = Arc::new(Mutex::new(
+            SparseCache::open(&root, m.clone()).expect("cache"),
+        ));
+        // Short bounded wait: no worker will ever supply the chunk.
+        let mut config = make_config(m, cache, "tok");
+        config.wait_timeout_ms = 150;
+        let h = start_range_server(config).await.expect("server");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let r = http_get_range(h.addr, "/media/range-test?token=tok", "bytes=0-3");
+        assert!(
+            r.contains("503 Service Unavailable"),
+            "empty wait must not fabricate 206: {r}"
+        );
+        assert!(
+            !r.contains("206 Partial Content"),
+            "no bogus partial content expected"
+        );
+        h.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn range_server_wake_notifies_waiter_immediately() {
+        let root = std::env::temp_dir().join(Uuid::now_v7().to_string());
+        std::fs::create_dir_all(&root).expect("temp");
+        let m = test_manifest();
+        let cache = Arc::new(Mutex::new(
+            SparseCache::open(&root, m.clone()).expect("cache"),
+        ));
+        let mut config = make_config(m, cache.clone(), "tok");
+        config.wait_timeout_ms = 2_000;
+        let h = start_range_server(config).await.expect("server");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Request uncached bytes; the handler will enqueue demand and sleep
+        // on the Condvar. After it is waiting, write the chunk and notify —
+        // the waiter must wake and serve it well before the timeout.
+        let client = std::thread::spawn(move || {
+            http_get_range(h.addr, "/media/range-test?token=tok", "bytes=0-3")
+        });
+        // Give the handler time to reach its wait.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        {
+            let cache_clone = cache.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut c = cache_clone.blocking_lock();
+                c.write_chunk(0, b"abcd").expect("write");
+            })
+            .await
+            .unwrap();
+        }
+        let started = std::time::Instant::now();
+        h.notify_chunk_written();
+        let r = client.join().expect("request");
+        let elapsed = started.elapsed();
+
+        assert!(r.contains("206 Partial Content"), "woken waiter must serve");
+        assert!(r.contains("abcd"));
+        assert!(
+            elapsed < std::time::Duration::from_millis(1_500),
+            "wake must be a real notification, not a long timeout ({elapsed:?})"
+        );
         h.shutdown();
         let _ = std::fs::remove_dir_all(&root);
     }

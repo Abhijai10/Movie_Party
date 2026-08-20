@@ -3190,7 +3190,7 @@ impl AppRuntime {
         use crate::media::manifest::MediaManifest;
         use crate::media::stream::range_server::{start_range_server, RangeServerConfig};
         use crate::media::stream::route_for_media;
-        use crate::media::transfer::{validate_chunk_packet, ChunkDemandHandle};
+        use crate::media::transfer::{validate_chunk_packet, ChunkDemandHandle, ChunkPriority};
         use rand::RngCore;
 
         // Lifecycle hygiene: a reconnect must never leave duplicate live
@@ -3231,14 +3231,13 @@ impl AppRuntime {
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
         };
         let _route = route_for_media(&manifest.media_id, session_token.clone());
-        let (wake_tx, wake_rx) = tokio::sync::watch::channel(0u64);
-        let wake_tx = Arc::new(wake_tx);
+        let chunk_wake = Arc::new(crate::media::stream::range_server::ChunkWake::new());
         let cache_arc = Arc::new(tokio::sync::Mutex::new(cache));
         let range_config = RangeServerConfig {
             manifest: manifest.clone(),
             cache: cache_arc.clone(),
             session_token,
-            chunk_wake_rx: wake_rx,
+            chunk_wake: chunk_wake.clone(),
             demand: demand.clone(),
             wait_timeout_ms: 5_000,
         };
@@ -3292,10 +3291,18 @@ impl AppRuntime {
         //    cache, then wakes the range server via the wake channel.
         //    Owned by this session: dropped when `leave_party` clears the
         //    client, and aborted on reconnect so no duplicate worker runs.
+        //
+        //    Cache write discipline:
+        //      QUIC success → validate → acquire cache (never try_lock) →
+        //      write chunk → only then update transfer progress → notify
+        //      range waiter → finish demand
+        //
+        //    If the cache write fails the chunk is requeued for retry; the
+        //    worker never claims bytes_available without persisting.
         let transfer_task = {
             let inner = Arc::clone(&self.inner);
             let manifest_worker = manifest.clone();
-            let wake_tx_worker = wake_tx.clone();
+            let chunk_wake_worker = chunk_wake.clone();
             let demand_worker = demand.clone();
             tokio::spawn(async move {
                 loop {
@@ -3313,25 +3320,43 @@ impl AppRuntime {
                         .await
                     {
                         Ok(packet) => {
-                            if validate_chunk_packet(&manifest_worker, &packet).is_ok() {
-                                {
-                                    let state = inner.lock();
-                                    if let Some(ref cache) = state.guest_cache {
-                                        if let Ok(mut c) = cache.try_lock() {
-                                            let _ = c.write_chunk(
-                                                u64::from(packet.chunk_index),
-                                                &packet.payload,
-                                            );
+                            if validate_chunk_packet(&manifest_worker, &packet).is_err() {
+                                demand_worker.finish_fetch(request.index);
+                                continue;
+                            }
+                            // Clone the cache Arc without holding the
+                            // AppRuntime state lock, then await the cache
+                            // lock properly (no try_lock, no deadlock).
+                            let cache_opt = {
+                                let state = inner.lock();
+                                state.guest_cache.clone()
+                            };
+                            let Some(cache) = cache_opt else {
+                                demand_worker.finish_fetch(request.index);
+                                break;
+                            };
+                            let write_result = {
+                                let mut c = cache.lock().await;
+                                c.write_chunk(u64::from(packet.chunk_index), &packet.payload)
+                            };
+                            match write_result {
+                                Ok(()) => {
+                                    {
+                                        let mut state = inner.lock();
+                                        if let Some(ref mut t) = state.transfer {
+                                            t.bytes_available += packet.payload.len() as u64;
                                         }
                                     }
+                                    chunk_wake_worker.notify();
                                 }
-                                {
-                                    let mut state = inner.lock();
-                                    if let Some(ref mut t) = state.transfer {
-                                        t.bytes_available += packet.payload.len() as u64;
-                                    }
+                                Err(_) => {
+                                    // Write failed (disk/IO): requeue the
+                                    // chunk for a later retry rather than
+                                    // silently losing it.
+                                    demand_worker.finish_fetch(request.index);
+                                    demand_worker.request(request.index, ChunkPriority::Critical);
+                                    continue;
                                 }
-                                wake_tx_worker.send_modify(|v| *v = v.wrapping_add(1));
                             }
                             demand_worker.finish_fetch(request.index);
                         }
