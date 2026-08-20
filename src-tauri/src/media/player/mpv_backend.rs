@@ -11,7 +11,7 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::path::Path;
 use std::ptr;
 
-use super::{LocalPlayer, PlayerError, PlayerSnapshot, PlayerState};
+use super::{is_streaming_media_source, LocalPlayer, PlayerError, PlayerSnapshot, PlayerState};
 
 // ── mpv FFI type aliases ─────────────────────────────────────────────────────
 
@@ -242,10 +242,12 @@ impl MpvPlayer {
             });
         }
 
-        // Video and audio outputs use mpv defaults so that media is
-        // visible and audible.  On macOS mpv opens its own Cocoa window;
-        // Tauri-render-API embedding is a post-V1 enhancement.
-        // We explicitly do NOT set vo=null or ao=null here.
+        // Prevent libmpv from creating its own user-facing window. Visible
+        // presentation must be provided by the native render host; without
+        // that host the runtime reports presentation as unavailable.
+        unsafe {
+            mpv_set_option(mpv, &fns, "vo", "libmpv")?;
+        }
 
         // Initialize the mpv context
         let result = unsafe { (fns.mpv_initialize)(mpv) };
@@ -351,7 +353,7 @@ impl LocalPlayer for MpvPlayer {
             _ => return Err(PlayerError::LibMpvUnavailable),
         };
 
-        if !path.exists() {
+        if !is_streaming_media_source(path) && !path.exists() {
             return Err(PlayerError::MissingMedia {
                 path: path.display().to_string(),
             });
@@ -438,7 +440,8 @@ impl LocalPlayer for MpvPlayer {
     fn seek(&mut self, position_ms: u64) -> Result<(), PlayerError> {
         let (handle, fns) = self.ensure_ready()?;
         let seek_cmd = CString::new("seek").unwrap();
-        let pos_str = CString::new(format!("{position_ms}")).unwrap();
+        let position_seconds = position_ms as f64 / 1_000.0;
+        let pos_str = CString::new(format!("{position_seconds:.3}")).unwrap();
         let absolute = CString::new("absolute").unwrap();
         let args = [
             seek_cmd.as_ptr(),

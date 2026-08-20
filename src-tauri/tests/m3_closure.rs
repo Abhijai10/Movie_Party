@@ -394,6 +394,10 @@ async fn guest_fetch_media_owns_session_and_leave_releases_everything() {
         owned.transfer_worker_owned,
         "guest must own the transfer worker"
     );
+    assert!(
+        owned.player_event_worker_owned,
+        "guest must own the player event worker"
+    );
     assert!(owned.player_owned, "guest must own the player");
 
     // Leave: range server stops, cache released, worker aborted, player closed.
@@ -402,6 +406,7 @@ async fn guest_fetch_media_owns_session_and_leave_releases_everything() {
     assert!(!after.cache_owned);
     assert!(!after.range_server_owned);
     assert!(!after.transfer_worker_owned);
+    assert!(!after.player_event_worker_owned);
     assert!(!after.player_owned);
 
     // After leave there is no client, so no stale worker can write anything.
@@ -478,6 +483,7 @@ async fn reconnect_reuses_single_session_worker() {
     assert!(!owned.old_worker_alive, "old session worker must be dead");
     assert!(owned.cache_owned);
     assert!(owned.range_server_owned);
+    assert!(owned.player_event_worker_owned);
     assert!(guest.client_for_test().is_some());
 
     guest.leave_party();

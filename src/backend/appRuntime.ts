@@ -116,6 +116,15 @@ export type AppSnapshot = {
     playbackRate: number;
     bufferedAheadMs: number | null;
     errorMessage: string | null;
+    presentation: {
+      mode: "EMBEDDED_NATIVE" | "EXTERNAL_NATIVE_WINDOW" | "UNAVAILABLE";
+      platform: string;
+      bridge: string;
+      resizeManaged: boolean;
+      ipcManaged: boolean;
+      lifecycleManaged: boolean;
+      message: string;
+    };
   };
 };
 

@@ -24,7 +24,10 @@ use crate::{
     identity::DeviceIdentity,
     media::{
         manifest::{build_manifest, MediaManifest},
-        player::{LocalPlayer, PlayerSnapshot as LibPlayerSnapshot},
+        player::{
+            presentation::PlayerPresentationStatus, LocalPlayer,
+            PlayerSnapshot as LibPlayerSnapshot,
+        },
         stream::range_server::RangeServerHandle,
         transfer::{transfer_progress, TransferProgress},
     },
@@ -272,6 +275,7 @@ pub struct PlayerSnapshot {
     pub playback_rate: f32,
     pub buffered_ahead_ms: Option<u64>,
     pub error_message: Option<String>,
+    pub presentation: PlayerPresentationStatus,
 }
 
 impl Default for PlayerSnapshot {
@@ -284,6 +288,7 @@ impl Default for PlayerSnapshot {
             playback_rate: 1.0,
             buffered_ahead_ms: None,
             error_message: None,
+            presentation: PlayerPresentationStatus::unavailable("No media is loaded."),
         }
     }
 }
@@ -298,6 +303,7 @@ impl From<&LibPlayerSnapshot> for PlayerSnapshot {
             playback_rate: snap.playback_rate,
             buffered_ahead_ms: snap.buffered_ahead_ms,
             error_message: snap.error_message.clone(),
+            presentation: PlayerPresentationStatus::native_render_host_required(),
         }
     }
 }
@@ -1068,6 +1074,10 @@ impl AppRuntime {
                     continue;
                 };
 
+                if let Err(error) = db.recover_claimed_schedules(now) {
+                    eprintln!("MoveParty: scheduler claimed-recovery failed: {error}");
+                }
+
                 // Execute every schedule whose preload deadline has arrived.
                 let due = match db.due_schedules(now) {
                     Ok(due) => due,
@@ -1079,13 +1089,15 @@ impl AppRuntime {
                     }
                 };
                 for schedule in &due {
-                    // Exactly once: atomically claim the schedule by
-                    // transitioning Planned → Claimed. Only the scheduler
-                    // that wins this transition runs the executor.
-                    if let Err(error) = db.update_schedule_status(&schedule.schedule_id, "Claimed")
-                    {
-                        eprintln!("MoveParty: scheduler claim failed: {error}");
-                        continue;
+                    // Exactly once: only the scheduler that atomically wins
+                    // the pending → Claimed transition may run the executor.
+                    match db.claim_due_schedule(&schedule.schedule_id, now) {
+                        Ok(true) => {}
+                        Ok(false) => continue,
+                        Err(error) => {
+                            eprintln!("MoveParty: scheduler claim failed: {error}");
+                            continue;
+                        }
                     }
 
                     // Invoke the REAL preload executor.
@@ -3365,9 +3377,18 @@ impl AppRuntime {
                 task.abort();
                 state.old_transfer_task = Some(task);
             }
+            if let Some(task) = state.player_event_task.take() {
+                task.abort();
+            }
             if let Some(range) = state.range_server_handle.take() {
                 range.shutdown();
             }
+            if let Some(player) = state.player.take() {
+                if let Ok(mut player) = player.lock() {
+                    player.close();
+                }
+            }
+            state.guest_cache = None;
         }
 
         // 1. Fetch manifest over authenticated QUIC
@@ -3570,6 +3591,7 @@ impl AppRuntime {
             cache_owned: state.guest_cache.is_some(),
             range_server_owned: state.range_server_handle.is_some(),
             transfer_worker_owned: state.transfer_task.is_some(),
+            player_event_worker_owned: state.player_event_task.is_some(),
             player_owned: state.player.is_some(),
             old_worker_alive: old_alive,
         }
@@ -3583,6 +3605,7 @@ pub struct SessionOwnershipDebug {
     pub cache_owned: bool,
     pub range_server_owned: bool,
     pub transfer_worker_owned: bool,
+    pub player_event_worker_owned: bool,
     pub player_owned: bool,
     /// Whether the previous session's transfer worker is still alive
     /// (indicating a stale task survived the replacement).
@@ -3618,8 +3641,15 @@ impl crate::scheduling::preload::PreloadExecutor for AppRuntimePreloadExecutor {
         &self,
         schedule: &crate::storage::sqlite::StoredSchedule,
     ) -> Result<crate::scheduling::preload::PreloadOutcome, String> {
-        let client_present = self.runtime.client_for_test().is_some();
-        if !client_present {
+        let schedule_matches_active_media = {
+            let snapshot = self.runtime.snapshot();
+            snapshot
+                .media
+                .as_ref()
+                .map(|media| media.media_id == schedule.media_id)
+                .unwrap_or(false)
+        };
+        if self.runtime.client_for_test().is_none() || !schedule_matches_active_media {
             return Ok(crate::scheduling::preload::PreloadOutcome::WaitingForPrerequisites);
         }
         let runtime = self.runtime.clone();

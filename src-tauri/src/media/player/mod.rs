@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+pub mod presentation;
+
 pub const LOCAL_PLAYER_BACKEND: &str = "libmpv";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,7 +188,7 @@ impl LocalPlayer for LibMpvPlayer {
             return Err(PlayerError::LibMpvUnavailable);
         }
 
-        if !path.exists() {
+        if !is_streaming_media_source(path) && !path.exists() {
             return Err(PlayerError::MissingMedia {
                 path: path.display().to_string(),
             });
@@ -251,6 +253,14 @@ impl LocalPlayer for LibMpvPlayer {
     }
 }
 
+pub fn is_streaming_media_source(path: &Path) -> bool {
+    let source = path.as_os_str().to_string_lossy();
+    source.starts_with("http://127.0.0.1:")
+        || source.starts_with("http://localhost:")
+        || source.starts_with("https://127.0.0.1:")
+        || source.starts_with("https://localhost:")
+}
+
 // ── Real mpv backend (feature-gated) ─────────────────────────────────────────
 
 #[cfg(feature = "mpv")]
@@ -290,6 +300,17 @@ mod tests {
         let result = player.open(std::path::Path::new("/nonexistent/file.mp4"));
 
         assert!(matches!(result, Err(PlayerError::MissingMedia { .. })));
+    }
+
+    #[test]
+    fn loopback_http_media_source_is_accepted_for_partial_cache_playback() {
+        let mut player = LibMpvPlayer::with_availability(true);
+        let result = player.open(std::path::Path::new(
+            "http://127.0.0.1:49152/media/local?token=secret",
+        ));
+
+        assert!(result.is_ok());
+        assert_eq!(player.snapshot().state, PlayerState::Ready);
     }
 
     #[test]

@@ -65,6 +65,9 @@ export function CinemaMode({ snapshot, onSnapshot, onLeave }: CinemaModeProps) {
   const visibleMessages = messages.slice(-3);
   const encodedDraftLength = useMemo(() => new TextEncoder().encode(draft).length, [draft]);
   const isDraftTooLong = encodedDraftLength > chatBodyLimitBytes;
+  const presentation = snapshot.player.presentation;
+  const shouldShowPresentationNotice =
+    presentation.mode !== "EMBEDDED_NATIVE" && snapshot.media != null;
 
   useEffect(() => {
     let isMounted = true;
@@ -373,6 +376,17 @@ export function CinemaMode({ snapshot, onSnapshot, onLeave }: CinemaModeProps) {
           <section className="reconnect-overlay" aria-live="polite">
             <h2>{peerName} disconnected.</h2>
             <p>The movie has been paused. Reconnecting...</p>
+          </section>
+        ) : null}
+        {shouldShowPresentationNotice ? (
+          <section className="presentation-overlay" aria-live="polite">
+            <h2>
+              {presentation.mode === "UNAVAILABLE"
+                ? "Player unavailable"
+                : "Player controlled outside the app"}
+            </h2>
+            <p>{presentation.message}</p>
+            <small>{presentation.bridge}</small>
           </section>
         ) : null}
         {privacyNotice ? (

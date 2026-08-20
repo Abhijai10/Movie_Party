@@ -14,10 +14,10 @@ It must be updated continuously.
 
 ```text
 Project State:
-🟨 M3-M8 INTEGRATION RUN — production wiring complete, external verification pending
+🟨 M3-M4 PRODUCTION CLOSURE — local closure implemented, external verification pending
 
 Current Phase:
-M3-M8 LIVE INTEGRATION
+M3-M4 PRODUCTION CLOSURE
 
 Current Release:
 V1 Development
@@ -26,13 +26,65 @@ Architecture:
 LOCKED
 
 Critical Blockers:
-M3: Visible playback requires running .app bundle
-M4: DB persistence across restart needs runtime verification
+M3: Native mpv render host attachment requires platform-window integration verification
+M4: OS Keychain/Credential Manager and notification dispatch require platform verification
 M5: Real WebRTC call needs physical device
 M6: Real Chrome/YouTube needs installed Chrome
 M7: ScreenCaptureKit needs macOS permission dialog
 M8: Chrome/player crash watchers not wired
 ````
+
+---
+
+# M3-M4 FINAL CLOSURE PASS (2026-08-21)
+
+## Implemented in this pass
+
+- **M3 presentation safety**: libmpv is now configured with `vo=libmpv` so it
+  does not create an unmanaged second user-facing window. The runtime exposes a
+  typed `PlayerPresentationStatus`; Cinema Mode shows the native render-host
+  boundary as an overlay instead of pretending embedded video is active.
+- **M3 partial-cache playback**: Local Perfect loopback HTTP media URLs are now
+  accepted by the player abstraction, so guest partial-cache playback can open
+  the range server URL instead of being rejected as a missing filesystem path.
+- **M3 lifecycle cleanup**: `guest_fetch_media` now aborts old transfer and
+  player-event workers, shuts down the old range server, closes the old player,
+  and clears the old cache before installing a replacement session.
+- **M4 identity persistence**: corrupt identity metadata now surfaces a storage
+  error instead of being treated as first launch. Private key material remains
+  behind the secure-store abstraction.
+- **M4 scheduler correctness**: due schedule claiming is atomic, only one
+  scheduler can win execution, and schedules stranded in `Claimed` by a crash
+  are recovered to a retryable waiting state on scheduler scan.
+- **M4 scheduling edge case**: empty `next_preload_deadline` now returns
+  `None` instead of a SQLite null-read error.
+- **M4 production preload guard**: `AppRuntimePreloadExecutor` now starts the
+  real `guest_fetch_media` path only when a QUIC client exists and the active
+  media matches the schedule; otherwise the schedule remains retryable as
+  `WaitingForPrerequisites`. The readiness check uses clippy-clean boolean
+  logic.
+
+## Verification
+
+- `cargo fmt --check` ✅
+- `cargo test --test m4_closure` ✅
+- `cargo test --test m3_closure duplicate_range_demands_deduplicate` ✅
+- `cargo test --lib media::player::tests::loopback_http_media_source_is_accepted_for_partial_cache_playback` ✅
+- `cargo test --lib media::player::presentation::tests` ✅
+- `cargo test --lib claim_due_schedule_is_atomic_and_one_winner_only` ✅
+- `cargo test --lib claimed_schedule_recovers_after_restart_before_execution` ✅
+- `cargo test --lib corrupt_identity_row_surfaces_read_error` ✅
+- `cargo test --lib next_preload_deadline_returns_none_when_no_pending_schedule_exists` ✅
+- `pnpm exec tsc --noEmit` ✅
+
+## Known remaining boundaries
+
+- Full visible in-window video still requires attaching the native macOS
+  NSView/CALayer or Windows HWND render host to the Tauri window surface. The
+  unsafe external mpv window path is no longer the configured final path; no
+  embedded-video success is claimed until that native host is verified.
+- Live two-device QUIC transfer, macOS/Windows notification dispatch, and
+  OS-protected key store behavior remain **EXTERNAL VERIFICATION PENDING**.
 
 ---
 

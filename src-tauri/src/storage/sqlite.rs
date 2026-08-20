@@ -175,19 +175,20 @@ impl MovePartyDb {
                  FROM device_identity LIMIT 1",
             )
             .map_err(|e| StorageError::Sqlite(e.to_string()))?;
-        let result = stmt
-            .query_row([], |row| {
-                Ok(StoredIdentity {
-                    device_id: row.get(0)?,
-                    display_name: row.get(1)?,
-                    public_key: row.get(2)?,
-                    platform: row.get(3)?,
-                    created_at_ms: row.get(4)?,
-                    key_label: row.get(5)?,
-                })
+        match stmt.query_row([], |row| {
+            Ok(StoredIdentity {
+                device_id: row.get(0)?,
+                display_name: row.get(1)?,
+                public_key: row.get(2)?,
+                platform: row.get(3)?,
+                created_at_ms: row.get(4)?,
+                key_label: row.get(5)?,
             })
-            .ok();
-        Ok(result)
+        }) {
+            Ok(identity) => Ok(Some(identity)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(StorageError::Sqlite(e.to_string())),
+        }
     }
 
     /// Remove the stored identity metadata (used on coherent rotation so the
@@ -279,6 +280,38 @@ impl MovePartyDb {
         )
         .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         Ok(())
+    }
+
+    /// Atomically claim a due schedule for execution. Returns `true` only
+    /// when this caller won the transition from a pending state to `Claimed`.
+    pub fn claim_due_schedule(&self, schedule_id: &str, now_ms: i64) -> Result<bool, StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        let changed = conn
+            .execute(
+                "UPDATE schedules
+                 SET status = 'Claimed'
+                 WHERE schedule_id = ?1
+                   AND status IN ('Planned', 'WaitingForPeer')
+                   AND planned_preload_utc_ms <= ?2",
+                params![schedule_id, now_ms],
+            )
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(changed == 1)
+    }
+
+    /// Recover schedules left in `Claimed` by a process crash. A claimed
+    /// schedule has not reached `Transferring`, so it is safe to return it to
+    /// the retryable waiting state.
+    pub fn recover_claimed_schedules(&self, now_ms: i64) -> Result<usize, StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        conn.execute(
+            "UPDATE schedules
+             SET status = 'WaitingForPeer'
+             WHERE status = 'Claimed'
+               AND planned_preload_utc_ms <= ?1",
+            params![now_ms],
+        )
+        .map_err(|e| StorageError::Sqlite(e.to_string()))
     }
 
     /// Update the planned preload deadline of a schedule (rescheduling).
@@ -523,10 +556,10 @@ impl MovePartyDb {
              WHERE status IN ('Planned', 'WaitingForPeer')
                AND planned_preload_utc_ms > ?1",
             params![now_ms],
-            |row| row.get::<_, i64>(0),
+            |row| row.get::<_, Option<i64>>(0),
         );
         match result {
-            Ok(deadline) => Ok(Some(deadline)),
+            Ok(deadline) => Ok(deadline),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(StorageError::Sqlite(e.to_string())),
         }
@@ -670,6 +703,47 @@ mod tests {
     }
 
     #[test]
+    fn claim_due_schedule_is_atomic_and_one_winner_only() {
+        let db = MovePartyDb::open_in_memory().expect("open");
+        let schedule = StoredSchedule {
+            schedule_id: "claim-1".to_string(),
+            room_id: "room".to_string(),
+            media_id: "media".to_string(),
+            scheduled_start_utc_ms: 100,
+            planned_preload_utc_ms: 50,
+            guest_device_id: "guest".to_string(),
+            status: "Planned".to_string(),
+            created_at_ms: 1,
+        };
+
+        db.insert_schedule(&schedule).expect("insert");
+        assert!(db.claim_due_schedule("claim-1", 60).expect("claim"));
+        assert!(!db.claim_due_schedule("claim-1", 60).expect("claim2"));
+        assert_eq!(db.list_schedules().expect("list")[0].status, "Claimed");
+    }
+
+    #[test]
+    fn claimed_schedule_recovers_after_restart_before_execution() {
+        let db = MovePartyDb::open_in_memory().expect("open");
+        let schedule = StoredSchedule {
+            schedule_id: "claimed-restart".to_string(),
+            room_id: "room".to_string(),
+            media_id: "media".to_string(),
+            scheduled_start_utc_ms: 100,
+            planned_preload_utc_ms: 50,
+            guest_device_id: "guest".to_string(),
+            status: "Claimed".to_string(),
+            created_at_ms: 1,
+        };
+
+        db.insert_schedule(&schedule).expect("insert");
+        assert_eq!(db.recover_claimed_schedules(60).expect("recover"), 1);
+        let due = db.due_schedules(60).expect("due");
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].status, "WaitingForPeer");
+    }
+
+    #[test]
     fn persists_and_manages_cache_entries() {
         let db = MovePartyDb::open_in_memory().expect("open");
         let entry = StoredCacheEntry {
@@ -774,6 +848,26 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_identity_row_surfaces_read_error() {
+        let db = MovePartyDb::open_in_memory().expect("open");
+        {
+            let conn = db.conn.lock().expect("conn");
+            conn.execute(
+                "INSERT INTO device_identity
+                 (device_id, display_name, public_key, platform, created_at_ms, key_label)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params!["bad", "Bad", "pk", "macos", "not-an-integer", "label"],
+            )
+            .expect("insert");
+        }
+
+        assert!(
+            db.get_identity().is_err(),
+            "corrupt identity metadata must surface an error, not look like first launch"
+        );
+    }
+
+    #[test]
     fn preload_calculation_basic() {
         // 1 GB remaining, 10 Mbps goodput, scheduled 3 hours from now
         let remaining: u64 = 1_000_000_000;
@@ -823,6 +917,13 @@ mod tests {
             .expect("update");
         let overdue_after = db.overdue_schedules().expect("overdue2");
         assert!(overdue_after.is_empty());
+    }
+
+    #[test]
+    fn next_preload_deadline_returns_none_when_no_pending_schedule_exists() {
+        let db = MovePartyDb::open_in_memory().expect("open");
+
+        assert_eq!(db.next_preload_deadline(100).expect("deadline"), None);
     }
 
     #[test]

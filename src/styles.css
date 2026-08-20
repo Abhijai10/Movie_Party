@@ -427,6 +427,7 @@ h1 {
 .chat-bubble,
 .buffer-overlay,
 .reconnect-overlay,
+.presentation-overlay,
 .control-dock {
   position: absolute;
   z-index: 2;
@@ -569,12 +570,36 @@ h1 {
   padding: 16px;
 }
 
+.presentation-overlay {
+  right: clamp(22px, 3vw, 44px);
+  top: clamp(22px, 3vw, 44px);
+  width: min(420px, calc(100vw - 44px));
+  padding: 16px;
+}
+
+.presentation-overlay h2 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+.presentation-overlay p,
+.presentation-overlay small {
+  margin: 0;
+  color: var(--muted);
+}
+
+.presentation-overlay small {
+  display: block;
+  margin-top: 8px;
+}
+
 .privacy-hidden .camera-card,
 .privacy-hidden .camera-restore,
 .privacy-hidden .chat-bubble,
 .privacy-hidden .reaction-float-layer,
 .privacy-hidden .buffer-overlay,
 .privacy-hidden .reconnect-overlay,
+.privacy-hidden .presentation-overlay,
 .privacy-hidden .chat-compose,
 .privacy-hidden .chat-history,
 .privacy-hidden .reaction-tray,
