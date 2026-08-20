@@ -150,6 +150,18 @@ export async function getAppSnapshot(): Promise<AppSnapshot | null> {
   return invokeSnapshot("get_app_snapshot");
 }
 
+export async function showHome(): Promise<AppSnapshot | null> {
+  return invokeSnapshot("show_home");
+}
+
+export async function showJoinParty(): Promise<AppSnapshot | null> {
+  return invokeSnapshot("show_join_party");
+}
+
+export async function requestEndParty(): Promise<AppSnapshot | null> {
+  return invokeSnapshot("request_end_party");
+}
+
 export async function createLocalParty(mediaPath: string | null): Promise<AppSnapshot | null> {
   return invokeSnapshot("create_local_party", {
     mediaPath: mediaPath && mediaPath.trim().length > 0 ? mediaPath : null,

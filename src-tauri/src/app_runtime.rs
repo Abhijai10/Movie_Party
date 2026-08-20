@@ -851,6 +851,8 @@ impl AppRuntime {
         state.provider.provider_id = Some(provider_id);
         state.provider.url = Some(url);
         state.provider.state = format!("Chrome launched on CDP port {cdp_port}");
+        state.screen = "LOBBY".to_string();
+        state.local_participant.media_ready = true;
         state.error = None;
         snapshot_from_state(&state)
     }
@@ -866,6 +868,7 @@ impl AppRuntime {
         state.provider.provider_id = Some(provider_id);
         state.provider.url = Some(url);
         state.provider.state = format!("Unavailable: {reason}");
+        state.screen = "LOBBY".to_string();
         state.error = Some(reason);
         snapshot_from_state(&state)
     }
@@ -1350,6 +1353,54 @@ impl AppRuntime {
 
     pub fn snapshot(&self) -> AppSnapshot {
         snapshot_from_state(&self.lock())
+    }
+
+    pub fn show_join_party(&self) -> AppSnapshot {
+        let mut state = self.lock();
+        state.screen = "JOIN_PARTY".to_string();
+        state.error = None;
+        snapshot_from_state(&state)
+    }
+
+    pub fn request_end_party(&self) -> AppSnapshot {
+        let mut state = self.lock();
+        state.screen = "PARTY_END_CONFIRM".to_string();
+        snapshot_from_state(&state)
+    }
+
+    pub fn return_home(&self) -> AppSnapshot {
+        let _ = self.leave_party();
+        let mut state = self.lock();
+        state.screen = "HOME".to_string();
+        state.room_state = RoomState::Created;
+        state.sync = SyncSnapshot {
+            room_state: "CREATED".to_string(),
+            strict_sync_paused: false,
+            position_ms: 0,
+        };
+        state.local_participant.role = "Host".to_string();
+        state.local_participant.connected = false;
+        state.local_participant.media_ready = false;
+        state.local_participant.buffer_ahead_ms = 0;
+        state.media = None;
+        state.transfer = None;
+        state.buffer = BufferSnapshot {
+            guest_buffer_ahead_ms: 0,
+            percent: 0,
+            buffering_participant: None,
+        };
+        state.network.connected = false;
+        state.network.path = "Not connected".to_string();
+        state.provider = ProviderSnapshot {
+            mode: "LOCAL_PERFECT".to_string(),
+            provider_id: None,
+            url: None,
+            state: "Idle".to_string(),
+        };
+        state.chat.clear();
+        state.reactions.clear();
+        state.error = None;
+        snapshot_from_state(&state)
     }
 
     // M1: real host flow — bind QUIC server and produce a live invite
@@ -3950,6 +4001,37 @@ mod tests {
         assert!(snapshot.media.is_none());
         assert_eq!(snapshot.participants.len(), 1);
         assert!(snapshot.chat.is_empty());
+    }
+
+    #[test]
+    fn backend_owns_navigation_screens() {
+        let runtime = AppRuntime::new();
+
+        assert_eq!(runtime.show_join_party().screen, "JOIN_PARTY");
+        assert_eq!(runtime.request_end_party().screen, "PARTY_END_CONFIRM");
+        assert_eq!(runtime.return_home().screen, "HOME");
+    }
+
+    #[test]
+    fn provider_unavailable_is_truthful_runtime_state() {
+        let runtime = AppRuntime::new();
+        let snapshot = runtime.provider_unavailable(
+            "youtube".to_string(),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ".to_string(),
+            "MP-PROVIDER-001 Chrome executable unavailable".to_string(),
+        );
+
+        assert_eq!(snapshot.screen, "LOBBY");
+        assert_eq!(snapshot.provider.mode, "PROVIDER_SYNC");
+        assert_eq!(snapshot.provider.provider_id.as_deref(), Some("youtube"));
+        assert!(snapshot
+            .provider
+            .state
+            .contains("Chrome executable unavailable"));
+        assert_eq!(
+            snapshot.error.as_deref(),
+            Some("MP-PROVIDER-001 Chrome executable unavailable")
+        );
     }
 
     #[test]

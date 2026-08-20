@@ -10,10 +10,14 @@ import {
   enterCinema,
   getAppSnapshot,
   joinParty,
+  launchProvider,
   leaveParty,
   markReady,
   listenToSnapshots,
+  requestEndParty,
   setSharedControls,
+  showHome,
+  showJoinParty,
   type AppSnapshot,
 } from "../backend/appRuntime";
 import { type UnlistenFn } from "@tauri-apps/api/event";
@@ -61,17 +65,24 @@ export function App() {
   };
 
   const goHome = () => {
-    void getAppSnapshot().then((next) => {
-      applySnapshot(next ? { ...next, screen: "HOME" } : next);
-    });
+    void showHome().then(applySnapshot);
   };
 
   const goCreateParty = (mediaPath: string | null) => {
+    const provider = providerIdForInput(mediaPath);
+    if (provider && mediaPath) {
+      void createLocalParty(null).then((partySnapshot) => {
+        applySnapshot(partySnapshot);
+        void launchProvider(provider, mediaPath).then(applySnapshot);
+      });
+      return;
+    }
+
     void createLocalParty(mediaPath).then(applySnapshot);
   };
 
   const goJoinParty = () => {
-    applySnapshot(snapshot ? { ...snapshot, screen: "JOIN_PARTY" } : snapshot);
+    void showJoinParty().then(applySnapshot);
   };
 
   const submitJoin = (inviteCode: string) => {
@@ -91,7 +102,14 @@ export function App() {
   };
 
   const goPartyEnded = () => {
-    void leaveParty().then(applySnapshot);
+    void requestEndParty().then(applySnapshot);
+  };
+
+  const confirmEndParty = () => {
+    void leaveParty().then((ended) => {
+      applySnapshot(ended);
+      void showHome().then(applySnapshot);
+    });
   };
 
   if (!snapshot) {
@@ -129,7 +147,7 @@ export function App() {
     return <CinemaMode snapshot={snapshot} onSnapshot={setSnapshot} onLeave={goPartyEnded} />;
   }
 
-  if (state === "PARTY_ENDED") {
+  if (state === "PARTY_END_CONFIRM") {
     return (
       <main className="app-shell centered-shell">
         <section
@@ -146,7 +164,7 @@ export function App() {
             <button className="secondary-action" type="button" onClick={goCinema}>
               Cancel
             </button>
-            <button className="danger-action" type="button" onClick={goHome}>
+            <button className="danger-action" type="button" onClick={confirmEndParty}>
               End Party
             </button>
           </div>
@@ -160,4 +178,43 @@ export function App() {
       <HomeScreen snapshot={snapshot} onCreateLocalParty={goCreateParty} onJoin={goJoinParty} />
     </main>
   );
+}
+
+function providerIdForInput(input: string | null): string | null {
+  const value = input?.trim();
+  if (!value) {
+    return null;
+  }
+
+  let host = "";
+  try {
+    host = new URL(value).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+
+  if (host === "youtu.be" || host === "youtube.com" || host.endsWith(".youtube.com")) {
+    return "youtube";
+  }
+  if (host === "netflix.com" || host.endsWith(".netflix.com")) {
+    return "netflix";
+  }
+  if (
+    host === "primevideo.com" ||
+    host.endsWith(".primevideo.com") ||
+    host === "amazon.com" ||
+    host.endsWith(".amazon.com")
+  ) {
+    return "prime";
+  }
+  if (
+    host === "hotstar.com" ||
+    host.endsWith(".hotstar.com") ||
+    host === "jiocinema.com" ||
+    host.endsWith(".jiocinema.com")
+  ) {
+    return "jiohotstar";
+  }
+
+  return null;
 }

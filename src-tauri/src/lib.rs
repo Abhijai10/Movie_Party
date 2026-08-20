@@ -42,6 +42,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_metadata,
             get_app_snapshot,
+            show_home,
+            show_join_party,
+            request_end_party,
             init_listener,
             create_local_party,
             join_party,
@@ -101,6 +104,23 @@ fn get_app_snapshot(
     runtime: tauri::State<'_, app_runtime::AppRuntime>,
 ) -> app_runtime::AppSnapshot {
     runtime.snapshot()
+}
+
+#[tauri::command]
+fn show_home(runtime: tauri::State<'_, app_runtime::AppRuntime>) -> app_runtime::AppSnapshot {
+    runtime.return_home()
+}
+
+#[tauri::command]
+fn show_join_party(runtime: tauri::State<'_, app_runtime::AppRuntime>) -> app_runtime::AppSnapshot {
+    runtime.show_join_party()
+}
+
+#[tauri::command]
+fn request_end_party(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> app_runtime::AppSnapshot {
+    runtime.request_end_party()
 }
 
 #[tauri::command]
