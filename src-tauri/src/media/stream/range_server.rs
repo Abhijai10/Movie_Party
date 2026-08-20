@@ -14,8 +14,8 @@ use tokio::sync::{watch, Mutex, Notify};
 use crate::media::cache::SparseCache;
 use crate::media::manifest::MediaManifest;
 use crate::media::stream::parse_http_range;
+use crate::media::transfer::{ChunkDemandHandle, ChunkPriority};
 
-const WAIT_TIMEOUT_MS: u64 = 500;
 const WAIT_POLL_MS: u64 = 20;
 
 pub struct RangeServerConfig {
@@ -23,6 +23,11 @@ pub struct RangeServerConfig {
     pub cache: Arc<Mutex<SparseCache>>,
     pub session_token: String,
     pub chunk_wake_rx: watch::Receiver<u64>,
+    /// Shared demand channel: missing ranges are enqueued here as Critical
+    /// chunk requests for the guest transfer worker.
+    pub demand: ChunkDemandHandle,
+    /// Bounded wait for demanded chunks before serving what is available.
+    pub wait_timeout_ms: u64,
 }
 
 pub struct RangeServerHandle {
@@ -42,7 +47,7 @@ impl std::fmt::Debug for RangeServerHandle {
 }
 
 impl RangeServerHandle {
-    pub async fn shutdown(&self) {
+    pub fn shutdown(&self) {
         self.shutdown.notify_waiters();
     }
     pub fn notify_chunk_written(&self) {
@@ -61,6 +66,8 @@ pub async fn start_range_server(
     let media_id = config.manifest.media_id.clone();
     let manifest = Arc::new(config.manifest);
     let cache = config.cache;
+    let demand = config.demand;
+    let wait_timeout_ms = config.wait_timeout_ms;
     let media_url = format!(
         "http://127.0.0.1:{}/media/{}?token={}",
         addr.port(),
@@ -77,10 +84,11 @@ pub async fn start_range_server(
                             let manifest = manifest.clone();
                             let cache = cache.clone();
                             let token = token.clone();
+                            let demand = demand.clone();
                             tokio::task::spawn_blocking(move || {
                                 if let Ok(std_stream) = tokio_stream.into_std() {
                                     let _ = std_stream.set_nonblocking(false);
-                                    handle_connection(std_stream, peer_addr, &manifest, &cache, &token);
+                                    handle_connection(std_stream, peer_addr, &manifest, &cache, &token, &demand, wait_timeout_ms);
                                 }
                             });
                         }
@@ -109,6 +117,8 @@ fn handle_connection(
     manifest: &MediaManifest,
     cache: &Arc<Mutex<SparseCache>>,
     valid_token: &str,
+    demand: &ChunkDemandHandle,
+    wait_timeout_ms: u64,
 ) {
     let mut method = String::new();
     let mut path = String::new();
@@ -159,8 +169,14 @@ fn handle_connection(
     match headers.get("range").cloned() {
         Some(range_value) => match parse_http_range(&range_value, manifest.file_size) {
             Ok(range_request) => {
-                let bytes =
-                    wait_for_range(cache, manifest, range_request.start, range_request.len());
+                let bytes = wait_for_range(
+                    cache,
+                    manifest,
+                    range_request.start,
+                    range_request.len(),
+                    demand,
+                    wait_timeout_ms,
+                );
                 let end = range_request.start + bytes.len() as u64 - 1;
                 let content_range = format!(
                     "bytes {}-{}/{}",
@@ -179,7 +195,14 @@ fn handle_connection(
             }
         },
         None => {
-            let bytes = wait_for_range(cache, manifest, 0, manifest.file_size);
+            let bytes = wait_for_range(
+                cache,
+                manifest,
+                0,
+                manifest.file_size,
+                demand,
+                wait_timeout_ms,
+            );
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
                 bytes.len()
@@ -207,8 +230,11 @@ fn wait_for_range(
     manifest: &MediaManifest,
     start: u64,
     len: u64,
+    demand: &ChunkDemandHandle,
+    wait_timeout_ms: u64,
 ) -> Vec<u8> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(WAIT_TIMEOUT_MS);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_timeout_ms);
+    let mut demand_enqueued = false;
     loop {
         let result = {
             let g = cache.blocking_lock();
@@ -217,6 +243,10 @@ fn wait_for_range(
         match result {
             Ok(Some(bytes)) => return bytes,
             Ok(None) => {
+                if !demand_enqueued {
+                    enqueue_missing_chunks(cache, manifest, start, len, demand);
+                    demand_enqueued = true;
+                }
                 if std::time::Instant::now() >= deadline {
                     return read_available_portion(cache, manifest, start, len);
                 }
@@ -226,6 +256,37 @@ fn wait_for_range(
                 return read_available_portion(cache, manifest, start, len);
             }
         }
+    }
+}
+
+/// Compute the exact 1 MiB chunk indices covering `[start, start+len)` that
+/// are still missing from the sparse cache and enqueue them as CRITICAL
+/// demand for the guest transfer worker.
+fn enqueue_missing_chunks(
+    cache: &Arc<Mutex<SparseCache>>,
+    manifest: &MediaManifest,
+    start: u64,
+    len: u64,
+    demand: &ChunkDemandHandle,
+) {
+    let end = start.saturating_add(len);
+    if end == 0 {
+        return;
+    }
+    let first = start / manifest.chunk_size;
+    let last =
+        (end.saturating_sub(1) / manifest.chunk_size).min(manifest.chunk_count.saturating_sub(1));
+    let mut missing = Vec::new();
+    {
+        let g = cache.blocking_lock();
+        for index in first..=last {
+            if !g.chunk_map().is_available(index) {
+                missing.push(index);
+            }
+        }
+    }
+    for index in missing {
+        demand.request(index, ChunkPriority::Critical);
     }
 }
 
@@ -261,6 +322,7 @@ mod tests {
     use super::*;
     use crate::media::cache::SparseCache;
     use crate::media::manifest::{MediaManifest, QuickFingerprint};
+    use crate::media::transfer::{ChunkDemandHandle, ChunkPriority};
     use std::io::Read;
     use uuid::Uuid;
 
@@ -317,6 +379,8 @@ mod tests {
             cache: c,
             session_token: t.to_string(),
             chunk_wake_rx: rx,
+            demand: ChunkDemandHandle::new(),
+            wait_timeout_ms: 500,
         }
     }
 
@@ -336,7 +400,7 @@ mod tests {
         let r = http_get_range(h.addr, "/media/range-test?token=tok", "bytes=0-7");
         assert!(r.contains("206 Partial Content"));
         assert!(r.contains("abcdefgh"));
-        h.shutdown().await;
+        h.shutdown();
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -354,7 +418,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let r = http_get(h.addr, "/media/range-test?token=wrong");
         assert!(r.contains("401 Unauthorized"));
-        h.shutdown().await;
+        h.shutdown();
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -378,7 +442,7 @@ mod tests {
         let mut resp = Vec::new();
         s.read_to_end(&mut resp).expect("r");
         assert!(String::from_utf8_lossy(&resp).contains("405 Method Not Allowed"));
-        h.shutdown().await;
+        h.shutdown();
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -396,7 +460,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let r = http_get(h.addr, "/media/wrong-id?token=tok");
         assert!(r.contains("404 Not Found"));
-        h.shutdown().await;
+        h.shutdown();
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -425,7 +489,49 @@ mod tests {
         let r = http_get_range(h.addr, "/media/range-test?token=tok", "bytes=0-3");
         assert!(r.contains("206 Partial Content"));
         assert!(r.contains("abcd"));
-        h.shutdown().await;
+        h.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn range_server_enqueues_demand_for_missing_chunks() {
+        let root = std::env::temp_dir().join(Uuid::now_v7().to_string());
+        std::fs::create_dir_all(&root).expect("temp");
+        let m = test_manifest();
+        let cache = Arc::new(Mutex::new(
+            SparseCache::open(&root, m.clone()).expect("cache"),
+        ));
+        let demand = ChunkDemandHandle::new();
+        let mut config = make_config(m, cache, "tok");
+        config.demand = demand.clone();
+        let h = start_range_server(config).await.expect("server");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Request a range spanning chunks 0 and 1, both missing. The request
+        // handler must enqueue both as Critical demand before it starts
+        // waiting.
+        let client = std::thread::spawn(move || {
+            http_get_range(h.addr, "/media/range-test?token=tok", "bytes=0-7")
+        });
+        let mut demanded = Vec::new();
+        for _ in 0..20 {
+            while let Some(req) = demand.pop_next() {
+                demanded.push(req);
+            }
+            if demanded.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let _resp = client.join().expect("request");
+
+        assert_eq!(demanded.len(), 2);
+        assert!(demanded
+            .iter()
+            .all(|r| r.priority == ChunkPriority::Critical));
+        assert!(demanded.iter().any(|r| r.index == 0));
+        assert!(demanded.iter().any(|r| r.index == 1));
+        h.shutdown();
         let _ = std::fs::remove_dir_all(&root);
     }
 }

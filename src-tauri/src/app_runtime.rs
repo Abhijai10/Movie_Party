@@ -428,6 +428,14 @@ struct AppRuntimeState {
     player_snapshot: PlayerSnapshot,
     /// M3: Background task polling the live player for position/duration/buffering.
     player_event_task: Option<tokio::task::JoinHandle<()>>,
+    /// M3: Demand-driven QUIC transfer worker (guest Local Perfect). Owned by
+    /// the active session; aborted on leave/disconnect so old session tasks
+    /// can never write to the cache afterwards.
+    transfer_task: Option<tokio::task::JoinHandle<()>>,
+    /// Previously-aborted transfer worker, kept for diagnostics so callers
+    /// can confirm an old session's worker has actually terminated before a
+    /// reconnect replaces it with a fresh one.
+    old_transfer_task: Option<tokio::task::JoinHandle<()>>,
     // ── M8: Automatic failure watchers ──────────────────────────────────
     /// Background task monitoring transfer progress for stalls.
     transfer_stall_watcher_task: Option<tokio::task::JoinHandle<()>>,
@@ -557,6 +565,8 @@ impl AppRuntime {
                     guest_cache: None,
                     player_snapshot: PlayerSnapshot::default(),
                     player_event_task: None,
+                    transfer_task: None,
+                    old_transfer_task: None,
                     transfer_stall_watcher_task: None,
                     db: None,
                     chrome_session: None,
@@ -2446,14 +2456,20 @@ impl AppRuntime {
         if let Some(task) = state.player_event_task.take() {
             task.abort();
         }
+        if let Some(task) = state.transfer_task.take() {
+            task.abort();
+            state.old_transfer_task = Some(task);
+        }
         if let Some(task) = state.transfer_stall_watcher_task.take() {
             task.abort();
         }
         if let Some(client) = state.client.take() {
             let _ = client;
         }
+        if let Some(range) = state.range_server_handle.take() {
+            range.shutdown();
+        }
         state.player = None;
-        state.range_server_handle = None;
         state.guest_cache = None;
         state.invite = None;
         state.host_session = None;
@@ -2700,13 +2716,37 @@ impl AppRuntime {
     }
 
     /// M3: Guest-side Local Perfect media fetch.
+    ///
+    /// Owns the full Local Perfect session on the guest:
+    /// manifest → sparse cache → demand-driven loopback range server →
+    /// QUIC transfer worker → player → player event loop.
+    ///
+    /// The transfer worker is demand-driven: it only fetches the exact
+    /// 1 MiB chunks that the range server enqueues when mpv issues an HTTP
+    /// Range request for uncached bytes. `leave_party` aborts every owned
+    /// task and releases the cache.
     pub async fn guest_fetch_media(&self) -> Result<AppSnapshot, String> {
         use crate::media::cache::SparseCache;
         use crate::media::manifest::MediaManifest;
         use crate::media::stream::range_server::{start_range_server, RangeServerConfig};
         use crate::media::stream::route_for_media;
-        use crate::media::transfer::validate_chunk_packet;
+        use crate::media::transfer::{validate_chunk_packet, ChunkDemandHandle};
         use rand::RngCore;
+
+        // Lifecycle hygiene: a reconnect must never leave duplicate live
+        // workers or range servers from a previous session running. Abort
+        // any prior transfer worker and stop any prior range server before
+        // creating the new session.
+        {
+            let mut state = self.lock();
+            if let Some(task) = state.transfer_task.take() {
+                task.abort();
+                state.old_transfer_task = Some(task);
+            }
+            if let Some(range) = state.range_server_handle.take() {
+                range.shutdown();
+            }
+        }
 
         // 1. Fetch manifest over authenticated QUIC
         let manifest: MediaManifest = {
@@ -2723,7 +2763,8 @@ impl AppRuntime {
         let cache = SparseCache::open(&cache_root, manifest.clone())
             .map_err(|e| format!("MP-MEDIA-002 cache open failed: {e}"))?;
 
-        // 3. Start loopback range server with chunk-wake channel
+        // 3. Shared demand channel between range server and transfer worker
+        let demand = ChunkDemandHandle::new();
         let session_token = {
             let mut buf = [0u8; 32];
             rand::rng().fill_bytes(&mut buf);
@@ -2738,6 +2779,8 @@ impl AppRuntime {
             cache: cache_arc.clone(),
             session_token,
             chunk_wake_rx: wake_rx,
+            demand: demand.clone(),
+            wait_timeout_ms: 5_000,
         };
         let range_handle = start_range_server(range_config)
             .await
@@ -2785,45 +2828,64 @@ impl AppRuntime {
             sync_room_snapshot(&mut state);
         }
 
-        // 5. Spawn background chunk prefetch — validates and writes to cache
-        let inner = Arc::clone(&self.inner);
-        let manifest_pf = manifest.clone();
-        let wake_tx_pf = wake_tx.clone();
-        tokio::spawn(async move {
-            let client_opt = inner.lock().client.clone();
-            let Some(client) = client_opt else { return };
-            for idx in 0..manifest_pf.chunk_count {
-                match client
-                    .fetch_local_media_chunk(&manifest_pf.media_id, idx)
-                    .await
-                {
-                    Ok(packet) => {
-                        if validate_chunk_packet(&manifest_pf, &packet).is_err() {
-                            continue;
-                        }
-                        {
-                            let state = inner.lock();
-                            if let Some(ref cache) = state.guest_cache {
-                                if let Ok(mut c) = cache.try_lock() {
-                                    let _ = c.write_chunk(
-                                        u64::from(packet.chunk_index),
-                                        &packet.payload,
-                                    );
+        // 5. Demand-driven QUIC transfer worker — validates and writes to
+        //    cache, then wakes the range server via the wake channel.
+        //    Owned by this session: dropped when `leave_party` clears the
+        //    client, and aborted on reconnect so no duplicate worker runs.
+        let transfer_task = {
+            let inner = Arc::clone(&self.inner);
+            let manifest_worker = manifest.clone();
+            let wake_tx_worker = wake_tx.clone();
+            let demand_worker = demand.clone();
+            tokio::spawn(async move {
+                loop {
+                    let Some(request) = demand_worker.pop_next() else {
+                        demand_worker.notified().await;
+                        continue;
+                    };
+                    let client_opt = inner.lock().client.clone();
+                    let Some(client) = client_opt else {
+                        demand_worker.finish_fetch(request.index);
+                        break;
+                    };
+                    match client
+                        .fetch_local_media_chunk(&manifest_worker.media_id, request.index)
+                        .await
+                    {
+                        Ok(packet) => {
+                            if validate_chunk_packet(&manifest_worker, &packet).is_ok() {
+                                {
+                                    let state = inner.lock();
+                                    if let Some(ref cache) = state.guest_cache {
+                                        if let Ok(mut c) = cache.try_lock() {
+                                            let _ = c.write_chunk(
+                                                u64::from(packet.chunk_index),
+                                                &packet.payload,
+                                            );
+                                        }
+                                    }
                                 }
+                                {
+                                    let mut state = inner.lock();
+                                    if let Some(ref mut t) = state.transfer {
+                                        t.bytes_available += packet.payload.len() as u64;
+                                    }
+                                }
+                                wake_tx_worker.send_modify(|v| *v = v.wrapping_add(1));
                             }
+                            demand_worker.finish_fetch(request.index);
                         }
-                        {
-                            let mut state = inner.lock();
-                            if let Some(ref mut t) = state.transfer {
-                                t.bytes_available += packet.payload.len() as u64;
-                            }
+                        Err(_) => {
+                            demand_worker.finish_fetch(request.index);
+                            break;
                         }
-                        wake_tx_pf.send_modify(|v| *v = v.wrapping_add(1));
                     }
-                    Err(_) => break,
                 }
-            }
-        });
+            })
+        };
+        {
+            self.lock().transfer_task = Some(transfer_task);
+        }
 
         if self.lock().player.is_some() {
             self.spawn_player_event_loop();
@@ -2841,6 +2903,43 @@ impl AppRuntime {
     pub fn client_for_test(&self) -> Option<QuicClient> {
         self.lock().client.clone()
     }
+
+    /// Inject a QUIC client for testing purposes (replaces any existing).
+    #[doc(hidden)]
+    pub fn inject_client_for_test(&self, client: QuicClient) {
+        self.lock().client = Some(client);
+    }
+
+    /// Debug snapshot of the current session's owned resources.
+    #[doc(hidden)]
+    pub fn debug_session_owned(&self) -> SessionOwnershipDebug {
+        let state = self.lock();
+        let old_alive = state
+            .old_transfer_task
+            .as_ref()
+            .map(|t| !t.is_finished())
+            .unwrap_or(false);
+        SessionOwnershipDebug {
+            cache_owned: state.guest_cache.is_some(),
+            range_server_owned: state.range_server_handle.is_some(),
+            transfer_worker_owned: state.transfer_task.is_some(),
+            player_owned: state.player.is_some(),
+            old_worker_alive: old_alive,
+        }
+    }
+}
+
+/// Debug report of session ownership (test-only).
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionOwnershipDebug {
+    pub cache_owned: bool,
+    pub range_server_owned: bool,
+    pub transfer_worker_owned: bool,
+    pub player_owned: bool,
+    /// Whether the previous session's transfer worker is still alive
+    /// (indicating a stale task survived the replacement).
+    pub old_worker_alive: bool,
 }
 
 impl Default for AppRuntime {

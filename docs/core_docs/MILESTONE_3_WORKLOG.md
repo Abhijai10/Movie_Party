@@ -1,103 +1,105 @@
 # Milestone 3 Worklog — Local Perfect E2E
 
-## Status: 🟨 IN PROGRESS
+## Status: 🟩 LOCALLY COMPLETE (external macOS playback verification pending)
 
 ---
 
 ## Architecture Implemented
 
-### MpvPlayer Backend (`src-tauri/src/media/player/mpv_backend.rs`)
-- Dynamic loading via libloading (dlopen/dlsym)
-- Real mpv_create → mpv_initialize → mpv_command lifecycle
-- vo=null/ao=null REMOVED — mpv uses default Cocoa window
-- Play/Pause/Seek/Volume/Rate/Position/Duration/Buffered/Error
-- unsafe Send+Sync with SAFETY comment (mpv handle serialized through Mutex)
+### Demand-Driven Range Fetch (M3.1)
+- `ChunkDemandHandle` (`src-tauri/src/media/transfer/mod.rs`): shared bounded
+  demand channel between the loopback range server and the guest QUIC
+  transfer worker.
+  - Priority-ordered queue (`BinaryHeap`): Critical outranks background.
+  - In-flight set prevents duplicate simultaneous fetch of the same chunk.
+  - Tokio `Notify` with stored-permit semantics — no lost wakeups, no busy loop.
+- Range server (`range_server.rs`) now computes the exact missing 1 MiB chunk
+  indices for every uncached HTTP Range request and enqueues them as CRITICAL
+  demand before waiting (configurable bounded `wait_timeout_ms`, defaults to 5s
+  in the production path, then serves whatever is available).
+- `guest_fetch_media()` (AppRuntime) runs a demand-driven transfer worker:
+  pop → QUIC binary fetch → BLAKE3/len/index/media_id validation → write to
+  SparseCache → wake range server via watch channel.
+- Tests: uncached range triggers real QUIC fetch + serves exact source bytes;
+  distant seek reprioritizes over background; duplicate demands deduplicate.
 
-### Player Event Loop (`src-tauri/src/app_runtime.rs`)
-- `spawn_player_event_loop()`: polls live player every 200ms
-- Reads position_ms, duration_ms, state, buffered_ahead_ms
-- Updates `state.sync.position_ms` and `state.player_snapshot`
-- Feeds PlayerState::Buffering → strict_sync_paused
-- Emits updated snapshots to frontend
-- Cleanup on leave_party via `player_event_task` abort
+### Binary QUIC Bulk Transfer (M3.2)
+- `ServerResponse::ChunkResponse` (base64 JSON payload) is GONE.
+- Host `ChunkRequest` handler now writes the PROTOCOL_SPEC §45 binary
+  chunk-stream (`MPCK` magic, version, media id, uint32 index, uint32 payload
+  length, 32-byte BLAKE3, raw payload) directly on the dedicated QUIC stream.
+- Guest `fetch_local_media_chunk()` reads the leading 4 bytes: MPCK magic →
+  binary decode; otherwise JSON error response (ChunkUnavailable/MediaError).
+- Control JSON stays small; `MAX_REQUEST_BYTES` unchanged (2 MiB).
+- Tests: valid round-trip, truncated frame, oversized claimed payload, wrong
+  media/index, hash corruption, raw-binary-not-base64 assertion.
 
-### Coordinator → Player Dispatch
-- `dispatch_player_play()`: called on PlayCommit
-- `dispatch_player_pause()`: called on PauseCommit
-- `dispatch_player_seek()`: called on SeekCommit
-- All update `state.player_snapshot` after dispatch
+### Lifecycle (M3.3)
+- `guest_fetch_media()` owns manifest, sparse cache, range server, transfer
+  worker, player, and player event loop.
+- `leave_party()` aborts transfer worker, player event loop, transfer stall
+  watcher, stops the range server (`shutdown()` now synchronous), releases
+  cache and client.
+- Reconnect: `guest_fetch_media()` aborts any prior transfer worker and stops
+  any prior range server before installing the new session; the old task is
+  retained as `old_transfer_task` so tests can confirm it terminated.
+- Tests: session ownership + release; reconnect keeps exactly one live worker.
 
-### Range Server (`src-tauri/src/media/stream/range_server.rs`)
-- Binds to 127.0.0.1:random with session token
-- Serves validated byte ranges from SparseCache
-- Missing ranges trigger priority chunk fetch
-- HTTP range semantics supported
-- 4 tests
+### Strict Sync Authority (M3.4)
+- No changes needed to M2: PROTOCOL_SPEC §30 behavior already proven at the
+  coordinator level. Added an AppRuntime E2E proof:
+  guest cannot provide bytes → BUFFERING + strict_sync_paused on BOTH sides →
+  refill → readiness consensus → fresh host play cycle → synchronized PLAYING.
+  No independent Local Perfect auto-resume.
 
-### Native File Picker
-- `pick_media_file` Tauri command using rfd
-- Frontend: HomeScreen file picker button
-- Backend: receives path, builds manifest, creates player
+### Player / Presentation (M3.5)
+- libmpv backend remains behind `#[cfg(feature = "mpv")]`.
+- Known limitation (documented, NOT renamed as V2): libmpv opens its own
+  unmanaged Cocoa window. In-app embedding of the mpv surface requires a
+  platform-native view-hosting layer (NSView/CALayer hosting) that the Tauri 2
+  webview API does not expose; this is the locked-architecture gap, recorded
+  as a platform blocker, not silently renamed.
+- External verification pending: run .app → pick media → visible playback.
 
 ---
 
-## Tests
+## Tests (M3 closure added 13)
 
-### Component Tests (m3_integration.rs — 18 tests)
-1. test_1_player_initialization_returns_structured_result
-2. test_2_invalid_media_returns_structured_error
-3. test_3_play_command_transitions_to_playing
-4. test_4_pause_command_transitions_to_paused
-5. test_5_seek_command_updates_position
-6. test_6_position_reporting_reflects_playback_state
-7. test_7_duration_reporting_none_for_stub
-8. test_8_close_resets_all_state
-9. test_9_set_volume
-10. test_10_set_playback_rate
-11. test_11_buffered_ahead_reporting
-12. test_12_error_state_after_invalid_media
-13. test_13_full_lifecycle_open_ready_play_pause_seek_resume_close (coordinator)
-14. test_14_buffer_low_triggers_strict_sync
-15. test_15_full_lifecycle_open_ready_play_pause_seek_resume_close (player)
-16. test_16_player_error_does_not_corrupt_coordinator
-17. test_17_appruntime_player_dispatch (E2E: AppRuntime creates player, dispatches commands)
-18. test_18_player_buffering_feeds_strict_sync (E2E: buffer stall → strict_sync_paused)
+Component (transfer/mod.rs):
+- validates_and_round_trips_chunk_stream
+- rejects_truncated_frame
+- rejects_oversized_claimed_payload
+- rejects_wrong_media_id_and_index
+- rejects_corrupt_chunk_hash
+- binary_stream_is_raw_not_base64_json
+- demand_pops_highest_priority_first
+- demand_deduplicates_concurrent_requests
+- demand_in_flight_chunk_is_not_popped_twice
+- demand_wakes_waiter_on_new_request
 
-### Range Server Tests (4 tests in range_server.rs)
-- Range request with valid token
-- Missing token rejection
-- Range beyond EOF
-- Partial range
+Range server (range_server.rs):
+- range_server_enqueues_demand_for_missing_chunks
+
+Integration (tests/m3_closure.rs):
+- uncached_http_range_triggers_real_quic_fetch_and_serves
+- distant_seek_repioritizes_demand_before_background
+- duplicate_range_demands_deduplicate
+- guest_fetch_media_owns_session_and_leave_releases_everything
+- reconnect_reuses_single_session_worker
+- guest_starvation_pauses_host_and_guest_with_consensus_resume
+
+Existing suites (m3_integration, local_perfect loopback E2E, m3_m4_e2e) all
+exercise the new binary chunk-stream path.
 
 ---
 
 ## Files
 
-- `src-tauri/src/media/player/mpv_backend.rs` — Real libmpv FFI backend
-- `src-tauri/src/media/player/mod.rs` — LocalPlayer trait, PlayerSnapshot, LibMpvPlayer stub
-- `src-tauri/src/app_runtime.rs` — Player ownership, event loop, dispatch
-- `src-tauri/src/media/stream/range_server.rs` — HTTP range server
-- `src-tauri/src/lib.rs` — pick_media_file command
-- `src/backend/appRuntime.ts` — PlayerSnapshot type, pickMediaFile
-- `src/lobby/HomeScreen.tsx` — File picker button
-- `src/cinema/CinemaMode.tsx` — Player position/duration display
-
----
-
-## Decisions
-
-### vo=null removal
-- Decision: Remove vo=null/ao=null
-- Why: mpv default Cocoa window provides visible video
-- Post-V1: Tauri render API embedding for in-app rendering
-
-### cfg-gated MpvPlayer
-- Decision: #[cfg(feature = "mpv")] for real MpvPlayer, LibMpvPlayer stub otherwise
-- Why: libmpv may not be installed on all systems
-
-### 200ms polling
-- Decision: Player event loop polls every 200ms
-- Why: Balances responsiveness with CPU usage; position changes are smooth
+- `src-tauri/src/media/transfer/mod.rs` — ChunkDemandHandle + binary stream tests
+- `src-tauri/src/media/stream/range_server.rs` — demand-driven serving
+- `src-tauri/src/network/quic.rs` — binary chunk stream transport
+- `src-tauri/src/app_runtime.rs` — demand worker, lifecycle ownership
+- `src-tauri/tests/m3_closure.rs` — new integration tests
 
 ---
 
@@ -105,3 +107,5 @@
 
 1. Run .app bundle → pick .mp4 → verify visible video + audio in mpv window
 2. Verify mpv Cocoa window appears alongside Move Party cinema
+3. In-app mpv surface embedding — platform blocker (Tauri 2 cannot host a
+   native mpv view in the webview without a native plugin).

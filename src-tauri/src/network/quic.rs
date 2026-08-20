@@ -26,7 +26,7 @@ use crate::sync::clock::ClockSample;
 
 pub const QUIC_TRANSPORT_NAME: &str = "quic";
 pub const MOVE_PARTY_ALPN: &[&[u8]] = &[b"moveparty-v1"];
-const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024; // 2 MB — supports base64-encoded 1 MiB chunks
+const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024; // 2 MB — large enough for control JSON
 const MAX_AUTH_NONCES: usize = 4_096;
 
 /// Wraps a [`ServerEvent`] with metadata identifying the originating peer and
@@ -282,15 +282,7 @@ pub enum ServerResponse {
     ManifestResponse {
         manifest: crate::media::manifest::MediaManifest,
     },
-    /// M3: Host sends a chunk of media data to the guest.
-    /// The payload is base64-encoded to fit in JSON.
-    ChunkResponse {
-        media_id: String,
-        chunk_index: u32,
-        hash: String,
-        payload: String, // base64-encoded chunk bytes
-    },
-    /// M3: Host indicates chunk is not available.
+    /// M3: Host indicates the requested chunk is not available.
     ChunkUnavailable {
         media_id: String,
         chunk_index: u64,
@@ -967,38 +959,51 @@ impl QuicClient {
     }
 
     /// M3: Fetch a single chunk from the host by index.
+    ///
+    /// The chunk is transported on a dedicated QUIC stream using the binary
+    /// chunk-stream format (`MPCK` magic, PROTOCOL_SPEC §45). Control JSON
+    /// never carries media payloads.
     pub async fn fetch_local_media_chunk(
         &self,
         media_id: &str,
         chunk_index: u64,
     ) -> Result<crate::media::transfer::ChunkPacket, QuicError> {
-        let response = self
-            .send_control(ClientRequest::ChunkRequest {
+        let (mut send, mut recv) = self.connection.open_bi().await?;
+        write_request(
+            &mut send,
+            &ClientRequest::ChunkRequest {
                 seq: self.next_seq(),
                 sender: self.identity.device_id.clone(),
                 media_id: media_id.to_string(),
                 chunk_index,
-            })
-            .await?;
+            },
+        )
+        .await?;
+        send.finish().map_err(|_| QuicError::ClosedStream)?;
+
+        // Read the leading 4 bytes: a binary chunk starts with the MPCK
+        // magic; otherwise the host wrote a JSON error response.
+        let mut magic = [0u8; 4];
+        recv.read_exact(&mut magic)
+            .await
+            .map_err(|error| QuicError::ReadExact(error.to_string()))?;
+        let mut rest = recv
+            .read_to_end(2 * 1024 * 1024)
+            .await
+            .map_err(QuicError::Read)?;
+        let mut payload = Vec::with_capacity(4 + rest.len());
+        payload.extend_from_slice(&magic);
+        payload.append(&mut rest);
+        if &magic == crate::media::transfer::CHUNK_MAGIC {
+            return crate::media::transfer::decode_chunk_stream(&payload)
+                .map_err(|_| QuicError::UnexpectedResponse);
+        }
+        let response: ServerResponse =
+            serde_json::from_slice(&payload).map_err(|_| QuicError::UnexpectedResponse)?;
         match response {
-            ServerResponse::ChunkResponse {
-                media_id,
-                chunk_index,
-                hash,
-                payload,
-            } => {
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(&payload)
-                    .map_err(|_| QuicError::UnexpectedResponse)?;
-                Ok(crate::media::transfer::ChunkPacket {
-                    media_id,
-                    chunk_index,
-                    hash,
-                    payload: bytes,
-                })
-            }
-            ServerResponse::ChunkUnavailable { .. } => Err(QuicError::UnexpectedResponse),
-            ServerResponse::MediaError { message: _, .. } => Err(QuicError::UnexpectedResponse),
+            ServerResponse::ChunkUnavailable { .. }
+            | ServerResponse::MediaError { .. }
+            | ServerResponse::AuthReject { .. } => Err(QuicError::UnexpectedResponse),
             _ => Err(QuicError::UnexpectedResponse),
         }
     }
@@ -1729,7 +1734,10 @@ async fn handle_request(
             }
         }
         // M3: Guest requests a specific chunk. The chunk is read from the
-        // local file, hashed, and sent back as base64-encoded JSON.
+        // local file and transported on this dedicated stream using the
+        // binary chunk-stream format (PROTOCOL_SPEC §45). Control JSON never
+        // carries media payloads — the raw chunk bytes travel on the stream
+        // after the small authenticated JSON request.
         ClientRequest::ChunkRequest {
             seq,
             sender,
@@ -1740,12 +1748,26 @@ async fn handle_request(
                 if let Some(ref media_path) = _local_media {
                     let path = std::path::Path::new(media_path);
                     match read_chunk_from_file(path, chunk_index) {
-                        Ok((hash, payload)) => ServerResponse::ChunkResponse {
-                            media_id,
-                            chunk_index: chunk_index as u32,
-                            hash,
-                            payload: base64::engine::general_purpose::STANDARD.encode(&payload),
-                        },
+                        Ok((hash, payload)) => {
+                            let packet = crate::media::transfer::ChunkPacket {
+                                media_id: media_id.clone(),
+                                chunk_index: u32::try_from(chunk_index).unwrap_or(u32::MAX),
+                                hash,
+                                payload,
+                            };
+                            match crate::media::transfer::encode_chunk_stream(&packet) {
+                                Ok(bytes) => {
+                                    send.write_all(&bytes).await.map_err(QuicError::Write)?;
+                                    send.finish().map_err(|_| QuicError::ClosedStream)?;
+                                    return Ok(());
+                                }
+                                Err(_) => ServerResponse::MediaError {
+                                    code: "MP-MEDIA-002".to_string(),
+                                    message: "chunk stream encode failed".to_string(),
+                                    operation_id: None,
+                                },
+                            }
+                        }
                         Err(e) => ServerResponse::MediaError {
                             code: "MP-MEDIA-002".to_string(),
                             message: format!("chunk read failed: {e}"),
