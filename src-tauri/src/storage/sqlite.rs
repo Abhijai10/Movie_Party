@@ -12,7 +12,7 @@ use rusqlite::{params, Connection};
 
 use super::StorageError;
 
-const CURRENT_SCHEMA_VERSION: i32 = 1;
+const CURRENT_SCHEMA_VERSION: i32 = 2;
 
 /// Helper to lock a Mutex, converting PoisonError to StorageError.
 fn lock_mutex<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, StorageError> {
@@ -29,6 +29,9 @@ pub struct MovePartyDb {
 }
 
 /// Stored device identity that persists across restarts.
+/// The `signing_key_seed` is the 32-byte ed25519 seed required to
+/// re-create the signing key on restart — without it the device identity
+/// cannot authenticate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredIdentity {
     pub device_id: String,
@@ -36,10 +39,12 @@ pub struct StoredIdentity {
     pub public_key: String,
     pub platform: String,
     pub created_at_ms: i64,
+    /// 32-byte ed25519 seed. `None` for pre-v2 schema rows.
+    pub signing_key_seed: Option<Vec<u8>>,
 }
 
 /// A stored schedule record.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredSchedule {
     pub schedule_id: String,
     pub room_id: String,
@@ -135,6 +140,11 @@ impl MovePartyDb {
                 .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         }
 
+        if current < 2 {
+            conn.execute_batch(MIGRATION_002)
+                .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        }
+
         conn.execute_batch(&format!("PRAGMA user_version={CURRENT_SCHEMA_VERSION};"))
             .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         Ok(())
@@ -146,14 +156,15 @@ impl MovePartyDb {
     pub fn upsert_identity(&self, identity: &StoredIdentity) -> Result<(), StorageError> {
         let conn = lock_mutex(&self.conn)?;
         conn.execute(
-            "INSERT OR REPLACE INTO device_identity (device_id, display_name, public_key, platform, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR REPLACE INTO device_identity (device_id, display_name, public_key, platform, created_at_ms, signing_key_seed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 identity.device_id,
                 identity.display_name,
                 identity.public_key,
                 identity.platform,
                 identity.created_at_ms,
+                identity.signing_key_seed.clone(),
             ],
         )
         .map_err(|e| StorageError::Sqlite(e.to_string()))?;
@@ -165,7 +176,7 @@ impl MovePartyDb {
         let conn = lock_mutex(&self.conn)?;
         let mut stmt = conn
             .prepare(
-                "SELECT device_id, display_name, public_key, platform, created_at_ms
+                "SELECT device_id, display_name, public_key, platform, created_at_ms, signing_key_seed
                  FROM device_identity LIMIT 1",
             )
             .map_err(|e| StorageError::Sqlite(e.to_string()))?;
@@ -177,6 +188,7 @@ impl MovePartyDb {
                     public_key: row.get(2)?,
                     platform: row.get(3)?,
                     created_at_ms: row.get(4)?,
+                    signing_key_seed: row.get(5)?,
                 })
             })
             .ok();
@@ -260,6 +272,36 @@ impl MovePartyDb {
         conn.execute(
             "UPDATE schedules SET status = ?1 WHERE schedule_id = ?2",
             params![status, schedule_id],
+        )
+        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Update the planned preload deadline of a schedule (rescheduling).
+    pub fn update_schedule_preload(
+        &self,
+        schedule_id: &str,
+        planned_preload_utc_ms: i64,
+    ) -> Result<(), StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        conn.execute(
+            "UPDATE schedules SET planned_preload_utc_ms = ?1 WHERE schedule_id = ?2",
+            params![planned_preload_utc_ms, schedule_id],
+        )
+        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Update the media id of a schedule.
+    pub fn update_schedule_media(
+        &self,
+        schedule_id: &str,
+        media_id: &str,
+    ) -> Result<(), StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        conn.execute(
+            "UPDATE schedules SET media_id = ?1 WHERE schedule_id = ?2",
+            params![media_id, schedule_id],
         )
         .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         Ok(())
@@ -427,6 +469,12 @@ impl MovePartyDb {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
+        self.due_schedules(now_ms)
+    }
+
+    /// Schedules due for preload at the given `now_ms` (injectable clock):
+    /// status "Planned" and `planned_preload_utc_ms <= now_ms`.
+    pub fn due_schedules(&self, now_ms: i64) -> Result<Vec<StoredSchedule>, StorageError> {
         let conn = lock_mutex(&self.conn)?;
         let mut stmt = conn
             .prepare(
@@ -458,6 +506,24 @@ impl MovePartyDb {
         Ok(schedules)
     }
 
+    /// The earliest future preload deadline among still-Planned schedules
+    /// after `now_ms` (injectable clock). `None` when nothing is pending.
+    pub fn next_preload_deadline(&self, now_ms: i64) -> Result<Option<i64>, StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        let result = conn.query_row(
+            "SELECT MIN(planned_preload_utc_ms)
+             FROM schedules
+             WHERE status = 'Planned' AND planned_preload_utc_ms > ?1",
+            params![now_ms],
+            |row| row.get::<_, i64>(0),
+        );
+        match result {
+            Ok(deadline) => Ok(Some(deadline)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(StorageError::Sqlite(e.to_string())),
+        }
+    }
+
     // ── Cache retention ───────────────────────────────────────────────────
 
     /// Retention action: Keep leaves the cache entry untouched.
@@ -486,7 +552,6 @@ CREATE TABLE IF NOT EXISTS device_identity (
     platform TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL
 );
-
 CREATE TABLE IF NOT EXISTS schedules (
     schedule_id TEXT PRIMARY KEY,
     room_id TEXT NOT NULL,
@@ -520,6 +585,13 @@ CREATE INDEX IF NOT EXISTS idx_schedules_start ON schedules(scheduled_start_utc_
 CREATE INDEX IF NOT EXISTS idx_chat_room ON chat_messages(room_id, created_host_time_us);
 ";
 
+/// v2: persist the 32-byte ed25519 signing-key seed so the device identity
+/// can be re-created with the same keypair after a restart. Pre-v2 rows get
+/// NULL; the runtime upgrades them in place on the next startup.
+const MIGRATION_002: &str = "
+ALTER TABLE device_identity ADD COLUMN signing_key_seed BLOB;
+";
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -542,11 +614,29 @@ mod tests {
             public_key: "base64key".to_string(),
             platform: "macos".to_string(),
             created_at_ms: 1_000_000,
+            signing_key_seed: Some(vec![7; 32]),
         };
 
         db.upsert_identity(&identity).expect("upsert");
         let retrieved = db.get_identity().expect("get").expect("some");
         assert_eq!(retrieved, identity);
+    }
+
+    #[test]
+    fn identity_seed_round_trips_blob() {
+        let db = MovePartyDb::open_in_memory().expect("open");
+        let seed = (0..32).map(|i| i as u8).collect::<Vec<_>>();
+        let identity = StoredIdentity {
+            device_id: "seed-device".to_string(),
+            display_name: "Seed".to_string(),
+            public_key: "pk".to_string(),
+            platform: "macos".to_string(),
+            created_at_ms: 1,
+            signing_key_seed: Some(seed.clone()),
+        };
+        db.upsert_identity(&identity).expect("upsert");
+        let retrieved = db.get_identity().expect("get").expect("some");
+        assert_eq!(retrieved.signing_key_seed.as_deref(), Some(seed.as_slice()));
     }
 
     #[test]
@@ -667,6 +757,7 @@ mod tests {
                 public_key: "key".to_string(),
                 platform: "macos".to_string(),
                 created_at_ms: 100,
+                signing_key_seed: Some(vec![3; 32]),
             })
             .expect("upsert1");
         }

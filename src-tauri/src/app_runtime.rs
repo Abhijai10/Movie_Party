@@ -1,6 +1,6 @@
 use std::{
     collections::VecDeque,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, MutexGuard, RwLock,
@@ -307,7 +307,15 @@ impl From<&LibPlayerSnapshot> for PlayerSnapshot {
 struct RuntimeInner {
     state: Mutex<AppRuntimeState>,
     emitter: RwLock<Option<Arc<dyn SnapshotSink>>>,
-    identity: DeviceIdentity,
+    /// Device identity. Replaced by the persisted identity on startup
+    /// (`init_db`), so the same device id + signing key is used for the
+    /// whole process lifetime.
+    identity: Mutex<DeviceIdentity>,
+    /// Notification seam — production uses [`NativeNotifier`]; tests inject
+    /// a fake so no OS notification is displayed during unit tests.
+    notifier: Arc<dyn crate::notifications::Notifier>,
+    /// Count of preload executions (tests + diagnostics).
+    preload_executions: std::sync::atomic::AtomicU64,
     started_at: Instant,
 }
 
@@ -318,6 +326,19 @@ impl std::fmt::Debug for RuntimeInner {
 }
 
 impl RuntimeInner {
+    pub fn identity(&self) -> DeviceIdentity {
+        match self.identity.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    pub fn replace_identity(&self, identity: DeviceIdentity) {
+        match self.identity.lock() {
+            Ok(mut g) => *g = identity,
+            Err(p) => *p.into_inner() = identity,
+        }
+    }
     pub fn emit(&self, snapshot: crate::app_runtime::AppSnapshot) {
         if let Some(arc) = self.emitter.read().ok().and_then(|g| g.clone()) {
             arc.emit(&snapshot);
@@ -442,6 +463,10 @@ struct AppRuntimeState {
     // ── M4: Persistent storage ──────────────────────────────────────────
     /// SQLite database for identity, schedules, cache metadata, chat.
     db: Option<Arc<crate::storage::sqlite::MovePartyDb>>,
+    /// Root directory for Move Party's own cache (guest Local Perfect data).
+    cache_root: Option<PathBuf>,
+    /// Background scheduler worker (M4.3). Owned so it can be aborted.
+    scheduler_task: Option<tokio::task::JoinHandle<()>>,
     // ── M6: Managed Chrome session ownership ────────────────────────────
     /// Owned Chrome child process (previously leaked via forget).
     chrome_session: Option<crate::providers::chrome::ManagedChromeSession>,
@@ -473,7 +498,20 @@ impl AppRuntime {
         Self::new_with_emitter(None)
     }
 
+    /// Construct a runtime with a test-injectable notifier. Unit tests never
+    /// display real OS notifications.
+    pub fn new_with_notifier(notifier: impl crate::notifications::Notifier + 'static) -> Self {
+        Self::new_with_emitter_and_notifier(None, Arc::new(notifier))
+    }
+
     pub fn new_with_emitter(emitter: Option<Arc<dyn SnapshotSink>>) -> Self {
+        Self::new_with_emitter_and_notifier(emitter, Arc::new(crate::notifications::NativeNotifier))
+    }
+
+    fn new_with_emitter_and_notifier(
+        emitter: Option<Arc<dyn SnapshotSink>>,
+        notifier: Arc<dyn crate::notifications::Notifier>,
+    ) -> Self {
         let identity = DeviceIdentity::new_ephemeral();
         let display_name = std::env::var("USER")
             .or_else(|_| std::env::var("USERNAME"))
@@ -569,10 +607,14 @@ impl AppRuntime {
                     old_transfer_task: None,
                     transfer_stall_watcher_task: None,
                     db: None,
+                    cache_root: None,
+                    scheduler_task: None,
                     chrome_session: None,
                 }),
                 emitter: RwLock::new(emitter),
-                identity,
+                identity: Mutex::new(identity),
+                notifier,
+                preload_executions: std::sync::atomic::AtomicU64::new(0),
                 started_at: Instant::now(),
             }),
         }
@@ -585,28 +627,56 @@ impl AppRuntime {
     }
 
     /// M4: Open the persistent SQLite database and restore device identity.
-    /// If a stored identity already exists, it is loaded and reused.
+    ///
+    /// When `db_path_override` is `Some`, the database is opened at that
+    /// path instead of the platform default. Tests use this to pin a temp
+    /// file without relying on environment variables.
+    ///
+    /// Production startup path:
+    ///   open DB → load existing DeviceIdentity → if present use it;
+    ///   otherwise create exactly one identity, persist it, and use it.
+    /// The restored identity replaces the temporary ephemeral one, so the
+    /// same device id + signing key is used for the whole process lifetime.
     pub fn init_db(&self) {
-        let db_path = Self::default_db_path();
+        self.init_db_at(None)
+    }
+
+    /// Open the database at an explicit path (test hook).
+    #[doc(hidden)]
+    pub fn init_db_at_path(&self, path: &Path) {
+        self.init_db_at(Some(path.to_path_buf()))
+    }
+
+    fn init_db_at(&self, db_path_override: Option<PathBuf>) {
+        let db_path = db_path_override.unwrap_or_else(Self::default_db_path);
         match crate::storage::sqlite::MovePartyDb::open(&db_path) {
             Ok(db) => {
-                match db.get_identity() {
-                    Ok(Some(existing)) => {
-                        self.lock().local_participant.id = existing.device_id;
+                let existing = db.get_identity();
+                match existing {
+                    Ok(Some(stored)) => {
+                        // Restore the identity from its persisted seed, or —
+                        // for pre-v2 rows without a seed — keep the current
+                        // ephemeral identity but bind its device id.
+                        let restored = stored
+                            .signing_key_seed
+                            .as_deref()
+                            .and_then(|seed| DeviceIdentity::from_seed(&stored.device_id, seed))
+                            .unwrap_or_else(|| {
+                                let current = self.inner.identity();
+                                let fallback = DeviceIdentity::from_seed_for_tests(
+                                    stored.device_id.clone(),
+                                    current.seed(),
+                                );
+                                self.persist_identity(&db, &fallback, &stored.display_name);
+                                fallback
+                            });
+                        self.inner.replace_identity(restored);
+                        self.lock().local_participant.id = stored.device_id;
+                        self.lock().local_participant.display_name = stored.display_name;
                     }
-                    _ => {
-                        let now_ms = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as i64;
-                        let stored = crate::storage::sqlite::StoredIdentity {
-                            device_id: self.inner.identity.device_id.clone(),
-                            display_name: self.lock().local_participant.display_name.clone(),
-                            public_key: self.inner.identity.public_key_base64(),
-                            platform: std::env::consts::OS.to_string(),
-                            created_at_ms: now_ms,
-                        };
-                        let _ = db.upsert_identity(&stored);
+                    Ok(None) | Err(_) => {
+                        let identity = self.inner.identity();
+                        self.persist_identity(&db, &identity, &self.current_display_name());
                     }
                 }
                 self.lock().db = Some(Arc::new(db));
@@ -617,6 +687,33 @@ impl AppRuntime {
         }
     }
 
+    fn current_display_name(&self) -> String {
+        self.lock().local_participant.display_name.clone()
+    }
+
+    fn persist_identity(
+        &self,
+        db: &crate::storage::sqlite::MovePartyDb,
+        identity: &DeviceIdentity,
+        display_name: &str,
+    ) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let stored = crate::storage::sqlite::StoredIdentity {
+            device_id: identity.device_id.clone(),
+            display_name: display_name.to_string(),
+            public_key: identity.public_key_base64(),
+            platform: std::env::consts::OS.to_string(),
+            created_at_ms: now_ms,
+            signing_key_seed: Some(identity.seed().to_vec()),
+        };
+        let _ = db.upsert_identity(&stored);
+        self.lock().local_participant.id = identity.device_id.clone();
+        self.lock().local_participant.display_name = display_name.to_string();
+    }
+
     /// M6: Store an owned Chrome session in AppRuntime, replacing any previous one.
     /// The old session is dropped (killing the Chrome process) if present.
     pub fn store_chrome_session(&self, session: crate::providers::chrome::ManagedChromeSession) {
@@ -624,28 +721,49 @@ impl AppRuntime {
     }
 
     /// M4: Detect overdue preload schedules and send local notifications.
+    /// Notification failure is recoverable: an Err never aborts or panics.
     pub fn check_overdue_schedules(&self) {
+        self.check_overdue_schedules_with_notifier();
+    }
+
+    /// Notifier-aware overdue scan. Returns whether any overdue schedule was
+    /// detected (test hook). Uses the injected notifier so unit tests never
+    /// display real OS notifications.
+    pub fn check_overdue_schedules_with_notifier(&self) -> bool {
         let db = match self.lock().db.as_ref() {
             Some(db) => db.clone(),
-            None => return,
+            None => return false,
         };
         let overdue = match db.overdue_schedules() {
             Ok(s) => s,
-            Err(_) => return,
+            Err(_) => return false,
         };
+        let mut detected = false;
         for schedule in &overdue {
-            let _ = crate::notifications::send_local_notification(
+            detected = true;
+            let result = self.inner.notifier.notify(
                 "Move Party — Overdue Preload",
                 &format!(
                     "Scheduled session for '{}' needs preloading now.",
                     schedule.media_id
                 ),
             );
+            if let Err(error) = result {
+                eprintln!("MoveParty: notification failed (recoverable): {error}");
+            }
             let _ = db.update_schedule_status(&schedule.schedule_id, "PreloadDue");
         }
+        detected
     }
 
     fn default_db_path() -> PathBuf {
+        // Test / portable override: MOVE_PARTY_DB_PATH pins the database
+        // location so AppRuntime restart tests can use a temp file.
+        if let Ok(path) = std::env::var("MOVE_PARTY_DB_PATH") {
+            if !path.is_empty() {
+                return PathBuf::from(path);
+            }
+        }
         // Use the platform-appropriate application data directory.
         #[cfg(target_os = "macos")]
         {
@@ -670,6 +788,348 @@ impl AppRuntime {
         }
     }
 
+    // ── M4.1: identity access (test hook) ──────────────────────────────────
+
+    /// Current device identity used throughout this runtime.
+    #[doc(hidden)]
+    pub fn device_identity_for_test(&self) -> DeviceIdentity {
+        self.inner.identity()
+    }
+
+    // ── M4.2: Schedule CRUD ────────────────────────────────────────────────
+
+    /// Create a scheduled movie session. Validates the DTO, persists real
+    /// room/media/guest/time data, and returns the generated schedule id.
+    /// Errors map to stable Move Party codes.
+    pub fn create_schedule(
+        &self,
+        room_id: &str,
+        media_id: &str,
+        scheduled_start_utc_ms: i64,
+        planned_preload_utc_ms: i64,
+        guest_device_id: &str,
+    ) -> Result<String, String> {
+        let db = self
+            .lock()
+            .db
+            .clone()
+            .ok_or_else(|| "MP-STORE-001 no database".to_string())?;
+        if room_id.trim().is_empty() {
+            return Err("MP-SCHEDULE-002 room id must not be empty".to_string());
+        }
+        if media_id.trim().is_empty() {
+            return Err("MP-SCHEDULE-002 media id must not be empty".to_string());
+        }
+        if guest_device_id.trim().is_empty() {
+            return Err("MP-SCHEDULE-002 guest device id must not be empty".to_string());
+        }
+        if planned_preload_utc_ms > scheduled_start_utc_ms {
+            return Err(
+                "MP-SCHEDULE-002 preload deadline must precede scheduled start".to_string(),
+            );
+        }
+        let schedule_id = Uuid::now_v7().to_string();
+        let now_ms = wall_now_ms();
+        let schedule = crate::storage::sqlite::StoredSchedule {
+            schedule_id: schedule_id.clone(),
+            room_id: room_id.to_string(),
+            media_id: media_id.to_string(),
+            scheduled_start_utc_ms,
+            planned_preload_utc_ms,
+            guest_device_id: guest_device_id.to_string(),
+            status: "Planned".to_string(),
+            created_at_ms: now_ms,
+        };
+        db.insert_schedule(&schedule)
+            .map_err(|e| format!("MP-STORE-001 {e}"))?;
+        Ok(schedule_id)
+    }
+
+    /// List persisted schedules (ordered by scheduled start).
+    pub fn list_schedules(&self) -> Result<Vec<crate::storage::sqlite::StoredSchedule>, String> {
+        let db = self
+            .lock()
+            .db
+            .clone()
+            .ok_or_else(|| "MP-STORE-001 no database".to_string())?;
+        db.list_schedules().map_err(|e| format!("MP-STORE-001 {e}"))
+    }
+
+    /// Update the media id of a schedule (rescheduling).
+    pub fn update_schedule_media(&self, schedule_id: &str, media_id: &str) -> Result<(), String> {
+        if media_id.trim().is_empty() {
+            return Err("MP-SCHEDULE-002 media id must not be empty".to_string());
+        }
+        let db = self
+            .lock()
+            .db
+            .clone()
+            .ok_or_else(|| "MP-STORE-001 no database".to_string())?;
+        db.update_schedule_media(schedule_id, media_id)
+            .map_err(|e| format!("MP-STORE-001 {e}"))
+    }
+
+    /// Move the preload deadline of a schedule (rescheduling). The new
+    /// deadline must still precede the scheduled start.
+    pub fn update_schedule_preload(
+        &self,
+        schedule_id: &str,
+        planned_preload_utc_ms: i64,
+    ) -> Result<(), String> {
+        let db = self
+            .lock()
+            .db
+            .clone()
+            .ok_or_else(|| "MP-STORE-001 no database".to_string())?;
+        let current = db
+            .list_schedules()
+            .map_err(|e| format!("MP-STORE-001 {e}"))?
+            .into_iter()
+            .find(|s| s.schedule_id == schedule_id)
+            .ok_or_else(|| "MP-SCHEDULE-002 unknown schedule".to_string())?;
+        if planned_preload_utc_ms > current.scheduled_start_utc_ms {
+            return Err(
+                "MP-SCHEDULE-002 preload deadline must precede scheduled start".to_string(),
+            );
+        }
+        db.update_schedule_preload(schedule_id, planned_preload_utc_ms)
+            .map_err(|e| format!("MP-STORE-001 {e}"))
+    }
+
+    /// Delete a schedule. A deleted schedule can never execute.
+    pub fn delete_schedule(&self, schedule_id: &str) -> Result<(), String> {
+        let db = self
+            .lock()
+            .db
+            .clone()
+            .ok_or_else(|| "MP-STORE-001 no database".to_string())?;
+        db.delete_schedule(schedule_id)
+            .map_err(|e| format!("MP-STORE-001 {e}"))
+    }
+
+    // ── M4.3: Real scheduler worker ────────────────────────────────────────
+
+    /// Spawn the production scheduler worker. On startup it restores pending
+    /// schedules, waits efficiently for the next canonical preload deadline,
+    /// executes preload when due (status → Transferring, notification), and
+    /// reschedules after updates. Exactly-once execution is guaranteed by the
+    /// status transition: only "Planned" schedules are picked, and the
+    /// transition to "Transferring" is persisted before returning.
+    pub fn spawn_scheduler_worker(&self) {
+        self.spawn_scheduler_worker_inner(wall_now_ms, 2_000);
+    }
+
+    /// Test hook: controllable poll interval (and real wall clock).
+    #[doc(hidden)]
+    pub fn spawn_scheduler_worker_for_test(&self, _now_ms: i64, poll_interval_ms: u64) {
+        self.spawn_scheduler_worker_inner(wall_now_ms, poll_interval_ms);
+    }
+
+    fn spawn_scheduler_worker_inner(&self, now_fn: fn() -> i64, poll_interval_ms: u64) {
+        let inner = Arc::clone(&self.inner);
+        let task = tokio::spawn(async move {
+            loop {
+                let now = now_fn();
+                let db_opt = {
+                    match inner.state.lock() {
+                        Ok(g) => g.db.clone(),
+                        Err(p) => p.into_inner().db.clone(),
+                    }
+                };
+                let Some(db) = db_opt else {
+                    tokio::time::sleep(std::time::Duration::from_millis(poll_interval_ms)).await;
+                    continue;
+                };
+
+                // Execute every schedule whose preload deadline has arrived.
+                let due = match db.due_schedules(now) {
+                    Ok(due) => due,
+                    Err(error) => {
+                        eprintln!("MoveParty: scheduler due-scan failed (recoverable): {error}");
+                        tokio::time::sleep(std::time::Duration::from_millis(poll_interval_ms))
+                            .await;
+                        continue;
+                    }
+                };
+                for schedule in &due {
+                    // Exactly once: the status transition is persisted before
+                    // any side effect, so concurrent/restarted workers cannot
+                    // double-execute.
+                    if let Err(error) =
+                        db.update_schedule_status(&schedule.schedule_id, "Transferring")
+                    {
+                        eprintln!("MoveParty: scheduler status transition failed: {error}");
+                        continue;
+                    }
+                    inner
+                        .preload_executions
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _ = inner.notifier.notify(
+                        "Move Party — Preloading",
+                        &format!(
+                            "Preloading '{}' for the scheduled session.",
+                            schedule.media_id
+                        ),
+                    );
+                }
+
+                // Wait efficiently for the next deadline.
+                let next = db.next_preload_deadline(now).unwrap_or_default();
+                match next {
+                    Some(deadline_ms) => {
+                        let wait = deadline_ms.saturating_sub(wall_now_ms()).max(0) as u64;
+                        let wait = wait.min(60_000);
+                        tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                    }
+                    None => {
+                        tokio::time::sleep(std::time::Duration::from_millis(poll_interval_ms))
+                            .await;
+                    }
+                }
+            }
+        });
+        {
+            let mut state = self.lock();
+            if let Some(old) = state.scheduler_task.take() {
+                old.abort();
+            }
+            state.scheduler_task = Some(task);
+        }
+    }
+
+    /// Stop the scheduler worker (test/diagnostics).
+    #[doc(hidden)]
+    pub fn stop_scheduler_for_test(&self) {
+        let mut state = self.lock();
+        if let Some(task) = state.scheduler_task.take() {
+            task.abort();
+        }
+    }
+
+    /// Number of preload executions performed by this runtime.
+    #[doc(hidden)]
+    pub fn preload_execution_count(&self) -> u64 {
+        self.inner
+            .preload_executions
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    // ── M4.5: Retention runtime paths ──────────────────────────────────────
+
+    /// Record the cache root (test hook; production sets it in the cache open
+    /// path).
+    #[doc(hidden)]
+    pub fn init_cache_root_for_test(&self, root: PathBuf) {
+        self.lock().cache_root = Some(root);
+    }
+
+    fn cache_root(&self) -> Result<PathBuf, String> {
+        self.lock()
+            .cache_root
+            .clone()
+            .ok_or_else(|| "MP-MEDIA-002 cache root not initialised".to_string())
+    }
+
+    fn cache_dir_for(&self, media_id: &str) -> Result<PathBuf, String> {
+        let root = self.cache_root()?;
+        let dir = root.join(media_id);
+        if !dir.starts_with(&root) {
+            return Err("MP-MEDIA-002 unsafe cache path".to_string());
+        }
+        Ok(dir)
+    }
+
+    /// Register a cached media entry in the database.
+    pub fn register_cached_media(
+        &self,
+        media_id: &str,
+        filename: &str,
+        file_size: u64,
+        full_hash: &str,
+    ) -> Result<(), String> {
+        let db = self
+            .lock()
+            .db
+            .clone()
+            .ok_or_else(|| "MP-STORE-001 no database".to_string())?;
+        let cache_root = self.cache_root()?;
+        let entry = crate::storage::sqlite::StoredCacheEntry {
+            media_id: media_id.to_string(),
+            filename: filename.to_string(),
+            file_size,
+            full_hash: full_hash.to_string(),
+            cache_root: cache_root.to_string_lossy().into_owned(),
+            bytes_available: 0,
+            created_at_ms: wall_now_ms(),
+        };
+        db.upsert_cache_entry(&entry)
+            .map_err(|e| format!("MP-STORE-001 {e}"))
+    }
+
+    /// List registered cached media.
+    pub fn list_cached_media(
+        &self,
+    ) -> Result<Vec<crate::storage::sqlite::StoredCacheEntry>, String> {
+        let db = self
+            .lock()
+            .db
+            .clone()
+            .ok_or_else(|| "MP-STORE-001 no database".to_string())?;
+        db.list_cache_entries()
+            .map_err(|e| format!("MP-STORE-001 {e}"))
+    }
+
+    /// Retention "Keep": retain Move Party's cache for this media.
+    pub fn retention_keep(&self, media_id: &str) -> Result<(), String> {
+        let db = self
+            .lock()
+            .db
+            .clone()
+            .ok_or_else(|| "MP-STORE-001 no database".to_string())?;
+        db.retention_keep(media_id)
+            .map_err(|e| format!("MP-STORE-001 {e}"))
+    }
+
+    /// Retention "Remove": delete only Move Party's cache directory and the
+    /// matching cache metadata. Never touches the host's original source.
+    pub fn retention_remove(&self, media_id: &str) -> Result<(), String> {
+        let db = self
+            .lock()
+            .db
+            .clone()
+            .ok_or_else(|| "MP-STORE-001 no database".to_string())?;
+        let root = self.cache_root()?;
+        let dir = self.cache_dir_for(media_id)?;
+        let data_file = dir.join(crate::media::cache::CACHE_DATA_FILE);
+        crate::storage::apply_retention_decision(
+            &root,
+            &dir,
+            &data_file,
+            crate::storage::RetentionDecision::Remove,
+            None,
+        )
+        .map_err(|e| format!("MP-MEDIA-002 {e}"))?;
+        db.delete_cache_entry(media_id)
+            .map_err(|e| format!("MP-STORE-001 {e}"))
+    }
+
+    /// Retention "Save As": export the completed cached media to a chosen
+    /// destination safely. Never deletes or overwrites the host source.
+    pub fn retention_save_as(&self, media_id: &str, destination: &Path) -> Result<PathBuf, String> {
+        let root = self.cache_root()?;
+        let dir = self.cache_dir_for(media_id)?;
+        let data_file = dir.join(crate::media::cache::CACHE_DATA_FILE);
+        crate::storage::apply_retention_decision(
+            &root,
+            &dir,
+            &data_file,
+            crate::storage::RetentionDecision::SaveAs,
+            Some(destination),
+        )
+        .map(|saved| saved.unwrap_or_else(|| destination.to_path_buf()))
+        .map_err(|e| format!("MP-MEDIA-002 {e}"))
+    }
+
     pub fn snapshot(&self) -> AppSnapshot {
         snapshot_from_state(&self.lock())
     }
@@ -679,7 +1139,7 @@ impl AppRuntime {
         &self,
         media_path: Option<String>,
     ) -> Result<AppSnapshot, String> {
-        let identity = self.inner.identity.clone();
+        let identity = self.inner.identity();
         let credentials = RoomCredentials::generate();
 
         let manifest = if let Some(path) = media_path.as_ref().filter(|p| !p.trim().is_empty()) {
@@ -898,7 +1358,7 @@ impl AppRuntime {
             .map_err(|e| format!("MP-NET-001 invalid peer endpoint: {e}"))?;
 
         let credentials = room::invite_to_credentials(&invite);
-        let identity = self.inner.identity.clone();
+        let identity = self.inner.identity();
         let display_name = self.lock().local_participant.display_name.clone();
 
         let (client, auth_accept) = QuicClient::connect(
@@ -2946,6 +3406,15 @@ impl Default for AppRuntime {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Wall-clock milliseconds (UTC epoch). Used ONLY for scheduled movie times,
+/// UI timestamps, logs, and persistence — never for playback scheduling.
+fn wall_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 // ── Snapshot builder & recovery helpers (unchanged) ───────────────────────────

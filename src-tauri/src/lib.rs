@@ -27,10 +27,12 @@ pub fn run() {
     let result = tauri::Builder::default()
         .manage(app_runtime::AppRuntime::new_without_emitter())
         .setup(|app| {
-            // M4: Initialize the SQLite database on startup
+            // M4: Initialize the SQLite database on startup, restore identity,
+            // detect overdue preloads, and start the real scheduler worker.
             let runtime = app.state::<app_runtime::AppRuntime>();
             runtime.init_db();
             runtime.check_overdue_schedules();
+            runtime.spawn_scheduler_worker();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -58,6 +60,14 @@ pub fn run() {
             set_ghost_mode,
             pick_media_file,
             launch_provider,
+            create_schedule,
+            list_schedules,
+            update_schedule_media,
+            update_schedule_preload,
+            delete_schedule,
+            retention_keep,
+            retention_remove,
+            retention_save_as,
         ])
         .run(tauri::generate_context!());
 
@@ -276,6 +286,82 @@ fn launch_provider(
     snap.provider.state = format!("Chrome launched on CDP port {}", cdp_port);
 
     Ok(snap)
+}
+
+#[tauri::command]
+fn create_schedule(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    room_id: String,
+    media_id: String,
+    scheduled_start_utc_ms: i64,
+    planned_preload_utc_ms: i64,
+    guest_device_id: String,
+) -> Result<String, String> {
+    runtime.create_schedule(
+        &room_id,
+        &media_id,
+        scheduled_start_utc_ms,
+        planned_preload_utc_ms,
+        &guest_device_id,
+    )
+}
+
+#[tauri::command]
+fn list_schedules(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<Vec<crate::storage::sqlite::StoredSchedule>, String> {
+    runtime.list_schedules()
+}
+
+#[tauri::command]
+fn update_schedule_media(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    schedule_id: String,
+    media_id: String,
+) -> Result<(), String> {
+    runtime.update_schedule_media(&schedule_id, &media_id)
+}
+
+#[tauri::command]
+fn update_schedule_preload(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    schedule_id: String,
+    planned_preload_utc_ms: i64,
+) -> Result<(), String> {
+    runtime.update_schedule_preload(&schedule_id, planned_preload_utc_ms)
+}
+
+#[tauri::command]
+fn delete_schedule(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    schedule_id: String,
+) -> Result<(), String> {
+    runtime.delete_schedule(&schedule_id)
+}
+
+#[tauri::command]
+fn retention_keep(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    media_id: String,
+) -> Result<(), String> {
+    runtime.retention_keep(&media_id)
+}
+
+#[tauri::command]
+fn retention_remove(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    media_id: String,
+) -> Result<(), String> {
+    runtime.retention_remove(&media_id)
+}
+
+#[tauri::command]
+fn retention_save_as(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    media_id: String,
+    destination: String,
+) -> Result<std::path::PathBuf, String> {
+    runtime.retention_save_as(&media_id, std::path::Path::new(&destination))
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
