@@ -13,6 +13,7 @@ pub mod providers;
 pub mod resilience;
 pub mod room;
 pub mod scheduling;
+pub mod secure;
 pub mod storage;
 pub mod sync;
 pub mod telemetry;
@@ -28,10 +29,13 @@ pub fn run() {
         .manage(app_runtime::AppRuntime::new_without_emitter())
         .setup(|app| {
             // M4: Initialize the SQLite database on startup, restore identity,
-            // detect overdue preloads, and start the real scheduler worker.
+            // detect overdue preloads (notification-only — never consumes
+            // status), install the real preload executor, and start the
+            // scheduler worker.
             let runtime = app.state::<app_runtime::AppRuntime>();
             runtime.init_db();
             runtime.check_overdue_schedules();
+            runtime.setup_real_preload_executor();
             runtime.spawn_scheduler_worker();
             Ok(())
         })

@@ -102,7 +102,7 @@ fn test_identity_survives_db_reopen() {
             public_key: "pk".into(),
             platform: "macos".into(),
             created_at_ms: 1700000000000,
-            signing_key_seed: Some(vec![5; 32]),
+            key_label: "test-key".into(),
         })
         .unwrap();
     }

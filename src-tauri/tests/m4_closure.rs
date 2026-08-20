@@ -21,6 +21,14 @@ fn temp_db_path(tag: &str) -> std::path::PathBuf {
     dir.join("move_party.db")
 }
 
+/// Runtime with a fake key store + fake notifier — tests never touch the
+/// real Keychain/Credential Manager or display OS notifications.
+fn test_runtime() -> AppRuntime {
+    AppRuntime::new_with_key_store_for_test(std::sync::Arc::new(
+        move_party_lib::secure::FakeKeyStore::new(),
+    ))
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // M4.1 — AppRuntime identity restoration across a full runtime restart.
 // ──────────────────────────────────────────────────────────────────────────────
@@ -30,10 +38,15 @@ fn appruntime_identity_restart_matches_exact_device_id() {
     let _guard = env_lock().lock();
     let db_path = temp_db_path("identity");
 
+    // Both runtimes share the same OS-protected key store (as production
+    // would with the real Keychain/Credential Manager).
+    let key_store: std::sync::Arc<dyn move_party_lib::secure::SecureKeyStore> =
+        std::sync::Arc::new(move_party_lib::secure::FakeKeyStore::new());
+
     let device_id_a;
     let public_key_a;
     {
-        let runtime_a = AppRuntime::new();
+        let runtime_a = AppRuntime::new_with_key_store_for_test(key_store.clone());
         runtime_a.init_db_at_path(&db_path);
         let identity_a = runtime_a.device_identity_for_test();
         device_id_a = identity_a.device_id.clone();
@@ -47,7 +60,7 @@ fn appruntime_identity_restart_matches_exact_device_id() {
     // Runtime B uses the same database — the exact same identity must come back.
     let (device_id_b, public_key_b);
     {
-        let runtime_b = AppRuntime::new();
+        let runtime_b = AppRuntime::new_with_key_store_for_test(key_store.clone());
         runtime_b.init_db_at_path(&db_path);
         let identity_b = runtime_b.device_identity_for_test();
         device_id_b = identity_b.device_id.clone();
@@ -60,14 +73,17 @@ fn appruntime_identity_restart_matches_exact_device_id() {
     );
     assert_eq!(
         public_key_a, public_key_b,
-        "signing key must be restored from the persisted seed"
+        "signing key must be restored from the protected store"
     );
 
-    // Exactly one identity row exists (never created a replacement).
+    // Exactly one identity row exists (never created a replacement), and it
+    // only references the key by label — never by raw material.
     let db = MovePartyDb::open(&db_path).expect("open");
     let stored = db.get_identity().expect("get").expect("identity");
     assert_eq!(stored.device_id, device_id_b);
-    assert!(stored.signing_key_seed.is_some(), "seed must be persisted");
+    assert!(stored
+        .key_label
+        .starts_with("move-party-device-signing-key-"));
 
     let _ = std::fs::remove_dir_all(db_path.parent().expect("parent"));
 }
@@ -79,7 +95,7 @@ fn appruntime_identity_is_created_exactly_once() {
 
     let (id1, id2);
     {
-        let runtime = AppRuntime::new();
+        let runtime = test_runtime();
         runtime.init_db_at_path(&db_path);
         id1 = runtime.device_identity_for_test().device_id.clone();
         // Second init on the same runtime must not create a replacement.
@@ -95,6 +111,81 @@ fn appruntime_identity_is_created_exactly_once() {
     let _ = std::fs::remove_dir_all(db_path.parent().expect("parent"));
 }
 
+#[test]
+fn appruntime_identity_rotates_coherently_when_key_missing() {
+    let _guard = env_lock().lock();
+    let db_path = temp_db_path("identity_rotate");
+
+    let first_id;
+    let first_key_store: std::sync::Arc<dyn move_party_lib::secure::SecureKeyStore> =
+        std::sync::Arc::new(move_party_lib::secure::FakeKeyStore::new());
+    {
+        let runtime = AppRuntime::new_with_key_store_for_test(first_key_store.clone());
+        runtime.init_db_at_path(&db_path);
+        first_id = runtime.device_identity_for_test().device_id.clone();
+    }
+
+    // Simulate a lost protected-store entry (e.g. Keychain item deleted):
+    // a fresh runtime on the same DB must perform an explicit coherent
+    // rotation — new device id + new keypair — never reuse the old device
+    // id with unrelated key material.
+    let empty_key_store: std::sync::Arc<dyn move_party_lib::secure::SecureKeyStore> =
+        std::sync::Arc::new(move_party_lib::secure::FakeKeyStore::new());
+    let rotated_id;
+    {
+        let runtime = AppRuntime::new_with_key_store_for_test(empty_key_store.clone());
+        runtime.init_db_at_path(&db_path);
+        rotated_id = runtime.device_identity_for_test().device_id.clone();
+    }
+
+    assert_ne!(
+        first_id, rotated_id,
+        "lost private key must rotate to a coherent NEW device id"
+    );
+    let db = MovePartyDb::open(&db_path).expect("open");
+    let stored = db.get_identity().expect("get").expect("identity");
+    assert_eq!(stored.device_id, rotated_id, "rotation must be persisted");
+
+    let _ = std::fs::remove_dir_all(db_path.parent().expect("parent"));
+}
+
+#[test]
+fn appruntime_identity_store_read_failure_is_surfaced_not_rotated() {
+    let _guard = env_lock().lock();
+    let db_path = temp_db_path("identity_store_err");
+
+    let key_store = std::sync::Arc::new(ErroringKeyStore);
+    let runtime = AppRuntime::new_with_key_store_for_test(key_store);
+    runtime.init_db_at_path(&db_path);
+
+    let snapshot = runtime.snapshot();
+    assert!(
+        snapshot
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("MP-SECURE-001")),
+        "key store failure must surface MP-SECURE-001, not silently rotate: {:?}",
+        snapshot.error
+    );
+
+    let _ = std::fs::remove_dir_all(db_path.parent().expect("parent"));
+}
+
+/// Key store whose reads always fail.
+#[derive(Debug)]
+struct ErroringKeyStore;
+impl move_party_lib::secure::SecureKeyStore for ErroringKeyStore {
+    fn store_seed(&self, _label: &str, _seed: &[u8; 32]) -> Result<(), String> {
+        Err("MP-SECURE-001 injected store failure".to_string())
+    }
+    fn load_seed(&self, _label: &str) -> Result<Option<[u8; 32]>, String> {
+        Err("MP-SECURE-001 injected store failure".to_string())
+    }
+    fn delete_seed(&self, _label: &str) -> Result<(), String> {
+        Err("MP-SECURE-001 injected store failure".to_string())
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // M4.2 — Schedule CRUD through AppRuntime (persist real data, survive restart).
 // ──────────────────────────────────────────────────────────────────────────────
@@ -106,7 +197,7 @@ fn appruntime_schedule_crud_persists_and_survives_restart() {
 
     let created_id;
     {
-        let runtime = AppRuntime::new();
+        let runtime = test_runtime();
         runtime.init_db_at_path(&db_path);
         let now_ms = now_utc_ms();
         let scheduled_ms = now_ms + 3_600_000;
@@ -127,7 +218,7 @@ fn appruntime_schedule_crud_persists_and_survives_restart() {
 
     // Restart: schedule must survive.
     {
-        let runtime = AppRuntime::new();
+        let runtime = test_runtime();
         runtime.init_db_at_path(&db_path);
 
         let list = runtime.list_schedules().expect("list2");
@@ -153,7 +244,7 @@ fn appruntime_schedule_crud_persists_and_survives_restart() {
 fn appruntime_schedule_create_validates_dto() {
     let _guard = env_lock().lock();
     let db_path = temp_db_path("schedule_validate");
-    let runtime = AppRuntime::new();
+    let runtime = test_runtime();
     runtime.init_db_at_path(&db_path);
 
     let now_ms = now_utc_ms();
@@ -191,7 +282,7 @@ fn appruntime_schedule_create_validates_dto() {
 async fn scheduler_future_schedule_does_not_run_early() {
     let _guard = env_lock().lock().await;
     let db_path = temp_db_path("sched_future");
-    let runtime = AppRuntime::new();
+    let runtime = test_runtime();
     runtime.init_db_at_path(&db_path);
 
     let now_ms = now_utc_ms();
@@ -222,8 +313,12 @@ async fn scheduler_future_schedule_does_not_run_early() {
 async fn scheduler_due_schedule_executes_once() {
     let _guard = env_lock().lock().await;
     let db_path = temp_db_path("sched_due");
-    let runtime = AppRuntime::new();
+    let runtime = test_runtime();
     runtime.init_db_at_path(&db_path);
+
+    let fake_executor =
+        std::sync::Arc::new(move_party_lib::scheduling::preload::FakePreloadExecutor::default());
+    runtime.install_preload_executor_for_test(fake_executor.clone());
 
     let now_ms = now_utc_ms();
     let preload_ms = now_ms + 200;
@@ -248,6 +343,146 @@ async fn scheduler_due_schedule_executes_once() {
         1,
         "due schedule must execute exactly once"
     );
+    assert_eq!(
+        fake_executor.invocation_count(),
+        1,
+        "the REAL preload executor must be invoked, not merely counted"
+    );
+
+    runtime.stop_scheduler_for_test();
+    let _ = std::fs::remove_dir_all(db_path.parent().expect("parent"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scheduler_waiting_for_peer_persists_and_retries() {
+    let _guard = env_lock().lock().await;
+    let db_path = temp_db_path("sched_waiting");
+    let runtime = test_runtime();
+    runtime.init_db_at_path(&db_path);
+
+    let fake_executor = std::sync::Arc::new(
+        move_party_lib::scheduling::preload::FakePreloadExecutor::with_outcome(
+            move_party_lib::scheduling::preload::PreloadOutcome::WaitingForPrerequisites,
+        ),
+    );
+    runtime.install_preload_executor_for_test(fake_executor.clone());
+
+    let now_ms = now_utc_ms();
+    let preload_ms = now_ms + 200;
+    let scheduled_ms = now_ms + 3_600_000;
+    let id = runtime
+        .create_schedule("room-1", "media-wait", scheduled_ms, preload_ms, "guest-1")
+        .expect("create");
+
+    runtime.spawn_scheduler_worker_for_test(now_utc_ms(), 60);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let list = runtime.list_schedules().expect("list");
+    let s = list.iter().find(|s| s.schedule_id == id).expect("schedule");
+    assert_eq!(
+        s.status, "WaitingForPeer",
+        "missing prerequisites must persist a waiting state: got {}",
+        s.status
+    );
+
+    // Prerequisites now available → retry succeeds and starts real preload.
+    fake_executor.set_outcome(move_party_lib::scheduling::preload::PreloadOutcome::Started);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let list = runtime.list_schedules().expect("list2");
+    let s = list.iter().find(|s| s.schedule_id == id).expect("schedule");
+    assert_eq!(
+        s.status, "Transferring",
+        "waiting schedule must retry and start"
+    );
+    assert_eq!(runtime.preload_execution_count(), 1);
+
+    runtime.stop_scheduler_for_test();
+    let _ = std::fs::remove_dir_all(db_path.parent().expect("parent"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scheduler_executor_failure_is_recoverable() {
+    let _guard = env_lock().lock().await;
+    let db_path = temp_db_path("sched_fail");
+    let runtime = test_runtime();
+    runtime.init_db_at_path(&db_path);
+
+    runtime.install_preload_executor_for_test(std::sync::Arc::new(
+        move_party_lib::scheduling::preload::FailingPreloadExecutor,
+    ));
+
+    let now_ms = now_utc_ms();
+    let preload_ms = now_ms + 200;
+    let scheduled_ms = now_ms + 3_600_000;
+    let id = runtime
+        .create_schedule("room-1", "media-fail", scheduled_ms, preload_ms, "guest-1")
+        .expect("create");
+
+    runtime.spawn_scheduler_worker_for_test(now_utc_ms(), 60);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let list = runtime.list_schedules().expect("list");
+    let s = list.iter().find(|s| s.schedule_id == id).expect("schedule");
+    assert_eq!(
+        s.status, "PreloadFailed",
+        "executor failure must be recorded"
+    );
+    // Runtime remains usable and the scheduler keeps running.
+    assert!(runtime.list_schedules().expect("list2").len() == 1);
+
+    runtime.stop_scheduler_for_test();
+    let _ = std::fs::remove_dir_all(db_path.parent().expect("parent"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn production_startup_executes_overdue_schedule_exactly_once() {
+    let _guard = env_lock().lock().await;
+    let db_path = temp_db_path("sched_startup");
+
+    // Phase 1: create an overdue (Planned) schedule in the DB.
+    let id;
+    {
+        let runtime = test_runtime();
+        runtime.init_db_at_path(&db_path);
+        let now_ms = now_utc_ms();
+        id = runtime
+            .create_schedule(
+                "room-1",
+                "media-overdue-startup",
+                now_ms + 3_600_000,
+                now_ms - 2_000,
+                "guest-1",
+            )
+            .expect("create");
+    }
+
+    // Phase 2: REAL production startup ordering:
+    //   init_db → check_overdue_schedules → setup_real_preload_executor →
+    //   spawn_scheduler_worker
+    // The notification scan must NOT consume the schedule, so the executor
+    // still runs exactly once.
+    let runtime = test_runtime();
+    runtime.init_db_at_path(&db_path);
+    let fake_executor =
+        std::sync::Arc::new(move_party_lib::scheduling::preload::FakePreloadExecutor::default());
+    runtime.install_preload_executor_for_test(fake_executor.clone());
+    runtime.check_overdue_schedules();
+    runtime.spawn_scheduler_worker_for_test(now_utc_ms(), 60);
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+    let list = runtime.list_schedules().expect("list");
+    let s = list.iter().find(|s| s.schedule_id == id).expect("schedule");
+    assert_eq!(
+        s.status, "Transferring",
+        "production startup must execute the overdue schedule: got {}",
+        s.status
+    );
+    assert_eq!(
+        fake_executor.invocation_count(),
+        1,
+        "preload executor must be invoked exactly once after startup"
+    );
+    assert_eq!(runtime.preload_execution_count(), 1);
 
     runtime.stop_scheduler_for_test();
     let _ = std::fs::remove_dir_all(db_path.parent().expect("parent"));
@@ -260,7 +495,7 @@ async fn scheduler_overdue_schedule_executes_after_restart() {
 
     let id;
     {
-        let runtime = AppRuntime::new();
+        let runtime = test_runtime();
         runtime.init_db_at_path(&db_path);
         let now_ms = now_utc_ms();
         id = runtime
@@ -276,7 +511,7 @@ async fn scheduler_overdue_schedule_executes_after_restart() {
 
     // Restart: the overdue schedule (still Planned) must be recovered and
     // executed by the new scheduler.
-    let runtime = AppRuntime::new();
+    let runtime = test_runtime();
     runtime.init_db_at_path(&db_path);
     let overdue = runtime.list_schedules().expect("list");
     assert_eq!(overdue[0].status, "Planned", "still Planned before run");
@@ -297,7 +532,7 @@ async fn scheduler_overdue_schedule_executes_after_restart() {
 async fn scheduler_update_changes_deadline_and_delete_prevents_execution() {
     let _guard = env_lock().lock().await;
     let db_path = temp_db_path("sched_update_delete");
-    let runtime = AppRuntime::new();
+    let runtime = test_runtime();
     runtime.init_db_at_path(&db_path);
 
     let now_ms = now_utc_ms();
@@ -390,7 +625,7 @@ fn retention_runtime_keep_remove_save_as_preserve_host_source() {
     let host_source = root.join("host_original.mkv");
     std::fs::write(&host_source, b"original host file").expect("host source");
 
-    let runtime = AppRuntime::new();
+    let runtime = test_runtime();
     runtime.init_db_at_path(&db_path);
     runtime.init_cache_root_for_test(root.to_path_buf());
 

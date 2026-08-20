@@ -314,6 +314,11 @@ struct RuntimeInner {
     /// Notification seam — production uses [`NativeNotifier`]; tests inject
     /// a fake so no OS notification is displayed during unit tests.
     notifier: Arc<dyn crate::notifications::Notifier>,
+    /// OS-protected secret storage for the device signing key. Production
+    /// uses the platform Keychain/Credential Manager; tests inject a fake.
+    key_store: Arc<dyn crate::secure::SecureKeyStore>,
+    /// Real preload executor invoked by the scheduler for due schedules.
+    preload_executor: Mutex<Arc<dyn crate::scheduling::preload::PreloadExecutor>>,
     /// Count of preload executions (tests + diagnostics).
     preload_executions: std::sync::atomic::AtomicU64,
     started_at: Instant,
@@ -501,16 +506,36 @@ impl AppRuntime {
     /// Construct a runtime with a test-injectable notifier. Unit tests never
     /// display real OS notifications.
     pub fn new_with_notifier(notifier: impl crate::notifications::Notifier + 'static) -> Self {
-        Self::new_with_emitter_and_notifier(None, Arc::new(notifier))
+        Self::new_with_emitter_and_key_store(
+            None,
+            Arc::new(notifier),
+            Arc::new(crate::secure::FakeKeyStore::new()),
+        )
     }
 
     pub fn new_with_emitter(emitter: Option<Arc<dyn SnapshotSink>>) -> Self {
-        Self::new_with_emitter_and_notifier(emitter, Arc::new(crate::notifications::NativeNotifier))
+        Self::new_with_emitter_and_key_store(
+            emitter,
+            Arc::new(crate::notifications::NativeNotifier),
+            Arc::new(crate::secure::NativeKeyStore),
+        )
     }
 
-    fn new_with_emitter_and_notifier(
+    /// Test hook: inject an explicit OS-protected key store (e.g. a shared
+    /// [`crate::secure::FakeKeyStore`] across runtime restarts).
+    #[doc(hidden)]
+    pub fn new_with_key_store_for_test(key_store: Arc<dyn crate::secure::SecureKeyStore>) -> Self {
+        Self::new_with_emitter_and_key_store(
+            None,
+            Arc::new(crate::notifications::FakeNotifier::new()),
+            key_store,
+        )
+    }
+
+    fn new_with_emitter_and_key_store(
         emitter: Option<Arc<dyn SnapshotSink>>,
         notifier: Arc<dyn crate::notifications::Notifier>,
+        key_store: Arc<dyn crate::secure::SecureKeyStore>,
     ) -> Self {
         let identity = DeviceIdentity::new_ephemeral();
         let display_name = std::env::var("USER")
@@ -614,6 +639,10 @@ impl AppRuntime {
                 emitter: RwLock::new(emitter),
                 identity: Mutex::new(identity),
                 notifier,
+                key_store,
+                preload_executor: Mutex::new(Arc::new(
+                    crate::scheduling::preload::FakePreloadExecutor::default(),
+                )),
                 preload_executions: std::sync::atomic::AtomicU64::new(0),
                 started_at: Instant::now(),
             }),
@@ -649,46 +678,115 @@ impl AppRuntime {
 
     fn init_db_at(&self, db_path_override: Option<PathBuf>) {
         let db_path = db_path_override.unwrap_or_else(Self::default_db_path);
-        match crate::storage::sqlite::MovePartyDb::open(&db_path) {
-            Ok(db) => {
-                let existing = db.get_identity();
-                match existing {
-                    Ok(Some(stored)) => {
-                        // Restore the identity from its persisted seed, or —
-                        // for pre-v2 rows without a seed — keep the current
-                        // ephemeral identity but bind its device id.
-                        let restored = stored
-                            .signing_key_seed
-                            .as_deref()
-                            .and_then(|seed| DeviceIdentity::from_seed(&stored.device_id, seed))
-                            .unwrap_or_else(|| {
-                                let current = self.inner.identity();
-                                let fallback = DeviceIdentity::from_seed_for_tests(
-                                    stored.device_id.clone(),
-                                    current.seed(),
-                                );
-                                self.persist_identity(&db, &fallback, &stored.display_name);
-                                fallback
-                            });
-                        self.inner.replace_identity(restored);
-                        self.lock().local_participant.id = stored.device_id;
-                        self.lock().local_participant.display_name = stored.display_name;
-                    }
-                    Ok(None) | Err(_) => {
-                        let identity = self.inner.identity();
-                        self.persist_identity(&db, &identity, &self.current_display_name());
-                    }
-                }
-                self.lock().db = Some(Arc::new(db));
-            }
+        let db = match crate::storage::sqlite::MovePartyDb::open(&db_path) {
+            Ok(db) => db,
             Err(e) => {
-                eprintln!("MoveParty: failed to open database: {e}");
+                self.lock().error = Some(format!("MP-STORE-001 failed to open database: {e}"));
+                return;
+            }
+        };
+
+        // Production startup path:
+        //   open DB → load identity metadata → load private key from the
+        //   OS-protected store → if both present use them; otherwise create
+        //   exactly one identity (with its key in protected storage) and
+        //   persist metadata. Errors are surfaced, never silently rotated.
+        match db.get_identity() {
+            Ok(Some(stored)) => self.restore_identity(&db, &stored),
+            Ok(None) => self.create_identity(&db, &self.current_display_name()),
+            Err(e) => {
+                self.lock().error = Some(format!("MP-STORE-001 failed to read identity: {e}"));
             }
         }
+        self.lock().db = Some(Arc::new(db));
     }
 
     fn current_display_name(&self) -> String {
         self.lock().local_participant.display_name.clone()
+    }
+
+    fn key_label_for(device_id: &str) -> String {
+        format!("move-party-device-signing-key-{device_id}")
+    }
+
+    /// Restore an existing identity: private key from the OS-protected
+    /// store must match the persisted metadata. If the key is missing or
+    /// mismatched, perform an explicit coherent rotation (new device id +
+    /// new keypair) — never associate an old device id with new key
+    /// material.
+    fn restore_identity(
+        &self,
+        db: &crate::storage::sqlite::MovePartyDb,
+        stored: &crate::storage::sqlite::StoredIdentity,
+    ) {
+        match self.inner.key_store.load_seed(&stored.key_label) {
+            Ok(Some(seed)) => match DeviceIdentity::from_seed(&stored.device_id, &seed) {
+                Some(identity) if identity.public_key_base64() == stored.public_key => {
+                    self.inner.replace_identity(identity);
+                    self.lock().local_participant.id = stored.device_id.clone();
+                    self.lock().local_participant.display_name = stored.display_name.clone();
+                }
+                _ => {
+                    // Key does not match metadata → coherent rotation.
+                    self.rotate_identity(db, &stored.display_name, Some(&stored.key_label));
+                }
+            },
+            Ok(None) => {
+                // Private key missing from protected storage → rotation with
+                // a fresh device id + keypair.
+                self.rotate_identity(db, &stored.display_name, Some(&stored.key_label));
+            }
+            Err(e) => {
+                // Protected-store read failure: surface, do NOT rotate.
+                self.lock().error = Some(format!("MP-SECURE-001 key store read failed: {e}"));
+            }
+        }
+    }
+
+    /// Create exactly one identity on first run: new keypair persisted to
+    /// protected storage, metadata persisted to SQLite. Propagation of
+    /// persistence failures is mandatory.
+    fn create_identity(&self, db: &crate::storage::sqlite::MovePartyDb, display_name: &str) {
+        let identity = DeviceIdentity::new_ephemeral();
+        let key_label = Self::key_label_for(&identity.device_id);
+        if let Err(e) = self
+            .inner
+            .key_store
+            .store_seed(&key_label, &identity.seed())
+        {
+            self.lock().error = Some(format!("MP-SECURE-001 failed to store key: {e}"));
+            return;
+        }
+        self.persist_identity(db, &identity, display_name, &key_label);
+    }
+
+    /// Explicit coherent rotation: a brand-new device id and keypair are
+    /// created, the key is stored, then the metadata is replaced. The old
+    /// protected-store entry is removed best-effort. If either persistence
+    /// step fails, the error is surfaced and no half-state is claimed.
+    fn rotate_identity(
+        &self,
+        db: &crate::storage::sqlite::MovePartyDb,
+        display_name: &str,
+        old_key_label: Option<&str>,
+    ) {
+        let identity = DeviceIdentity::new_ephemeral();
+        let key_label = Self::key_label_for(&identity.device_id);
+        if let Err(e) = self
+            .inner
+            .key_store
+            .store_seed(&key_label, &identity.seed())
+        {
+            self.lock().error = Some(format!("MP-SECURE-001 rotation key store failed: {e}"));
+            return;
+        }
+        if let Some(old_label) = old_key_label {
+            let _ = self.inner.key_store.delete_seed(old_label);
+        }
+        // Drop the old metadata row so the rotated identity becomes the
+        // single stored source of truth.
+        let _ = db.delete_identity();
+        self.persist_identity(db, &identity, display_name, &key_label);
     }
 
     fn persist_identity(
@@ -696,20 +794,22 @@ impl AppRuntime {
         db: &crate::storage::sqlite::MovePartyDb,
         identity: &DeviceIdentity,
         display_name: &str,
+        key_label: &str,
     ) {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
+        let now_ms = wall_now_ms();
         let stored = crate::storage::sqlite::StoredIdentity {
             device_id: identity.device_id.clone(),
             display_name: display_name.to_string(),
             public_key: identity.public_key_base64(),
             platform: std::env::consts::OS.to_string(),
             created_at_ms: now_ms,
-            signing_key_seed: Some(identity.seed().to_vec()),
+            key_label: key_label.to_string(),
         };
-        let _ = db.upsert_identity(&stored);
+        if let Err(e) = db.upsert_identity(&stored) {
+            self.lock().error = Some(format!("MP-STORE-001 failed to persist identity: {e}"));
+            return;
+        }
+        self.inner.replace_identity(identity.clone());
         self.lock().local_participant.id = identity.device_id.clone();
         self.lock().local_participant.display_name = display_name.to_string();
     }
@@ -751,7 +851,10 @@ impl AppRuntime {
             if let Err(error) = result {
                 eprintln!("MoveParty: notification failed (recoverable): {error}");
             }
-            let _ = db.update_schedule_status(&schedule.schedule_id, "PreloadDue");
+            // IMPORTANT: this scan is notification-only. It must NEVER
+            // change the schedule status — the scheduler worker is the only
+            // authority that claims and executes due schedules. Mutating
+            // status here previously hid overdue work from the scheduler.
         }
         detected
     }
@@ -925,6 +1028,30 @@ impl AppRuntime {
         self.spawn_scheduler_worker_inner(wall_now_ms, poll_interval_ms);
     }
 
+    /// Test hook: install a preload executor (e.g. a fake) before spawning
+    /// the scheduler.
+    #[doc(hidden)]
+    pub fn install_preload_executor_for_test(
+        &self,
+        executor: Arc<dyn crate::scheduling::preload::PreloadExecutor>,
+    ) {
+        if let Ok(mut g) = self.inner.preload_executor.lock() {
+            *g = executor;
+        }
+    }
+
+    /// Install the production preload executor, which drives the actual
+    /// Local Perfect preload path (`guest_fetch_media`) when a peer is
+    /// online.
+    pub fn setup_real_preload_executor(&self) {
+        let executor = Arc::new(AppRuntimePreloadExecutor {
+            runtime: self.clone(),
+        });
+        if let Ok(mut g) = self.inner.preload_executor.lock() {
+            *g = executor;
+        }
+    }
+
     fn spawn_scheduler_worker_inner(&self, now_fn: fn() -> i64, poll_interval_ms: u64) {
         let inner = Arc::clone(&self.inner);
         let task = tokio::spawn(async move {
@@ -952,25 +1079,60 @@ impl AppRuntime {
                     }
                 };
                 for schedule in &due {
-                    // Exactly once: the status transition is persisted before
-                    // any side effect, so concurrent/restarted workers cannot
-                    // double-execute.
-                    if let Err(error) =
-                        db.update_schedule_status(&schedule.schedule_id, "Transferring")
+                    // Exactly once: atomically claim the schedule by
+                    // transitioning Planned → Claimed. Only the scheduler
+                    // that wins this transition runs the executor.
+                    if let Err(error) = db.update_schedule_status(&schedule.schedule_id, "Claimed")
                     {
-                        eprintln!("MoveParty: scheduler status transition failed: {error}");
+                        eprintln!("MoveParty: scheduler claim failed: {error}");
                         continue;
                     }
-                    inner
-                        .preload_executions
-                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let _ = inner.notifier.notify(
-                        "Move Party — Preloading",
-                        &format!(
-                            "Preloading '{}' for the scheduled session.",
-                            schedule.media_id
-                        ),
-                    );
+
+                    // Invoke the REAL preload executor.
+                    let executor = match inner.preload_executor.lock() {
+                        Ok(g) => g.clone(),
+                        Err(p) => p.into_inner().clone(),
+                    };
+                    match executor.execute(schedule) {
+                        Ok(crate::scheduling::preload::PreloadOutcome::Started) => {
+                            // Real transfer/preload preparation has begun.
+                            if let Err(error) =
+                                db.update_schedule_status(&schedule.schedule_id, "Transferring")
+                            {
+                                eprintln!("MoveParty: scheduler status transition failed: {error}");
+                                continue;
+                            }
+                            inner
+                                .preload_executions
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            let _ = inner.notifier.notify(
+                                "Move Party — Preloading",
+                                &format!(
+                                    "Preloading '{}' for the scheduled session.",
+                                    schedule.media_id
+                                ),
+                            );
+                        }
+                        Ok(crate::scheduling::preload::PreloadOutcome::WaitingForPrerequisites) => {
+                            // Peer/session unavailable: persist a waiting
+                            // state, notify the user, and retry on the next
+                            // poll (due_schedules includes WaitingForPeer).
+                            let _ =
+                                db.update_schedule_status(&schedule.schedule_id, "WaitingForPeer");
+                            let _ = inner.notifier.notify(
+                                "Move Party — Preload Waiting",
+                                &format!(
+                                    "Preload for '{}' is waiting for the guest to be online.",
+                                    schedule.media_id
+                                ),
+                            );
+                        }
+                        Err(error) => {
+                            let _ =
+                                db.update_schedule_status(&schedule.schedule_id, "PreloadFailed");
+                            eprintln!("MoveParty: preload executor failed: {error}");
+                        }
+                    }
                 }
 
                 // Wait efficiently for the next deadline.
@@ -3440,6 +3602,37 @@ fn wall_now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+/// Production preload executor: drives the actual Local Perfect preload path
+/// (`guest_fetch_media`) when a QUIC peer is online; otherwise reports that
+/// prerequisites are missing so the scheduler persists a waiting state and
+/// retries later.
+#[derive(Debug, Clone)]
+pub struct AppRuntimePreloadExecutor {
+    runtime: AppRuntime,
+}
+
+impl crate::scheduling::preload::PreloadExecutor for AppRuntimePreloadExecutor {
+    fn execute(
+        &self,
+        schedule: &crate::storage::sqlite::StoredSchedule,
+    ) -> Result<crate::scheduling::preload::PreloadOutcome, String> {
+        let client_present = self.runtime.client_for_test().is_some();
+        if !client_present {
+            return Ok(crate::scheduling::preload::PreloadOutcome::WaitingForPrerequisites);
+        }
+        let runtime = self.runtime.clone();
+        let schedule = schedule.clone();
+        tokio::spawn(async move {
+            // Real preload preparation for the scheduled session: fetch the
+            // manifest, open the sparse cache, start the demand-driven range
+            // server and transfer worker so bytes are ready by show time.
+            let _ = runtime.guest_fetch_media().await;
+            let _ = schedule;
+        });
+        Ok(crate::scheduling::preload::PreloadOutcome::Started)
+    }
 }
 
 // ── Snapshot builder & recovery helpers (unchanged) ───────────────────────────

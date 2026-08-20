@@ -36,57 +36,64 @@ M8: Chrome/player crash watchers not wired
 
 ---
 
-# M3 + M4 PRODUCTION CLOSURE (2026-08-20)
+# M3 + M4 CORRECTION PASS (2026-08-20)
 
-## M3 — Local Perfect: 🟩 LOCALLY COMPLETE
+## M3 — Local Perfect: 🟨 CORE GREEN — PRESENTATION PARTIAL
 
-- **M3.1 Demand-driven range fetch**: `ChunkDemandHandle` (priority queue +
-  in-flight dedup + tokio Notify) connects the loopback range server to the
-  guest QUIC transfer worker. Every uncached HTTP Range request enqueues the
-  exact missing 1 MiB chunks as CRITICAL; the worker fetches, validates
-  (media_id + index + size + BLAKE3), writes to SparseCache, and wakes the
-  waiting request. Tests prove: uncached range → real QUIC fetch → exact
-  source bytes served; distant seek reprioritized; duplicates deduplicated.
-- **M3.2 Binary QUIC bulk transfer**: `ServerResponse::ChunkResponse`
-  (base64-in-JSON) removed. Chunks now travel per PROTOCOL_SPEC §45
-  (MPCK magic, raw binary header, BLAKE3, raw payload) on dedicated QUIC
-  streams; control JSON stays small; MAX_REQUEST_BYTES unchanged. Tests:
-  valid chunk, truncated frame, oversized claimed payload, wrong
-  media/index, hash corruption, raw-binary assertion.
-- **M3.3 Lifecycle**: `guest_fetch_media()` owns manifest/cache/range
-  server/worker/player/event-loop; `leave_party()` aborts all and stops the
-  range server; reconnect aborts the prior worker (kept as
-  `old_transfer_task`) — never duplicate live workers. Tests prove ownership
-  + release + single-worker reconnect.
-- **M3.4 Strict sync**: full E2E proof — guest starvation pauses BOTH host
-  and guest (strict_sync_paused + BUFFERING); refill never auto-resumes;
-  fresh readiness consensus + host play cycle drives synchronized PLAYING.
-- **M3.5 Presentation**: libmpv still opens its own unmanaged Cocoa window.
-  In-app embedding is a platform blocker (Tauri 2 cannot host a native mpv
-  view in the webview without a native plugin) — documented accurately, not
-  renamed as V2.
+- **M3.1 Demand-driven range fetch + cache-write fix**: `ChunkDemandHandle`
+  (priority queue + in-flight dedup + tokio Notify) connects the loopback
+  range server to the guest QUIC transfer worker. The worker now acquires the
+  cache with `lock().await` (never `try_lock`), writes the chunk, and ONLY
+  then updates `bytes_available` + notifies the waiter. Failed writes are
+  requeued, never silently lost. Contention test proves persistence under
+  lock pressure.
+- **M3.2 Binary QUIC bulk transfer**: PROTOCOL_SPEC §45 raw binary chunk
+  stream on dedicated QUIC streams; base64 JSON payload removed.
+- **M3.3 Range wake path**: dead watch channel replaced with `ChunkWake`
+  (bounded Condvar). Waiting range requests are woken by a real notify after
+  each chunk write — no 20ms polling.
+- **M3.4 Empty-timeout response**: unavailable bytes return
+  `503 Service Unavailable` with `Retry-After` — never a bogus empty 206;
+  Content-Range underflow eliminated.
+- **M3.5 Lifecycle**: leave/reconnect aborts workers and stops the range
+  server; no duplicate live workers.
+- **M3.6 Strict sync**: starvation pauses BOTH sides; refill requires
+  readiness consensus; no independent auto-resume.
+- **M3.7 Presentation: PARTIAL** — libmpv opens its own unmanaged Cocoa
+  window. In-app embedding needs a dedicated native-rendering milestone
+  (NSView/CALayer hosting through a Tauri native plugin). This is
+  locally-codable, tracked separately, NOT an external hardware blocker.
 
 ## M4 — Persistence & Scheduling: 🟩 LOCALLY COMPLETE
 
-- **M4.1 Identity restart**: schema v2 persists the ed25519 signing-key
-  seed; `init_db()` restores the exact same identity across AppRuntime
-  restarts (verified with Runtime A → Runtime B restart test). Exactly one
-  identity is ever created.
-- **M4.2 Schedule CRUD**: AppRuntime + Tauri commands for create/list/
-  update/delete with MP-SCHEDULE-002 DTO validation; schedules survive
-  restart.
-- **M4.3 Real scheduler worker**: started in production setup; restores
-  pending schedules, waits for the next canonical preload deadline,
-  executes exactly once (persisted Planned→Transferring), reschedules on
-  update, deleted schedules never run, overdue schedules recover after
-  restart.
-- **M4.4 Notifications**: `Notifier` trait (NativeNotifier macOS osascript /
-  Windows PowerShell toast; FakeNotifier for tests — no OS notification in
-  unit tests; FailingNotifier proves failures are recoverable).
-- **M4.5 Retention**: runtime + Tauri paths for Keep / Remove / Save As;
-  verified to never delete or overwrite the host's original source.
+- **M4.1 Real preload executor**: `PreloadExecutor` seam. The scheduler
+  atomically claims (Planned → Claimed) each due schedule, then invokes the
+  executor: Started → Transferring; WaitingForPrerequisites → WaitingForPeer
+  (retried); failure → PreloadFailed (recoverable). Production executor
+  drives the actual `guest_fetch_media` preload; tests prove the executor is
+  invoked via a recording fake.
+- **M4.2 Production overdue-startup fix**: `check_overdue_schedules` is
+  notification-only and never mutates status; the scheduler is the single
+  authority. Real startup ordering test: overdue Planned schedule → startup →
+  executor invoked exactly once.
+- **M4.3 Secure device private key**: `SecureKeyStore` abstraction —
+  macOS Keychain, Windows Credential Manager; SQLite stores metadata + a
+  key label only, never the raw Ed25519 seed. Tests use `FakeKeyStore`.
+- **M4.4 Identity error handling**: `Ok(None)` (first run) vs `Err`
+  (surfaced as MP-STORE-001, no silent rotation). `upsert_identity` failures
+  propagate.
+- **M4.5 Coherent migration/rotation**: missing or mismatched private key →
+  explicit rotation with a NEW device id + keypair; old metadata row and
+  protected entry removed. `from_seed_for_tests` is never used by
+  production/migration code.
+- **M4.6 Notification hardening**: macOS dispatch passes text as `on run
+  argv` arguments (never interpolated into AppleScript); Windows dispatch
+  XML-escapes text and passes base64 (never PowerShell source). Tests cover
+  quotes, apostrophes, `&`, `<`, `>`, newlines.
+- **M4.7 Schedule CRUD + retention**: unchanged and green (create/list/
+  update/delete; Keep / Remove / Save As never touch the host source).
 
-Test totals: 249 Rust + 3 FE = 252, 0 failures. `.app` bundle builds.
+Test totals: 263 Rust + 3 FE = 266, 0 failures. `.app` bundle builds.
 
 M5 status: 🟨 IN PROGRESS — CallSignal routing over QUIC (3 tests), full
 WebRTC state machine needs physical devices.

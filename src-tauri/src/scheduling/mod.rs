@@ -1,6 +1,8 @@
 pub const PRELOAD_SAFETY_MULTIPLIER: f32 = 1.4;
 pub const PREPARATION_MARGIN_MS: i64 = 15 * 60 * 1_000;
 
+pub mod preload;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScheduleStatus {
     Planned,
