@@ -54,8 +54,10 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
   const [callDevices, setCallDevices] = useState<CallDeviceInventory | null>(null);
   const [isCameraCardMinimized, setIsCameraCardMinimized] = useState(false);
   const [isCameraCardHidden, setIsCameraCardHidden] = useState(false);
+  const [controlsVisible, setControlsVisible] = useState(true);
   const [privacyNotice, setPrivacyNotice] = useState("");
   const callSessionKey = useRef("");
+  const controlsTimer = useRef<number | null>(null);
   const isGhostMode = snapshot.ghostMode;
   const isPrivacyMode = snapshot.privacyMode;
   const isHost = snapshot.room.role === "HOST";
@@ -68,6 +70,31 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
   const peerName = peer?.displayName ?? "Peer";
   const encodedDraftLength = useMemo(() => new TextEncoder().encode(draft).length, [draft]);
   const isDraftTooLong = encodedDraftLength > chatBodyLimitBytes;
+
+  useEffect(() => {
+    if (isComposing || isHistoryOpen || isPrivacyMode) {
+      setControlsVisible(true);
+      return;
+    }
+    if (!controlsVisible) {
+      return;
+    }
+
+    controlsTimer.current = window.setTimeout(() => {
+      setControlsVisible(false);
+    }, 3_200);
+
+    return () => {
+      if (controlsTimer.current != null) {
+        window.clearTimeout(controlsTimer.current);
+        controlsTimer.current = null;
+      }
+    };
+  }, [isComposing, isHistoryOpen, isPrivacyMode, controlsVisible]);
+
+  const revealControls = () => {
+    setControlsVisible(true);
+  };
 
   useEffect(() => {
     let isMounted = true;
@@ -257,8 +284,16 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
   return (
     <main className="cinema-shell" aria-label="Cinema mode">
       <section
-        className={isGhostMode ? "movie-surface privacy-hidden" : "movie-surface"}
+        className={[
+          "movie-surface",
+          isGhostMode ? "privacy-hidden" : "",
+          controlsVisible ? "controls-visible" : "controls-idle",
+        ]
+          .filter(Boolean)
+          .join(" ")}
         aria-label="Movie"
+        onMouseMove={revealControls}
+        onFocus={revealControls}
       >
         <div className="movie-frame">
           <div className="movie-light" />

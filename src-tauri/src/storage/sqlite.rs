@@ -12,7 +12,7 @@ use rusqlite::{params, Connection};
 
 use super::StorageError;
 
-const CURRENT_SCHEMA_VERSION: i32 = 1;
+const CURRENT_SCHEMA_VERSION: i32 = 2;
 
 /// Helper to lock a Mutex, converting PoisonError to StorageError.
 fn lock_mutex<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, StorageError> {
@@ -137,6 +137,11 @@ impl MovePartyDb {
 
         if current < 1 {
             conn.execute_batch(MIGRATION_001)
+                .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        }
+
+        if current < 2 && !device_identity_has_key_label(&conn)? {
+            conn.execute_batch(MIGRATION_002)
                 .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         }
 
@@ -583,6 +588,22 @@ impl MovePartyDb {
     }
 }
 
+fn device_identity_has_key_label(conn: &Connection) -> Result<bool, StorageError> {
+    let mut statement = conn
+        .prepare("PRAGMA table_info(device_identity)")
+        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+
+    for column in columns {
+        if column.map_err(|e| StorageError::Sqlite(e.to_string()))? == "key_label" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 // ── Migrations ──────────────────────────────────────────────────────────────
 
 const MIGRATION_001: &str = "
@@ -627,6 +648,14 @@ CREATE INDEX IF NOT EXISTS idx_schedules_start ON schedules(scheduled_start_utc_
 CREATE INDEX IF NOT EXISTS idx_chat_room ON chat_messages(room_id, created_host_time_us);
 ";
 
+/// v2: M4 moved private identity material into the platform secure store and
+/// needs a stable Keychain/Credential Manager entry label beside public metadata.
+/// The conditional migration also repairs databases produced by the prior v1
+/// schema declaration, which recorded `user_version = 1` without this column.
+const MIGRATION_002: &str = "
+ALTER TABLE device_identity ADD COLUMN key_label TEXT NOT NULL DEFAULT '';
+";
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -638,6 +667,36 @@ mod tests {
         let db = MovePartyDb::open_in_memory().expect("open");
         let version = db.schema_version().expect("version");
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn upgrades_v1_identity_table_missing_key_label() {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "
+            CREATE TABLE device_identity (
+                device_id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                public_key TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL
+            );
+            PRAGMA user_version=1;
+            ",
+        )
+        .expect("legacy schema");
+        let db = MovePartyDb {
+            conn: Mutex::new(conn),
+            path: PathBuf::from(":memory:"),
+        };
+
+        db.run_migrations().expect("upgrade");
+
+        let conn = lock_mutex(&db.conn).expect("lock");
+        let has_key_label = device_identity_has_key_label(&conn).expect("columns");
+        assert!(has_key_label);
+        drop(conn);
+        assert_eq!(db.schema_version().expect("version"), CURRENT_SCHEMA_VERSION);
     }
 
     #[test]

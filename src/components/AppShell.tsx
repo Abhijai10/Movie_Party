@@ -162,7 +162,6 @@ export function AppShell() {
   if (localScreen === "CREATE_PARTY") {
     return (
       <CreatePartyView
-        snapshot={snapshot}
         isCreating={isCreating}
         error={createError ?? snapshot.error}
         onBack={goHome}
@@ -212,7 +211,7 @@ export function AppShell() {
     );
   }
 
-  return <HomeView snapshot={snapshot} onCreate={goCreateParty} onJoin={goJoinParty} />;
+  return <HomeView onCreate={goCreateParty} onJoin={goJoinParty} />;
 }
 
 function providerIdForInput(input: string | null): string | null {

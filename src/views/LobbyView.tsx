@@ -1,5 +1,6 @@
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
+import { CinematicBackdrop } from "../components/CinematicBackdrop";
 import type { AppSnapshot, ParticipantSnapshot } from "../backend/appRuntime";
 
 type LobbyViewProps = {
@@ -34,9 +35,10 @@ export function LobbyView({
       : "Waiting for movie source";
 
   return (
-    <main className="app-shell centered-shell">
-      <section className="lobby-panel" aria-labelledby="lobby-title">
-        <div className="panel-header">
+    <main className="app-shell centered-shell lobby-shell">
+      <CinematicBackdrop />
+      <section className="lobby-panel cinema-lobby" aria-labelledby="lobby-title">
+        <div className="lobby-topbar">
           <Button variant="ghost" onClick={onBack}>
             Back
           </Button>
@@ -44,73 +46,40 @@ export function LobbyView({
             Preview Cinema
           </Button>
         </div>
-        <p className="brand">Lobby</p>
-        <h1 id="lobby-title">{title}</h1>
-        <p className="mode-line">
-          {snapshot.room.state} · {mode}
-        </p>
-        <div className="lobby-status-grid">
-          <Card className="status-card">
-            <span>Invite</span>
-            <strong>{snapshot.room.inviteCode ?? "Waiting for invite"}</strong>
-          </Card>
-          <Card className="status-card">
-            <span>Media</span>
-            <strong>{mediaState}</strong>
-          </Card>
-          <Card className="status-card">
-            <span>Network</span>
-            <strong>{network}</strong>
-          </Card>
-          <Card className="status-card">
-            <span>Provider</span>
-            <strong>{snapshot.provider.state}</strong>
-          </Card>
+        <div className="lobby-hero">
+          <div><p className="brand">Private screening room</p><h1 id="lobby-title">{title}</h1><p className="mode-line">{snapshot.room.state} · {mode}</p></div>
+          <div className="lobby-invite"><span>Room invite</span><strong>{snapshot.room.inviteCode ?? "Preparing invite"}</strong><small>Share with one trusted friend</small></div>
         </div>
-        <div className="participant-grid">
-          {snapshot.participants.map((participant) => (
-            <Participant key={participant.id} participant={participant} />
-          ))}
+        <div className="lobby-room-grid">
+          <section className="lobby-seating" aria-label="Participants"><p>In the room</p><div className="participant-grid">{snapshot.participants.map((participant) => <Participant key={participant.id} participant={participant} />)}</div></section>
+          <aside className="room-readiness"><div className="room-signal"><span>Connection</span><strong>{network}</strong><small>Provider: {snapshot.provider.state}</small></div><div className="room-signal"><span>Movie source</span><strong>{mediaState}</strong></div><div className="buffer-summary" aria-label="Guest buffer"><strong>Guest buffer</strong><div className="meter"><span style={{ width: bufferPercent }} /></div><span>{bufferSeconds}s prepared</span></div></aside>
         </div>
-
-        <fieldset className="segmented-field">
-          <legend>Controls</legend>
-          <button
-            type="button"
-            aria-pressed={!sharedControls}
-            disabled={!isHost}
-            onClick={() => {
-              onToggleSharedControls(false);
-            }}
-          >
-            Host Only
-          </button>
-          <button
-            type="button"
-            aria-pressed={sharedControls}
-            disabled={!isHost}
-            onClick={() => {
-              onToggleSharedControls(true);
-            }}
-          >
-            Shared Controls
-          </button>
-        </fieldset>
-
-        <section className="network-summary" aria-label="Network">
-          <strong>Network</strong>
-          <span>{network}</span>
-        </section>
-        <section className="buffer-summary" aria-label="Guest buffer">
-          <strong>Guest Buffer</strong>
-          <div className="meter">
-            <span style={{ width: bufferPercent }} />
-          </div>
-          <span>{bufferSeconds}s prepared</span>
-        </section>
-        <Button variant="primary" onClick={onReady}>
-          Start When Ready
-        </Button>
+        <div className="lobby-footer">
+          <fieldset className="segmented-field lobby-controls">
+            <legend>Controls</legend>
+            <button
+              type="button"
+              aria-pressed={!sharedControls}
+              disabled={!isHost}
+              onClick={() => {
+                onToggleSharedControls(false);
+              }}
+            >
+              Host Only
+            </button>
+            <button
+              type="button"
+              aria-pressed={sharedControls}
+              disabled={!isHost}
+              onClick={() => {
+                onToggleSharedControls(true);
+              }}
+            >
+              Shared Controls
+            </button>
+          </fieldset>
+          <Button variant="primary" onClick={onReady}>Start when ready</Button>
+        </div>
       </section>
     </main>
   );
@@ -131,11 +100,18 @@ function formatBytes(bytes: number): string {
 function Participant({ participant }: { participant: ParticipantSnapshot }) {
   return (
     <article className="participant">
-      <h2>{participant.displayName}</h2>
-      <span>{participant.connected ? "Connected" : "Disconnected"}</span>
-      <span>Media {participant.mediaReady ? "Ready" : "Preparing"}</span>
-      <span>Camera {participant.cameraEnabled ? "On" : "Off"}</span>
-      <span>Mic {participant.microphoneEnabled ? "On" : "Muted"}</span>
+      <div className="participant-avatar" aria-hidden="true">
+        {participant.displayName.slice(0, 1).toUpperCase()}
+      </div>
+      <div className="participant-identity">
+        <h2>{participant.displayName}</h2>
+        <span>{participant.role}</span>
+      </div>
+      <div className="participant-state"><StatusPill label={participant.connected ? "Connected" : "Disconnected"} ok={participant.connected} /><StatusPill label={participant.mediaReady ? "Media ready" : "Preparing media"} ok={participant.mediaReady} /></div>
     </article>
   );
+}
+
+function StatusPill({ label, ok }: { label: string; ok: boolean }) {
+  return <span className={ok ? "status-pill ok" : "status-pill"}>{label}</span>;
 }

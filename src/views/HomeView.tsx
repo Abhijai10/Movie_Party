@@ -1,36 +1,38 @@
 import { Button } from "../components/Button";
-import { Card } from "../components/Card";
-import { CinematicBackdrop } from "../components/CinematicBackdrop";
-import { EmptyState } from "../components/EmptyState";
-import type { AppSnapshot } from "../backend/appRuntime";
+import { useReducedMotion } from "../hooks/useReducedMotion";
+import { lazy, Suspense } from "react";
+
+const Silk = lazy(() => import("../components/Silk").then((module) => ({ default: module.Silk })));
+const FilmReelScene = lazy(() =>
+  import("../components/FilmReelScene").then((module) => ({ default: module.FilmReelScene })),
+);
 
 type HomeViewProps = {
-  snapshot: AppSnapshot;
   onCreate: () => void;
   onJoin: () => void;
 };
 
-export function HomeView({ snapshot, onCreate, onJoin }: HomeViewProps) {
-  const upcomingLabel = snapshot.media?.filename ?? snapshot.provider.url ?? "No scheduled party";
-  const readiness = snapshot.network.connected ? snapshot.network.path : "Waiting for setup";
-  const providerLabel =
-    snapshot.provider.providerId != null ? snapshot.provider.providerId : "No provider selected";
-
+export function HomeView({ onCreate, onJoin }: HomeViewProps) {
+  const prefersReducedMotion = useReducedMotion();
   return (
     <main className="app-shell home-shell">
-      <CinematicBackdrop />
-      <section className="home-screen" aria-labelledby="home-title">
-        <div className="home-preview" aria-hidden="true">
-          <div className="preview-screen">
-            <div className="preview-letterbox" />
-            <div className="preview-caption">Strict Sync</div>
-          </div>
+      {!prefersReducedMotion ? (
+        <div className="home-silk" aria-hidden="true">
+          <Suspense fallback={null}>
+            <Silk speed={0.34} scale={1.24} color="#5B21FF" noiseIntensity={0.52} rotation={0.18} />
+          </Suspense>
         </div>
-        <div className="home-stack">
-          <p className="brand">Move Party</p>
-          <h1 id="home-title">Welcome back. What are we watching today?</h1>
-          <p className="panel-copy">
-            Start a private two-person cinema session with strict sync and low-distraction overlays.
+      ) : null}
+      <section className="home-screen" aria-labelledby="home-title">
+        <div className="home-intro">
+          <div className="home-brand-lockup">
+            <span className="home-brand-mark" aria-hidden="true" />
+            <p>Move Party</p>
+          </div>
+          <p className="home-kicker">Welcome back</p>
+          <h1 id="home-title">What are we watching today?</h1>
+          <p className="home-summary">
+            A private movie night where playback stays with both of you.
           </p>
           <div className="hero-actions">
             <Button variant="primary" onClick={onCreate}>
@@ -40,21 +42,13 @@ export function HomeView({ snapshot, onCreate, onJoin }: HomeViewProps) {
               Join Party
             </Button>
           </div>
-          <div className="home-meta-grid">
-            <Card className="home-meta-card">
-              <span>Last setup</span>
-              <strong>{upcomingLabel}</strong>
-              <small>{readiness}</small>
-              <small>{providerLabel}</small>
-            </Card>
-            <Card className="home-meta-card">
-              <EmptyState
-                title="Recent watches"
-                message="Watch history needs backend support before real entries appear here."
-              />
-            </Card>
-          </div>
+          <p className="home-footnote">
+            <span aria-hidden="true" /> Strict sync enabled for every room.
+          </p>
         </div>
+        <Suspense fallback={<div className="film-scene-fallback" aria-hidden="true" />}>
+          <FilmReelScene reducedMotion={prefersReducedMotion} />
+        </Suspense>
       </section>
     </main>
   );
