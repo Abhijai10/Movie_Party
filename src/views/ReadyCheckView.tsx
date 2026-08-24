@@ -5,6 +5,7 @@ import type { AppSnapshot } from "../backend/appRuntime";
 import { CinemaButton } from "../components/mp/CinemaButton";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
+import { useReducedMotion } from "../hooks/useReducedMotion";
 
 type ReadyCheckViewProps = {
   snapshot: AppSnapshot;
@@ -13,6 +14,8 @@ type ReadyCheckViewProps = {
 
 export function ReadyCheckView({ snapshot, onStart }: ReadyCheckViewProps) {
   const [countdown, setCountdown] = useState<number | null>(null);
+  const transitionActive = countdown !== null;
+  const prefersReducedMotion = useReducedMotion();
 
   const everyoneReady =
     snapshot.participants.every((participant) => participant.mediaReady) &&
@@ -22,9 +25,13 @@ export function ReadyCheckView({ snapshot, onStart }: ReadyCheckViewProps) {
 
   useEffect(() => {
     if (countdown === null) return;
-    if (countdown <= 0) {
-      onStart();
-      return;
+    if (countdown === 0) {
+      const t = setTimeout(() => {
+        onStart();
+      }, 620);
+      return () => {
+        clearTimeout(t);
+      };
     }
     const t = setTimeout(() => {
       setCountdown((c) => (c ?? 0) - 1);
@@ -140,6 +147,47 @@ export function ReadyCheckView({ snapshot, onStart }: ReadyCheckViewProps) {
           )}
         </motion.div>
       </main>
+
+      {transitionActive && (
+        <motion.div
+          className="ready-cinema-transition"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: prefersReducedMotion ? 0.01 : 0.24 }}
+          aria-live="assertive"
+          data-testid="ready-cinema-transition"
+        >
+          <div className="ready-curtain ready-curtain-left" aria-hidden="true" />
+          <div className="ready-curtain ready-curtain-right" aria-hidden="true" />
+          <div className="ready-spotlight" aria-hidden="true" />
+          <motion.div
+            key={countdown}
+            className="ready-countdown"
+            initial={
+              prefersReducedMotion
+                ? { opacity: 0 }
+                : { opacity: 0, scale: 0.86, filter: "blur(10px)" }
+            }
+            animate={
+              prefersReducedMotion
+                ? { opacity: 1 }
+                : { opacity: 1, scale: 1, filter: "blur(0px)" }
+            }
+            exit={
+              prefersReducedMotion
+                ? { opacity: 0 }
+                : { opacity: 0, scale: 1.08, filter: "blur(12px)" }
+            }
+            transition={{
+              duration: prefersReducedMotion ? 0.01 : 0.34,
+              ease: [0.22, 1, 0.36, 1],
+            }}
+          >
+            {countdown > 0 ? countdown : "START"}
+          </motion.div>
+        </motion.div>
+      )}
     </div>
   );
 }

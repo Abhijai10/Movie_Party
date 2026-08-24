@@ -27,6 +27,7 @@ type CinemaControlsProps = {
   chatOpen: boolean;
   onToggleChat: () => void;
   onSendReaction: () => void;
+  hasUnreadChat: boolean;
   isHost: boolean;
   sharedControls: boolean;
   onToggleSharedControls: () => void;
@@ -58,6 +59,7 @@ export function CinemaControls({
   chatOpen,
   onToggleChat,
   onSendReaction,
+  hasUnreadChat,
   isHost,
   sharedControls,
   onToggleSharedControls,
@@ -164,7 +166,13 @@ export function CinemaControls({
           </div>
 
           <div className="flex items-center gap-1.5">
-            <IconBtn onClick={onToggleChat} label="Chat" active={chatOpen} testId="cinema-chat-btn">
+            <IconBtn
+              onClick={onToggleChat}
+              label="Chat"
+              active={chatOpen}
+              hasDot={hasUnreadChat && !chatOpen}
+              testId="cinema-chat-btn"
+            >
               <MessageCircle className="w-4 h-4" strokeWidth={1.6} />
             </IconBtn>
             <IconBtn onClick={onSendReaction} label="Send reaction" testId="cinema-react-btn">
@@ -195,12 +203,14 @@ function IconBtn({
   onClick,
   label,
   active,
+  hasDot,
   testId,
 }: {
   children: React.ReactNode;
   onClick?: () => void;
   label: string;
   active?: boolean;
+  hasDot?: boolean;
   testId?: string;
 }) {
   return (
@@ -209,11 +219,12 @@ function IconBtn({
       onClick={onClick}
       aria-label={label}
       data-testid={testId}
-      className={`w-10 h-10 rounded-full flex items-center justify-center transition ${
+      className={`relative w-10 h-10 rounded-full flex items-center justify-center transition ${
         active ? "bg-[#6B46C1] text-white" : "text-white/85 hover:bg-white/10"
       }`}
     >
       {children}
+      {hasDot ? <span className="cinema-control-dot" aria-hidden="true" /> : null}
     </button>
   );
 }

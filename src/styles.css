@@ -2273,6 +2273,127 @@ html, body, #root {
 .reel-spin { animation: reelSpin 40s linear infinite; }
 .reel-spin-slow { animation: reelSpin 90s linear infinite; }
 
+.movie-reel-stage {
+    width: min(440px, 72vw);
+    aspect-ratio: 1;
+    display: grid;
+    place-items: center;
+    perspective: 900px;
+}
+
+.movie-reel-ghost {
+    width: min(340px, 48vw);
+    aspect-ratio: 1;
+    display: grid;
+    place-items: center;
+    opacity: 0.42;
+}
+
+.movie-reel-front {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1;
+    filter: drop-shadow(0 34px 54px rgba(0, 0, 0, 0.46));
+    transform-style: preserve-3d;
+}
+
+.movie-reel-disc {
+    position: absolute;
+    inset: 0;
+    border: 1px solid rgba(167, 139, 250, 0.5);
+    border-radius: 50%;
+    background:
+        radial-gradient(circle at 35% 30%, rgba(255, 255, 255, 0.16), transparent 15%),
+        radial-gradient(circle at 50% 50%, rgba(159, 122, 234, 0.24) 0 10%, transparent 11%),
+        radial-gradient(circle at 50% 50%, #21162f 0 36%, #0c0715 61%, #050309 100%);
+    box-shadow:
+        inset 0 0 0 14px rgba(255, 255, 255, 0.025),
+        inset 0 0 0 44px rgba(159, 122, 234, 0.035),
+        inset 0 -26px 44px rgba(0, 0, 0, 0.5),
+        0 0 48px rgba(107, 70, 193, 0.28);
+}
+
+.movie-reel-disc::before,
+.movie-reel-disc::after {
+    content: "";
+    position: absolute;
+    border-radius: 50%;
+    pointer-events: none;
+}
+
+.movie-reel-disc::before {
+    inset: 5%;
+    border: 1px solid rgba(159, 122, 234, 0.16);
+}
+
+.movie-reel-disc::after {
+    inset: 14%;
+    border: 1px solid rgba(255, 255, 255, 0.055);
+}
+
+.movie-reel-port {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 17%;
+    aspect-ratio: 1;
+    border: 1px solid rgba(159, 122, 234, 0.24);
+    border-radius: 50%;
+    background:
+        radial-gradient(circle at 35% 30%, rgba(255, 255, 255, 0.07), transparent 32%),
+        #050309;
+    box-shadow: inset 0 8px 14px rgba(0, 0, 0, 0.78);
+    transform:
+        translate(-50%, -50%)
+        rotate(calc(var(--port-index) * 60deg))
+        translateY(-145%);
+}
+
+.movie-reel-port:nth-child(1) { --port-index: 0; }
+.movie-reel-port:nth-child(2) { --port-index: 1; }
+.movie-reel-port:nth-child(3) { --port-index: 2; }
+.movie-reel-port:nth-child(4) { --port-index: 3; }
+.movie-reel-port:nth-child(5) { --port-index: 4; }
+.movie-reel-port:nth-child(6) { --port-index: 5; }
+
+.movie-reel-hub {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 18%;
+    aspect-ratio: 1;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 50%;
+    background:
+        radial-gradient(circle at 34% 28%, rgba(255, 255, 255, 0.28), transparent 26%),
+        linear-gradient(135deg, #9F7AEA, #4A2B85 72%, #160d24);
+    box-shadow: 0 0 22px rgba(159, 122, 234, 0.34);
+    transform: translate(-50%, -50%);
+}
+
+.movie-reel-hub::after {
+    content: "";
+    position: absolute;
+    inset: 38%;
+    border-radius: 50%;
+    background: #050309;
+}
+
+.reel-film-wrap {
+    position: absolute;
+    left: -12%;
+    right: -12%;
+    top: 58%;
+    z-index: 2;
+    display: flex;
+    gap: 6px;
+    padding: 8px;
+    border-radius: 12px;
+    background: rgba(5, 3, 9, 0.88);
+    box-shadow: 0 16px 34px rgba(0, 0, 0, 0.42);
+    transform: translateY(-50%) rotate(-7deg);
+}
+
 @keyframes filmScroll {
     from { transform: translateX(0); }
     to   { transform: translateX(-50%); }
@@ -3304,6 +3425,101 @@ input[type=range].mp-range::-webkit-slider-thumb {
    reactions, buffering, reconnect, provider status, party modal.
    ============================================================ */
 
+.ready-cinema-transition {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 48%, rgba(242, 242, 245, 0.12), transparent 14%),
+    radial-gradient(ellipse 42% 68% at 50% 52%, rgba(159, 122, 234, 0.24), transparent 52%),
+    rgba(2, 2, 6, 0.9);
+}
+
+.ready-curtain {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 52%;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.04), transparent 16% 84%, rgba(0, 0, 0, 0.28)),
+    linear-gradient(
+      90deg,
+      rgba(8, 5, 14, 0.98) 0%,
+      rgba(18, 11, 30, 0.98) 18%,
+      rgba(6, 4, 12, 0.98) 36%,
+      rgba(17, 10, 28, 0.98) 58%,
+      rgba(7, 4, 13, 0.98) 78%,
+      rgba(16, 10, 27, 0.98) 100%
+    );
+  box-shadow: inset 0 0 70px rgba(0, 0, 0, 0.72);
+  animation: ready-curtain-close 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.ready-curtain-left {
+  left: 0;
+  transform-origin: left center;
+}
+
+.ready-curtain-right {
+  right: 0;
+  transform-origin: right center;
+}
+
+.ready-spotlight {
+  position: absolute;
+  width: min(46vw, 520px);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle, rgba(255, 255, 255, 0.2), rgba(159, 122, 234, 0.12) 34%, transparent 68%);
+  filter: blur(12px);
+  opacity: 0.82;
+  animation: ready-spotlight-breathe 900ms ease-in-out infinite alternate;
+}
+
+.ready-countdown {
+  position: relative;
+  z-index: 2;
+  min-width: 5ch;
+  color: #fff;
+  font-family: 'Cormorant Garamond', 'Times New Roman', serif;
+  font-size: clamp(5rem, 14vw, 10rem);
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0;
+  text-align: center;
+  text-shadow:
+    0 0 34px rgba(159, 122, 234, 0.62),
+    0 18px 60px rgba(0, 0, 0, 0.86);
+}
+
+@keyframes ready-curtain-close {
+  from {
+    opacity: 0.42;
+    transform: scaleX(0.62);
+  }
+
+  to {
+    opacity: 1;
+    transform: scaleX(1);
+  }
+}
+
+@keyframes ready-spotlight-breathe {
+  from {
+    opacity: 0.62;
+    transform: scale(0.96);
+  }
+
+  to {
+    opacity: 0.9;
+    transform: scale(1.04);
+  }
+}
+
 .cinema-shell {
   position: relative;
   min-height: 100vh;
@@ -3467,7 +3683,7 @@ input[type=range].mp-range::-webkit-slider-thumb {
 }
 
 .camera-card {
-  right: clamp(22px, 3vw, 44px);
+  right: auto;
   top: clamp(22px, 3vw, 44px);
   display: grid;
   align-content: end;
@@ -3483,7 +3699,25 @@ input[type=range].mp-range::-webkit-slider-thumb {
     radial-gradient(circle at 30% 20%, rgba(159, 122, 234, 0.2), transparent 32%),
     linear-gradient(135deg, #2a2036, #141019);
   color: var(--mp-text);
+  cursor: grab;
   padding: 14px;
+  touch-action: none;
+  transition:
+    box-shadow 180ms ease,
+    border-color 180ms ease,
+    transform 180ms ease;
+  user-select: none;
+}
+
+.camera-card.is-dragging {
+  border-color: rgba(159, 122, 234, 0.52);
+  box-shadow: 0 24px 68px rgba(0, 0, 0, 0.48), 0 0 32px rgba(107, 70, 193, 0.2);
+  cursor: grabbing;
+  transform: scale(1.012);
+}
+
+.camera-card button {
+  user-select: none;
 }
 
 .camera-card-header {
@@ -3539,6 +3773,39 @@ input[type=range].mp-range::-webkit-slider-thumb {
 .presentation-overlay p,
 .presentation-overlay small {
   color: var(--mp-text-2);
+}
+
+.cinema-chat-overlay {
+  position: absolute;
+  right: clamp(18px, 3vw, 36px);
+  top: clamp(96px, 13vh, 132px);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  width: min(324px, calc(100vw - 32px));
+  max-height: min(460px, calc(100vh - 210px));
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.025)),
+    rgba(9, 7, 15, 0.48);
+  box-shadow:
+    0 24px 68px -28px rgba(0, 0, 0, 0.82),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(26px) saturate(150%);
+  -webkit-backdrop-filter: blur(26px) saturate(150%);
+}
+
+.cinema-control-dot {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #F87171;
+  box-shadow: 0 0 12px rgba(248, 113, 113, 0.8);
 }
 
 .reaction-float-layer {
@@ -3633,6 +3900,7 @@ input[type=range].mp-range::-webkit-slider-thumb {
 .privacy-hidden .camera-card,
 .privacy-hidden .camera-restore,
 .privacy-hidden .chat-bubble,
+.privacy-hidden .cinema-chat-overlay,
 .privacy-hidden .reaction-float-layer,
 .privacy-hidden .buffer-overlay,
 .privacy-hidden .reconnect-overlay,
@@ -3865,6 +4133,20 @@ input[type=range].mp-range::-webkit-slider-thumb {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .ready-curtain,
+  .ready-spotlight,
+  .reel-spin,
+  .reel-spin-slow,
+  .film-scroll {
+    animation: none;
+  }
+
+  .camera-card,
+  .camera-card.is-dragging,
+  .reaction-tray {
+    transition: none;
+  }
+
   .floating-reaction {
     animation: none;
   }

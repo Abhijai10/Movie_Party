@@ -19,18 +19,24 @@ export function MovieReelHero() {
         initial={{ opacity: 0, scale: 0.9, x: 40 }}
         animate={{ opacity: 0.35, scale: 1, x: 60 }}
         transition={{ duration: 1.4, ease: "easeOut" }}
-        className="absolute top-10 right-4"
+        className="absolute top-10 right-4 movie-reel-ghost"
+        aria-hidden="true"
       >
-        <Reel size={340} className="reel-spin-slow opacity-40" />
+        <Reel className="reel-spin-slow" />
       </motion.div>
 
       <motion.div
         initial={{ opacity: 0, scale: 0.85, rotate: -10 }}
         animate={{ opacity: 1, scale: 1, rotate: 0 }}
         transition={{ duration: 1.2, ease: [0.22, 1, 0.36, 1] }}
-        className="relative"
+        className="relative movie-reel-stage"
       >
-        <Reel size={440} className="reel-spin" />
+        <div className="reel-film-wrap" aria-hidden="true">
+          {Array.from({ length: 9 }).map((_, i) => (
+            <FilmFrame key={i} idx={i} />
+          ))}
+        </div>
+        <Reel className="reel-spin" />
       </motion.div>
 
       <motion.div
@@ -57,88 +63,16 @@ export function MovieReelHero() {
   );
 }
 
-function Reel({ size = 400, className = "" }: { size?: number; className?: string }) {
+function Reel({ className = "" }: { className?: string }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 400 400" className={className}>
-      <defs>
-        <radialGradient id="reelDisc" cx="50%" cy="50%" r="50%">
-          <stop offset="0%" stopColor="#1A1225" />
-          <stop offset="70%" stopColor="#0B0713" />
-          <stop offset="100%" stopColor="#050309" />
-        </radialGradient>
-        <radialGradient id="reelHub" cx="50%" cy="50%" r="50%">
-          <stop offset="0%" stopColor="#9F7AEA" />
-          <stop offset="60%" stopColor="#5A369E" />
-          <stop offset="100%" stopColor="#2E1B5A" />
-        </radialGradient>
-        <linearGradient id="reelRim" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stopColor="#A78BFA" stopOpacity="0.8" />
-          <stop offset="100%" stopColor="#3B1F70" stopOpacity="0.4" />
-        </linearGradient>
-      </defs>
-
-      <circle
-        cx="200"
-        cy="200"
-        r="196"
-        fill="url(#reelDisc)"
-        stroke="url(#reelRim)"
-        strokeWidth="1.5"
-      />
-      <circle
-        cx="200"
-        cy="200"
-        r="184"
-        fill="none"
-        stroke="rgba(159,122,234,0.15)"
-        strokeWidth="1"
-      />
-      <circle
-        cx="200"
-        cy="200"
-        r="152"
-        fill="none"
-        stroke="rgba(159,122,234,0.10)"
-        strokeWidth="1"
-      />
-
-      {Array.from({ length: 6 }).map((_, i) => {
-        const angle = (i * 60 * Math.PI) / 180;
-        const x = 200 + Math.cos(angle) * 120;
-        const y = 200 + Math.sin(angle) * 120;
-        return (
-          <g key={i}>
-            <circle
-              cx={x}
-              cy={y}
-              r="34"
-              fill="#050309"
-              stroke="rgba(159,122,234,0.25)"
-              strokeWidth="1"
-            />
-            <circle
-              cx={x}
-              cy={y}
-              r="34"
-              fill="none"
-              stroke="rgba(255,255,255,0.04)"
-              strokeWidth="1"
-            />
-          </g>
-        );
-      })}
-
-      <circle cx="200" cy="200" r="36" fill="url(#reelHub)" />
-      <circle cx="200" cy="200" r="10" fill="#0B0713" />
-      <circle cx="200" cy="200" r="4" fill="#F2F2F5" opacity="0.9" />
-
-      <path
-        d="M 200 12 A 188 188 0 0 1 388 200"
-        fill="none"
-        stroke="rgba(255,255,255,0.12)"
-        strokeWidth="1"
-      />
-    </svg>
+    <div className={`movie-reel-front ${className}`} aria-hidden="true">
+      <div className="movie-reel-disc">
+        {Array.from({ length: 6 }).map((_, i) => (
+          <span key={i} className="movie-reel-port" />
+        ))}
+        <span className="movie-reel-hub" />
+      </div>
+    </div>
   );
 }
 

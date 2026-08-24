@@ -49,16 +49,7 @@ export function ChatOverlay({
           animate={{ opacity: 1, x: 0 }}
           exit={{ opacity: 0, x: 40 }}
           transition={{ duration: 0.3, ease: "easeOut" }}
-          className="absolute right-6 top-[12vh] w-[min(360px,calc(100vw-32px))] max-h-[min(620px,calc(100vh-190px))] z-40 flex flex-col rounded-2xl overflow-hidden"
-          style={{
-            background:
-              "linear-gradient(180deg, rgba(255,255,255,0.075), rgba(255,255,255,0.025)), rgba(9, 7, 15, 0.56)",
-            backdropFilter: "blur(28px) saturate(150%)",
-            WebkitBackdropFilter: "blur(28px) saturate(150%)",
-            border: "1px solid rgba(255,255,255,0.12)",
-            boxShadow:
-              "0 28px 80px -24px rgba(0,0,0,0.78), inset 0 1px 0 rgba(255,255,255,0.08)",
-          }}
+          className="cinema-chat-overlay"
           data-testid="chat-overlay"
         >
           <header className="px-5 py-4 flex items-center justify-between border-b border-white/5">
