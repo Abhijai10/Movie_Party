@@ -386,6 +386,21 @@ impl LocalPlayer for MpvPlayer {
             reason: "path contains null byte".to_string(),
         })?;
 
+        let pause_true = CString::new("true").unwrap();
+        let pause_name = CString::new("pause").unwrap();
+        unsafe {
+            mpv_result(
+                (fns.mpv_set_property)(
+                    handle,
+                    pause_name.as_ptr(),
+                    MPV_FORMAT_STRING,
+                    pause_true.as_ptr() as *const c_void,
+                ),
+                fns,
+                "failed to prepare media paused",
+            )?;
+        }
+
         // Execute: loadfile <path> replace
         let loadfile_cmd = CString::new("loadfile").unwrap();
         let replace_arg = CString::new("replace").unwrap();
@@ -491,7 +506,8 @@ impl LocalPlayer for MpvPlayer {
 
     fn set_volume(&mut self, volume: f32) -> Result<(), PlayerError> {
         let (handle, fns) = self.ensure_ready()?;
-        let vol = volume.clamp(0.0, 1.0) * 100.0;
+        let clamped_volume = volume.clamp(0.0, 1.0);
+        let vol = clamped_volume * 100.0;
         let vol_str = CString::new(format!("{vol:.0}")).unwrap();
         let vol_name = CString::new("volume").unwrap();
         unsafe {
@@ -506,7 +522,7 @@ impl LocalPlayer for MpvPlayer {
                 "failed to set volume",
             )?;
         }
-        self.snapshot.volume = volume;
+        self.snapshot.volume = clamped_volume;
         Ok(())
     }
 
@@ -545,10 +561,11 @@ impl LocalPlayer for MpvPlayer {
                 }
                 // Update state from mpv pause property
                 if let Some(pause) = mpv_get_int64(handle, fns, "pause") {
-                    if pause != 0 {
+                    if snap.state == PlayerState::Ready {
+                        // A loaded-but-paused file is the expected pre-sync state.
+                    } else if pause != 0 {
                         snap.state = PlayerState::Paused;
-                    } else if snap.state == PlayerState::Paused || snap.state == PlayerState::Ready
-                    {
+                    } else if snap.state == PlayerState::Paused {
                         snap.state = PlayerState::Playing;
                     }
                 }
@@ -581,7 +598,7 @@ impl LocalPlayer for MpvPlayer {
     }
 
     fn close(&mut self) {
-        if let (Some(handle), Some(fns)) = (self.handle, self.fns.take()) {
+        if let (Some(handle), Some(fns)) = (self.handle, &self.fns) {
             // Stop playback
             let stop_cmd = CString::new("stop").unwrap();
             let null_term = ptr::null();

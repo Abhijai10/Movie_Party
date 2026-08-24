@@ -57,8 +57,8 @@ export function CallTile({
             : callStatus === "degraded"
               ? "Call degraded"
               : callStatus === "unavailable"
-                ? "Call unavailable"
-                : "Call ended";
+                ? "Call failed"
+                : "Disconnected";
   const technicalDetail =
     callDevices?.available === false
       ? (callDevices.errorCode ?? "Device check unavailable")

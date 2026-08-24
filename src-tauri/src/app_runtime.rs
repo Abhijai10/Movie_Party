@@ -29,7 +29,7 @@ use crate::{
         manifest::{build_manifest, MediaManifest},
         player::{
             presentation::PlayerPresentationStatus, LocalPlayer,
-            PlayerSnapshot as LibPlayerSnapshot,
+            PlayerError, PlayerSnapshot as LibPlayerSnapshot,
         },
         stream::range_server::RangeServerHandle,
         transfer::{transfer_progress, TransferProgress},
@@ -1565,7 +1565,7 @@ impl AppRuntime {
                             state.local_participant.media_ready = false;
                             Self::set_player_diagnostic_error(
                                 &mut state,
-                                format!("MP-MEDIA-001 {e}"),
+                                Self::media_load_error_message(&e),
                             );
                         } else {
                             state.player_snapshot = PlayerSnapshot::from(&player.snapshot());
@@ -1579,7 +1579,7 @@ impl AppRuntime {
                             state.local_participant.media_ready = false;
                             Self::set_player_diagnostic_error(
                                 &mut state,
-                                format!("MP-MEDIA-001 {e}"),
+                                Self::media_load_error_message(&e),
                             );
                         } else {
                             state.player_snapshot = PlayerSnapshot::from(&player.snapshot());
@@ -3093,7 +3093,7 @@ impl AppRuntime {
                 state.player_snapshot = PlayerSnapshot::from(&p.snapshot());
             }
             Err(error) => {
-                Self::set_player_command_error(state, format!("MP-MEDIA-006 {error}"));
+                Self::set_player_command_error(state, &error);
             }
         }
     }
@@ -3111,7 +3111,7 @@ impl AppRuntime {
                 state.player_snapshot = PlayerSnapshot::from(&p.snapshot());
             }
             Err(error) => {
-                Self::set_player_command_error(state, format!("MP-MEDIA-006 {error}"));
+                Self::set_player_command_error(state, &error);
             }
         }
     }
@@ -3129,7 +3129,7 @@ impl AppRuntime {
                 state.player_snapshot = PlayerSnapshot::from(&p.snapshot());
             }
             Err(error) => {
-                Self::set_player_command_error(state, format!("MP-MEDIA-006 {error}"));
+                Self::set_player_command_error(state, &error);
             }
         }
     }
@@ -3153,13 +3153,14 @@ impl AppRuntime {
         Self::set_player_diagnostic_error(state, message);
     }
 
-    fn set_player_command_error(state: &mut AppRuntimeState, message: String) {
-        if message.contains("MP-MEDIA-001 libmpv is unavailable")
+    fn set_player_command_error(state: &mut AppRuntimeState, error: &PlayerError) {
+        let message = Self::media_command_error_message(error);
+        if matches!(error, PlayerError::LibMpvUnavailable)
             || state
                 .player_snapshot
                 .error_message
                 .as_deref()
-                .is_some_and(|error| error.contains("MP-MEDIA-001 libmpv is unavailable"))
+                .is_some_and(|error| error.starts_with("MP-MEDIA-001"))
         {
             Self::set_player_diagnostic_error(state, message);
         } else {
@@ -3170,6 +3171,24 @@ impl AppRuntime {
     fn set_player_diagnostic_error(state: &mut AppRuntimeState, message: String) {
         state.player_snapshot.state = "PLAYER_ERROR".to_string();
         state.player_snapshot.error_message = Some(message);
+    }
+
+    fn media_load_error_message(error: &PlayerError) -> String {
+        match error {
+            PlayerError::LibMpvUnavailable | PlayerError::NotReady => {
+                "MP-MEDIA-001 player unavailable".to_string()
+            }
+            _ => "MP-MEDIA-002 media loading failed".to_string(),
+        }
+    }
+
+    fn media_command_error_message(error: &PlayerError) -> String {
+        match error {
+            PlayerError::LibMpvUnavailable | PlayerError::NotReady => {
+                "MP-MEDIA-001 player unavailable".to_string()
+            }
+            _ => "MP-MEDIA-003 playback command failed".to_string(),
+        }
     }
 
     /// M3: Spawn a background task that polls the live player for position,
@@ -3838,7 +3857,7 @@ impl AppRuntime {
                 let mut player = MpvPlayer::new();
                 if let Err(e) = player.open(std::path::Path::new(&media_url)) {
                     state.local_participant.media_ready = false;
-                    Self::set_player_error(&mut state, format!("MP-MEDIA-001 {e}"));
+                    Self::set_player_error(&mut state, Self::media_load_error_message(&e));
                 } else {
                     state.player_snapshot = PlayerSnapshot::from(&player.snapshot());
                 }
@@ -3849,7 +3868,7 @@ impl AppRuntime {
                 let mut player = crate::media::player::LibMpvPlayer::new();
                 if let Err(e) = player.open(std::path::Path::new(&media_url)) {
                     state.local_participant.media_ready = false;
-                    Self::set_player_error(&mut state, format!("MP-MEDIA-001 {e}"));
+                    Self::set_player_error(&mut state, Self::media_load_error_message(&e));
                 } else {
                     state.player_snapshot = PlayerSnapshot::from(&player.snapshot());
                 }
