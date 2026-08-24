@@ -36,6 +36,46 @@ M8: Chrome/player crash watchers not wired
 
 ---
 
+# M6 UI INTEGRATION FIX PASS (2026-08-25)
+
+## Implemented in this pass
+
+- **Create-party source-card state**: unselected source cards now reserve
+  layout space with a transparent border instead of showing a bright outline.
+  Hover keeps the existing glow/elevation only. Selected cards retain the
+  active accent border, glow, and selected indicator.
+- **Cinema button stability**: shared `CinemaButton` controls now use fixed
+  height/width, non-wrapping text, truncation, and non-shrinking icons so the
+  create-room action cannot grow vertically or escape its container when the
+  label changes.
+- **Create-room error visibility**: `create_local_party` / provider launch
+  invoke failures are no longer collapsed to frontend `null` in the create
+  path. Development builds surface the command name plus backend error detail;
+  production keeps the generic user-facing fallback.
+
+## Verification
+
+- `npm run lint` ✅
+- `npm run test` ✅
+- `npm run build` ✅
+- `npm run tauri dev` ✅ launched after local-server permission approval.
+- `cargo test -p move-party --lib dev_loopback_mode_selects_correct_bind_addr` ✅
+  with permission to bind local QUIC endpoints.
+
+## External Verification Pending
+
+- Full manual create-room success requires a usable Tailscale runtime or
+  explicit dev loopback. On this machine, `tailscale status --json` currently
+  fails with `Failed to load preferences`, so production-mode room creation
+  surfaces an `MP-NET-001` Tailscale status failure instead of entering Lobby.
+
+## Known Local Issue
+
+- `cargo fmt --check` currently reports a pre-existing formatting diff in
+  `src-tauri/src/storage/sqlite.rs`; this pass did not modify that file.
+
+---
+
 # M6 FINAL CLOSURE PASS (2026-08-21)
 
 ## Implemented in this pass

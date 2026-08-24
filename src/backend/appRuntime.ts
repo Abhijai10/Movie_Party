@@ -163,7 +163,7 @@ export async function requestEndParty(): Promise<AppSnapshot | null> {
 }
 
 export async function createLocalParty(mediaPath: string | null): Promise<AppSnapshot | null> {
-  return invokeSnapshot("create_local_party", {
+  return invokeSnapshotOrThrow("create_local_party", {
     mediaPath: mediaPath && mediaPath.trim().length > 0 ? mediaPath : null,
   });
 }
@@ -177,7 +177,7 @@ export async function pickMediaFile(): Promise<string | null> {
 }
 
 export async function launchProvider(providerId: string, url: string): Promise<AppSnapshot | null> {
-  return invokeSnapshot("launch_provider", { providerId, url });
+  return invokeSnapshotOrThrow("launch_provider", { providerId, url });
 }
 
 export async function joinParty(inviteCode: string): Promise<AppSnapshot | null> {
@@ -269,8 +269,40 @@ async function invokeSnapshot(
 ): Promise<AppSnapshot | null> {
   try {
     return await invoke<AppSnapshot>(command, args);
-  } catch {
+  } catch (error) {
+    console.error(formatCommandError(command, error), error);
     return null;
+  }
+}
+
+async function invokeSnapshotOrThrow(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<AppSnapshot | null> {
+  try {
+    return await invoke<AppSnapshot>(command, args);
+  } catch (error) {
+    const message = formatCommandError(command, error);
+    console.error(message, error);
+    throw new Error(message);
+  }
+}
+
+function formatCommandError(command: string, error: unknown): string {
+  const detail =
+    typeof error === "string"
+      ? error
+      : error instanceof Error
+        ? error.message
+        : safeStringify(error);
+  return `${command} failed: ${detail || "backend exception"}`;
+}
+
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
   }
 }
 

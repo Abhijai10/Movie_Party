@@ -119,6 +119,9 @@ export function AppShell() {
       applySnapshot(next);
       setLocalScreen(null);
       return true;
+    } catch (error) {
+      setCreateError(createRoomErrorMessage(error));
+      return false;
     } finally {
       setIsCreating(false);
     }
@@ -233,6 +236,16 @@ export function AppShell() {
   }
 
   return <HomeView onCreate={goCreateParty} onJoin={goJoinParty} />;
+}
+
+function createRoomErrorMessage(error: unknown): string {
+  const fallback = "Move Party could not create the room.";
+  if (!developmentPreviewEnabled) {
+    return fallback;
+  }
+
+  const detail = error instanceof Error ? error.message : String(error);
+  return detail && detail !== "undefined" ? detail : fallback;
 }
 
 function providerIdForInput(input: string | null): string | null {

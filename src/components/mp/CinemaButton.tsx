@@ -15,7 +15,7 @@ export const CinemaButton = forwardRef<HTMLButtonElement, CinemaButtonProps>(fun
   ref,
 ) {
   const base =
-    "inline-flex items-center justify-center gap-3 rounded-full px-8 py-3.5 text-sm tracking-[0.16em] uppercase font-medium relative select-none disabled:opacity-40 disabled:cursor-not-allowed";
+    "inline-flex h-12 w-[15rem] max-w-full shrink-0 items-center justify-center gap-3 rounded-full px-8 text-sm tracking-[0.16em] uppercase font-medium relative select-none whitespace-nowrap overflow-hidden disabled:opacity-40 disabled:cursor-not-allowed";
   const styles =
     variant === "primary"
       ? "cinema-btn-primary text-white"
@@ -31,9 +31,9 @@ export const CinemaButton = forwardRef<HTMLButtonElement, CinemaButtonProps>(fun
       type="button"
       {...props}
     >
-      {Icon && iconPos === "left" && <Icon className="w-4 h-4" strokeWidth={1.6} />}
-      <span>{children}</span>
-      {Icon && iconPos === "right" && <Icon className="w-4 h-4" strokeWidth={1.6} />}
+      {Icon && iconPos === "left" && <Icon className="w-4 h-4 shrink-0" strokeWidth={1.6} />}
+      <span className="min-w-0 truncate">{children}</span>
+      {Icon && iconPos === "right" && <Icon className="w-4 h-4 shrink-0" strokeWidth={1.6} />}
     </motion.button>
   );
 });

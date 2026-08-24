@@ -28,7 +28,7 @@ export function SourceCard({
       className={`group relative text-left rounded-2xl p-6 h-[210px] flex flex-col justify-between overflow-hidden transition-colors ${
         active
           ? "border border-[#9F7AEA]/60 bg-[#150F24]"
-          : "border border-white/8 bg-[#0D0B14]/70 hover:border-[#9F7AEA]/40"
+          : "border border-transparent bg-[#0D0B14]/70"
       }`}
       style={{
         backdropFilter: "blur(14px)",

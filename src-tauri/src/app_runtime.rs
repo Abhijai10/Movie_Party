@@ -4185,5 +4185,24 @@ mod tests {
             .unwrap()
             .starts_with("moveparty://join/"));
         r2.leave_party();
+
+        // --- =1 with local media: host room reaches Lobby with manifest ---
+        let dir = std::env::temp_dir().join(uuid::Uuid::now_v7().to_string());
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let movie = dir.join("movie.mkv");
+        std::fs::write(&movie, b"fake movie bytes for manifest").expect("movie file");
+
+        let r3 = AppRuntime::new();
+        let media_snap = r3
+            .create_local_party(Some(movie.to_string_lossy().to_string()))
+            .await
+            .expect("loopback create_local_party with media must succeed");
+        assert_eq!(media_snap.screen, "LOBBY");
+        assert!(media_snap.room.invite_code.is_some());
+        assert!(media_snap.media.is_some());
+        assert_eq!(media_snap.media.as_ref().unwrap().filename, "movie.mkv");
+        assert!(media_snap.participants[0].media_ready);
+        r3.leave_party();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }
