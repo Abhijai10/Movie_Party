@@ -15,7 +15,7 @@ export const CinemaButton = forwardRef<HTMLButtonElement, CinemaButtonProps>(fun
   ref,
 ) {
   const base =
-    "inline-flex h-12 w-[15rem] max-w-full shrink-0 items-center justify-center gap-3 rounded-full px-8 text-sm tracking-[0.16em] uppercase font-medium relative select-none whitespace-nowrap overflow-hidden disabled:opacity-40 disabled:cursor-not-allowed";
+    "inline-flex h-12 max-w-full shrink-0 items-center justify-center gap-3 rounded-full px-7 text-sm tracking-[0.16em] uppercase font-medium relative select-none whitespace-nowrap overflow-hidden disabled:opacity-40 disabled:cursor-not-allowed";
   const styles =
     variant === "primary"
       ? "cinema-btn-primary text-white"

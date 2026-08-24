@@ -73,7 +73,7 @@ export function ReadyCheckView({ snapshot, onStart }: ReadyCheckViewProps) {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.9, delay: 0.1, ease: [0.22, 1, 0.36, 1] }}
-          className="font-serif-display text-white text-[92px] xl:text-[112px] leading-[0.94] tracking-tight mt-6 max-w-4xl"
+          className="font-serif-display text-white text-[60px] xl:text-[76px] leading-[0.96] tracking-tight mt-6 max-w-3xl"
         >
           Getting ready
           <br />
@@ -87,7 +87,7 @@ export function ReadyCheckView({ snapshot, onStart }: ReadyCheckViewProps) {
           className="mt-10 flex items-center gap-4 text-white/70"
         >
           <Film className="w-4 h-4" strokeWidth={1.5} />
-          <span className="font-serif-display text-2xl italic">
+          <span className="font-serif-display text-xl italic max-w-2xl truncate">
             {snapshot.media?.filename ?? snapshot.provider.url ?? "A Private Cinema"}
           </span>
         </motion.div>

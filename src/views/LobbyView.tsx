@@ -101,7 +101,7 @@ export function LobbyView({
           <span className="text-[11px] tracking-[0.32em] uppercase text-white/50">
             Tonight's feature
           </span>
-          <h1 className="font-serif-display text-white text-[68px] leading-[0.96] tracking-tight mt-4">
+          <h1 className="font-serif-display text-white text-[44px] xl:text-[56px] leading-[0.98] tracking-tight mt-4 max-w-3xl">
             {title}
           </h1>
 
@@ -190,10 +190,11 @@ export function LobbyView({
             }}
           >
             <span className="text-[11px] tracking-[0.28em] uppercase text-white/50">Room code</span>
-            <div className="mt-2 flex items-center justify-between">
+            <div className="mt-3 flex items-center justify-between gap-3 min-w-0">
               <span
-                className="font-mono-mp text-white text-3xl tracking-[0.35em]"
+                className="min-w-0 flex-1 truncate font-mono-mp text-white text-sm tracking-[0.12em]"
                 data-testid="lobby-room-code"
+                title={inviteCode}
               >
                 {inviteCode}
               </span>

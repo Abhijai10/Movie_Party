@@ -70,6 +70,8 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
   const microphoneEnabled = snapshot.call.microphone.enabled;
   const callMode = snapshot.call.mode;
   const movieTitle = snapshot.media?.filename ?? snapshot.provider.url ?? "Movie";
+  const playerIsPreparing =
+    snapshot.player.presentation.mode === "UNAVAILABLE" || snapshot.player.state === "STOPPED";
   const peer = snapshot.participants.find((participant) => participant.role !== snapshot.room.role);
   const peerName = peer?.displayName ?? "Peer";
   const encodedDraftLength = useMemo(() => new TextEncoder().encode(draft).length, [draft]);
@@ -316,7 +318,15 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
         <div className="cinema-dot-grid" aria-hidden="true" />
         <div className="movie-frame">
           <div className="movie-light" />
-          <span>{movieTitle}</span>
+          <div className="movie-prep-state" aria-live="polite">
+            <span className="movie-prep-kicker">
+              {playerIsPreparing ? "Preparing playback" : "Now screening"}
+            </span>
+            <h1>{movieTitle}</h1>
+            {playerIsPreparing ? (
+              <p>Setting up the local player and synchronizing the room.</p>
+            ) : null}
+          </div>
           <span className="player-position">
             {formatMs(snapshot.player.positionMs)}
             {snapshot.player.durationMs != null ? ` / ${formatMs(snapshot.player.durationMs)}` : ""}

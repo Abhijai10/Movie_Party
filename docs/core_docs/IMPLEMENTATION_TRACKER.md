@@ -36,6 +36,31 @@ M8: Chrome/player crash watchers not wired
 
 ---
 
+# M6 UI POLISH PASS (2026-08-25)
+
+## Implemented in this pass
+
+- **Create-party action containment**: the prepared action row now uses an
+  internal constrained grid so `CREATE CINEMA ROOM` remains inside the
+  selection card without wrapping.
+- **Laptop-practical typography**: reduced Lobby feature title, invite code,
+  Ready Check cinema heading, Ready Check movie title, and Cinema Mode
+  placeholder title sizing while preserving the cinematic hierarchy.
+- **Cinema preparation state**: Cinema Mode now presents unavailable local
+  player presentation as a graceful playback-preparation state, with no backend
+  or player architecture changes.
+- **Chat overlay styling**: chat now reads as a floating translucent cinema
+  overlay with stronger glass, blur, subtle border, and no full-height side
+  panel feel.
+
+## Verification
+
+- `npm run lint` ✅
+- `npm run test` ✅
+- `npm run build` ✅
+
+---
+
 # M6 UI INTEGRATION FIX PASS (2026-08-25)
 
 ## Implemented in this pass

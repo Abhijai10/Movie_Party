@@ -3356,19 +3356,55 @@ input[type=range].mp-range::-webkit-slider-thumb {
   filter: blur(14px);
 }
 
-.movie-frame > span {
+.movie-prep-state {
   position: absolute;
   left: clamp(18px, 3vw, 40px);
   bottom: clamp(76px, 11vh, 112px);
   z-index: 1;
+  display: grid;
+  gap: 8px;
+  max-width: min(680px, calc(100vw - 72px));
+}
+
+.movie-prep-state h1 {
+  margin: 0;
   font-family: 'Cormorant Garamond', 'Times New Roman', serif;
-  font-size: clamp(2rem, 4.5vw, 4rem);
+  font-size: 3rem;
   font-weight: 500;
-  letter-spacing: -0.02em;
+  line-height: 0.98;
+  letter-spacing: 0;
   text-shadow: 0 3px 24px rgba(0, 0, 0, 0.72);
 }
 
+.movie-prep-state p {
+  max-width: 420px;
+  margin: 0;
+  color: rgba(242, 242, 245, 0.58);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.movie-prep-kicker {
+  color: rgba(242, 242, 245, 0.52);
+  font-size: 0.72rem;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+}
+
+@media (max-width: 900px) {
+  .movie-prep-state h1 {
+    font-size: 2.4rem;
+  }
+}
+
+@media (max-width: 640px) {
+  .movie-prep-state h1 {
+    font-size: 1.9rem;
+  }
+}
+
 .movie-frame .player-position {
+  position: absolute;
   right: clamp(18px, 3vw, 40px);
   bottom: clamp(120px, 15vh, 150px);
   left: auto;
