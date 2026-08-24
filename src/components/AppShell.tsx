@@ -223,6 +223,7 @@ export function AppShell() {
         onReady={goReadyCheck}
         onCinema={goCinema}
         onToggleSharedControls={handleToggleSharedControls}
+        onSnapshot={applySnapshot}
       />
     );
   }

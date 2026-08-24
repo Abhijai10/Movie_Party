@@ -1,11 +1,15 @@
 import { motion } from "framer-motion";
-import { ArrowLeft, ArrowRight, Check, Copy, Film, Users } from "lucide-react";
-import { useState } from "react";
+import { ArrowLeft, ArrowRight, Check, Copy, Film, MessageCircle, Users, Video } from "lucide-react";
+import { useMemo, useState, type SyntheticEvent } from "react";
 import type { AppSnapshot } from "../backend/appRuntime";
+import { sendChatMessage, setCallMode } from "../backend/appRuntime";
+import type { CallMode } from "../call/webrtc";
+import { ChatOverlay } from "../components/mp/ChatOverlay";
 import { CinemaButton } from "../components/mp/CinemaButton";
 import { ParticipantCard } from "../components/mp/ParticipantCard";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
+import { CallTile } from "../overlays/CallTile";
 
 type LobbyViewProps = {
   snapshot: AppSnapshot;
@@ -13,6 +17,7 @@ type LobbyViewProps = {
   onReady: () => void;
   onCinema: () => void;
   onToggleSharedControls: (enabled: boolean) => void;
+  onSnapshot: (snapshot: AppSnapshot | null) => void;
 };
 
 function formatBytes(bytes: number): string {
@@ -27,8 +32,16 @@ export function LobbyView({
   onReady,
   onCinema,
   onToggleSharedControls,
+  onSnapshot,
 }: LobbyViewProps) {
   const [copied, setCopied] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [isCallHidden, setIsCallHidden] = useState(false);
+  const [isCallMinimized, setIsCallMinimized] = useState(false);
+  const [lobbyCallMode, setLobbyCallMode] = useState<CallMode>("OFF");
+  const encodedDraftLength = useMemo(() => new TextEncoder().encode(draft).length, [draft]);
+  const isDraftTooLong = encodedDraftLength > 2_000;
 
   const title = snapshot.media?.filename ?? snapshot.provider.url ?? "A Private Cinema";
   const source =
@@ -50,6 +63,8 @@ export function LobbyView({
   const sharedControls = snapshot.room.sharedControls;
   const host = snapshot.participants.find((participant) => participant.role === "HOST");
   const guest = snapshot.participants.find((participant) => participant.role === "GUEST");
+  const peer = snapshot.participants.find((participant) => participant.role !== snapshot.room.role);
+  const peerName = peer?.displayName ?? guest?.displayName ?? host?.displayName ?? "Movie partner";
   const inviteCode = snapshot.room.inviteCode ?? "••••••";
   const everyoneReady =
     snapshot.participants.length > 0 &&
@@ -67,6 +82,25 @@ export function LobbyView({
     } catch {
       /* clipboard unavailable */
     }
+  };
+
+  const sendLobbyMessage = (event: SyntheticEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (draft.trim().length === 0 || isDraftTooLong) {
+      return;
+    }
+
+    void sendChatMessage(draft.trim()).then((next) => {
+      if (next) {
+        onSnapshot(next);
+        setDraft("");
+      }
+    });
+  };
+
+  const chooseLobbyCallMode = (mode: CallMode) => {
+    setLobbyCallMode(mode);
+    void setCallMode(mode).then(onSnapshot);
   };
 
   return (
@@ -270,6 +304,70 @@ export function LobbyView({
           </div>
         </motion.section>
       </main>
+
+      <div className="lobby-social-dock" aria-label="Lobby social controls">
+        <button
+          type="button"
+          onClick={() => {
+            setIsChatOpen((current) => !current);
+          }}
+          className={isChatOpen ? "is-active" : ""}
+          data-testid="lobby-chat-btn"
+          aria-label="Toggle lobby chat"
+        >
+          <MessageCircle className="w-4 h-4" strokeWidth={1.7} />
+          Chat
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setIsCallHidden(false);
+            setIsCallMinimized(false);
+          }}
+          data-testid="lobby-call-btn"
+          aria-label="Show lobby call"
+        >
+          <Video className="w-4 h-4" strokeWidth={1.7} />
+          Call
+        </button>
+      </div>
+
+      <ChatOverlay
+        snapshot={snapshot}
+        draft={draft}
+        isComposing={isChatOpen}
+        isHistoryOpen={isChatOpen}
+        isDraftTooLong={isDraftTooLong}
+        onDraftChange={setDraft}
+        onSubmit={sendLobbyMessage}
+        onCloseCompose={() => {
+          setIsChatOpen(false);
+        }}
+        onCloseHistory={() => {
+          setIsChatOpen(false);
+        }}
+      />
+
+      <CallTile
+        peerName={peerName}
+        callMode={lobbyCallMode}
+        callStatus={snapshot.call.status}
+        cameraEnabled={false}
+        microphoneEnabled={false}
+        callDevices={null}
+        isMinimized={isCallMinimized}
+        isHidden={isCallHidden}
+        onRestore={() => {
+          setIsCallHidden(false);
+        }}
+        onToggleMinimized={() => {
+          setIsCallMinimized((current) => !current);
+        }}
+        onHide={() => {
+          setIsCallHidden(true);
+        }}
+        onChooseCallMode={chooseLobbyCallMode}
+      />
     </div>
   );
 }

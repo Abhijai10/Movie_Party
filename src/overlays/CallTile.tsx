@@ -1,5 +1,6 @@
 import type { CallDeviceInventory } from "../call/mediaDevices";
 import type { CallMode } from "../call/webrtc";
+import { Maximize2, Mic, MicOff, Minus, PhoneOff, Video, VideoOff, X } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -44,6 +45,24 @@ export function CallTile({
     y: 32,
   }));
   const [isDragging, setIsDragging] = useState(false);
+  const statusLabel =
+    callMode === "OFF"
+      ? "Call off"
+      : callStatus === "connected"
+        ? "Connected"
+        : callStatus === "connecting"
+          ? "Connecting"
+          : callStatus === "reconnecting"
+            ? "Reconnecting"
+            : callStatus === "degraded"
+              ? "Call degraded"
+              : callStatus === "unavailable"
+                ? "Call unavailable"
+                : "Call ended";
+  const technicalDetail =
+    callDevices?.available === false
+      ? (callDevices.errorCode ?? "Device check unavailable")
+      : `Camera ${cameraEnabled ? "on" : "off"} · Mic ${microphoneEnabled ? "on" : "muted"}`;
 
   const clampPosition = useCallback((x: number, y: number) => {
     const rect = tileRef.current?.getBoundingClientRect();
@@ -118,29 +137,63 @@ export function CallTile({
       onPointerCancel={stopDrag}
     >
       <div className="camera-card-header">
-        <strong>{peerName}</strong>
+        <div>
+          <strong>{peerName}</strong>
+          <span>{statusLabel}</span>
+        </div>
         <div>
           <button
             type="button"
             onClick={onToggleMinimized}
             aria-label={isMinimized ? "Expand camera card" : "Minimize camera card"}
           >
-            {isMinimized ? "Expand" : "Min"}
+            {isMinimized ? (
+              <Maximize2 className="w-3.5 h-3.5" strokeWidth={1.7} />
+            ) : (
+              <Minus className="w-3.5 h-3.5" strokeWidth={1.7} />
+            )}
           </button>
           <button type="button" onClick={onHide} aria-label="Hide camera card">
-            Hide
+            <X className="w-3.5 h-3.5" strokeWidth={1.7} />
           </button>
         </div>
       </div>
-      <span>
-        {callMode === "OFF"
-          ? "Call off"
-          : `Call ${callStatus} - Camera ${cameraEnabled ? "on" : "off"} - Mic ${
-              microphoneEnabled ? "on" : "muted"
-            }`}
-      </span>
+      <div className="camera-video-stage">
+        {cameraEnabled && callMode === "VIDEO_VOICE" ? (
+          <div className="camera-video-placeholder">
+            <Video className="w-7 h-7" strokeWidth={1.4} />
+          </div>
+        ) : (
+          <div className="camera-avatar" aria-hidden="true">
+            {peerName
+              .split(" ")
+              .map((part) => part[0])
+              .join("")
+              .slice(0, 2)
+              .toUpperCase() || "MP"}
+          </div>
+        )}
+      </div>
       {isMinimized ? null : (
         <>
+          <div className="call-quick-state">
+            <span>
+              {cameraEnabled ? (
+                <Video className="w-3.5 h-3.5" strokeWidth={1.7} />
+              ) : (
+                <VideoOff className="w-3.5 h-3.5" strokeWidth={1.7} />
+              )}
+              Camera {cameraEnabled ? "on" : "off"}
+            </span>
+            <span>
+              {microphoneEnabled ? (
+                <Mic className="w-3.5 h-3.5" strokeWidth={1.7} />
+              ) : (
+                <MicOff className="w-3.5 h-3.5" strokeWidth={1.7} />
+              )}
+              Mic {microphoneEnabled ? "on" : "muted"}
+            </span>
+          </div>
           <div className="call-mode-row" aria-label="Call mode">
             <button
               type="button"
@@ -167,13 +220,14 @@ export function CallTile({
                 onChooseCallMode("OFF");
               }}
             >
+              <PhoneOff className="w-3.5 h-3.5" strokeWidth={1.7} />
               Off
             </button>
           </div>
           <small>
             {callDevices?.available
               ? `${String(callDevices.cameras.length)} camera(s), ${String(callDevices.microphones.length)} mic(s)`
-              : (callDevices?.errorCode ?? "Checking devices...")}
+              : technicalDetail}
           </small>
         </>
       )}

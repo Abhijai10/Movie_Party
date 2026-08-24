@@ -137,6 +137,21 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
     };
   }, []);
 
+  useEffect(() => {
+    if (isPrivacyMode || (!isComposing && !isHistoryOpen) || draft.trim().length > 0) {
+      return;
+    }
+
+    const inactivityTimer = window.setTimeout(() => {
+      setIsComposing(false);
+      setIsHistoryOpen(false);
+    }, 8_000);
+
+    return () => {
+      window.clearTimeout(inactivityTimer);
+    };
+  }, [draft, isComposing, isHistoryOpen, isPrivacyMode, snapshot.chat.length]);
+
   const revealControls = (event?: MouseEvent<HTMLElement>) => {
     setControlsVisible(true);
     if (event && !prefersReducedMotion) {

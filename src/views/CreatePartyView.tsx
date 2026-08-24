@@ -364,14 +364,14 @@ export function CreatePartyView({
                 <span className="text-[11px] tracking-[0.24em] uppercase text-white/40 truncate">
                   Your screening is ready to open
                 </span>
-                <div className="grid grid-cols-[minmax(6.75rem,0.78fr)_minmax(0,1.22fr)] gap-3 min-w-0">
+                <div className="grid grid-cols-1 sm:grid-cols-[minmax(7.75rem,0.72fr)_minmax(12rem,1.28fr)] gap-3 min-w-0">
                   <CinemaButton
                     variant="ghost"
                     disabled={isCreating}
                     onClick={() => {
                       setPreparing(false);
                     }}
-                    className="w-full px-4"
+                    className="w-full"
                   >
                     Change
                   </CinemaButton>
@@ -379,7 +379,7 @@ export function CreatePartyView({
                     onClick={create}
                     disabled={isCreating}
                     icon={isCreating ? Loader2 : ArrowRight}
-                    className={`w-full px-4 ${isCreating ? "[&_svg]:animate-spin" : ""}`}
+                    className={`w-full ${isCreating ? "[&_svg]:animate-spin" : ""}`}
                     data-testid="create-room-btn"
                   >
                     {isCreating ? "Creating" : "Create cinema room"}
