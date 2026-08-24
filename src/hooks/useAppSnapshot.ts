@@ -1,8 +1,4 @@
-import {
-  getAppSnapshot,
-  listenToSnapshots,
-  type AppSnapshot,
-} from "../backend/appRuntime";
+import { getAppSnapshot, listenToSnapshots, type AppSnapshot } from "../backend/appRuntime";
 import { type UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 

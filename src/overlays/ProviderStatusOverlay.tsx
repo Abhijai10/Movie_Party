@@ -16,7 +16,9 @@ export function ProviderStatusOverlay({ snapshot }: ProviderStatusOverlayProps) 
   return (
     <section className="presentation-overlay" aria-live="polite">
       <h2>
-        {presentation.mode === "UNAVAILABLE" ? "Player unavailable" : "Player controlled outside the app"}
+        {presentation.mode === "UNAVAILABLE"
+          ? "Player unavailable"
+          : "Player controlled outside the app"}
       </h2>
       <p>{presentation.message}</p>
       <small>{presentation.bridge}</small>

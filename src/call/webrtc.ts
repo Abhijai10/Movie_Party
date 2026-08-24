@@ -8,12 +8,7 @@ export type MovePartyCallSignal = {
 };
 
 export type CallConnectionStatus =
-  | "connecting"
-  | "connected"
-  | "degraded"
-  | "reconnecting"
-  | "unavailable"
-  | "ended";
+  "connecting" | "connected" | "degraded" | "reconnecting" | "unavailable" | "ended";
 
 export type CallMediaIntent = {
   audio: boolean;
@@ -323,6 +318,7 @@ async function waitForConnected(
 
   await new Promise<void>((resolve) => {
     let settled = false;
+    // eslint-disable-next-line prefer-const -- esbuild rejects uninitialized const
     let check: () => void;
     const cleanup = () => {
       host.removeEventListener("connectionstatechange", check);
@@ -373,6 +369,7 @@ async function waitForIceComplete(
 
   await new Promise<void>((resolve) => {
     let settled = false;
+    // eslint-disable-next-line prefer-const -- esbuild rejects uninitialized const
     let check: () => void;
     const cleanup = () => {
       connection.removeEventListener("icegatheringstatechange", check);

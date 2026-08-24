@@ -18,6 +18,7 @@ src-tauri/gen/
 
 # macOS
 .DS_Store
+._*
 
 # IDE
 .vscode/

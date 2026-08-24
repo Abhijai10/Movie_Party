@@ -3,15 +3,14 @@ type LoadingStateProps = {
   message: string;
 };
 
-import { CinematicBackdrop } from "./CinematicBackdrop";
-
 export function LoadingState({ title, message }: LoadingStateProps) {
   return (
-    <main className="app-shell centered-shell">
-      <CinematicBackdrop />
-      <section className="setup-panel" aria-labelledby="loading-title">
+    <main className="centered-shell">
+      <section className="modal-panel" style={{ maxWidth: 420 }} aria-labelledby="loading-title">
         <h1 id="loading-title">{title}</h1>
-        <p className="panel-copy">{message}</p>
+        <div className="modal-body">
+          <p>{message}</p>
+        </div>
       </section>
     </main>
   );

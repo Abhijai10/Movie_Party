@@ -1,5 +1,4 @@
 import { Button } from "../components/Button";
-import { Modal } from "../components/Modal";
 
 type EndPartyConfirmViewProps = {
   onCancel: () => void;
@@ -8,20 +7,23 @@ type EndPartyConfirmViewProps = {
 
 export function EndPartyConfirmView({ onCancel, onConfirm }: EndPartyConfirmViewProps) {
   return (
-    <Modal
-      title="End Move Party for everyone?"
-      actions={
-        <>
+    <main className="centered-shell">
+      <section className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="end-title">
+        <h1 id="end-title">End Move Party for everyone?</h1>
+        <div className="modal-body">
+          <p>
+            The movie will stop for both participants and the cached file choice will be shown next.
+          </p>
+        </div>
+        <div className="action-row">
           <Button variant="secondary" onClick={onCancel}>
             Cancel
           </Button>
           <Button variant="danger" onClick={onConfirm}>
             End Party
           </Button>
-        </>
-      }
-    >
-      <p>The movie will stop for both participants and the cached file choice will be shown next.</p>
-    </Modal>
+        </div>
+      </section>
+    </main>
   );
 }

@@ -20,9 +20,13 @@ import { JoinPartyView } from "../views/JoinPartyView";
 import { LobbyView } from "../views/LobbyView";
 import { ReadyCheckView } from "../views/ReadyCheckView";
 import { LoadingState } from "./LoadingState";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 type LocalScreen = "CREATE_PARTY" | null;
+type DevScreen = "HOME" | "CREATE" | "JOIN" | "LOBBY" | "READY" | "CINEMA" | null;
+const developmentPreviewEnabled =
+  typeof window !== "undefined" &&
+  (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
 
 export function AppShell() {
   const { snapshot, setSnapshot } = useAppSnapshot();
@@ -31,6 +35,27 @@ export function AppShell() {
   const [isJoining, setIsJoining] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [joinError, setJoinError] = useState<string | null>(null);
+  const [devScreen, setDevScreen] = useState<DevScreen>(null);
+
+  useEffect(() => {
+    if (!developmentPreviewEnabled) return;
+    const handlePreviewKey = (event: KeyboardEvent) => {
+      if (!event.altKey || event.key < "1" || event.key > "6") return;
+      const screens: Exclude<DevScreen, null>[] = [
+        "HOME",
+        "CREATE",
+        "JOIN",
+        "LOBBY",
+        "READY",
+        "CINEMA",
+      ];
+      setDevScreen(screens[Number(event.key) - 1] ?? null);
+    };
+    window.addEventListener("keydown", handlePreviewKey);
+    return () => {
+      window.removeEventListener("keydown", handlePreviewKey);
+    };
+  }, []);
 
   const applySnapshot = (next: AppSnapshot | null) => {
     if (next) {
@@ -39,6 +64,7 @@ export function AppShell() {
   };
 
   const goHome = () => {
+    setDevScreen(null);
     setLocalScreen(null);
     setCreateError(null);
     setJoinError(null);
@@ -46,6 +72,7 @@ export function AppShell() {
   };
 
   const goCreateParty = () => {
+    setDevScreen(null);
     setCreateError(null);
     setLocalScreen("CREATE_PARTY");
   };
@@ -98,6 +125,7 @@ export function AppShell() {
   };
 
   const goJoinParty = () => {
+    setDevScreen(null);
     setLocalScreen(null);
     setJoinError(null);
     void showJoinParty().then(applySnapshot);
@@ -152,14 +180,13 @@ export function AppShell() {
 
   if (!snapshot) {
     return (
-      <LoadingState
-        title="Starting Move Party"
-        message="Connecting to the local app runtime."
-      />
+      <LoadingState title="Starting Move Party" message="Connecting to the local app runtime." />
     );
   }
 
-  if (localScreen === "CREATE_PARTY") {
+  if (devScreen === "HOME") return <HomeView onCreate={goCreateParty} onJoin={goJoinParty} />;
+
+  if (localScreen === "CREATE_PARTY" || devScreen === "CREATE") {
     return (
       <CreatePartyView
         isCreating={isCreating}
@@ -170,10 +197,9 @@ export function AppShell() {
     );
   }
 
-  if (snapshot.screen === "JOIN_PARTY") {
+  if (snapshot.screen === "JOIN_PARTY" || devScreen === "JOIN") {
     return (
       <JoinPartyView
-        snapshot={snapshot}
         isJoining={isJoining}
         error={joinError ?? snapshot.error}
         onBack={goHome}
@@ -182,7 +208,7 @@ export function AppShell() {
     );
   }
 
-  if (snapshot.screen === "LOBBY") {
+  if (snapshot.screen === "LOBBY" || devScreen === "LOBBY") {
     return (
       <LobbyView
         snapshot={snapshot}
@@ -194,21 +220,16 @@ export function AppShell() {
     );
   }
 
-  if (snapshot.screen === "READY_CHECK") {
+  if (snapshot.screen === "READY_CHECK" || devScreen === "READY") {
     return <ReadyCheckView snapshot={snapshot} onStart={goCinema} />;
   }
 
-  if (snapshot.screen === "CINEMA") {
+  if (snapshot.screen === "CINEMA" || devScreen === "CINEMA") {
     return <CinemaView snapshot={snapshot} onSnapshot={setSnapshot} onLeave={requestPartyEnd} />;
   }
 
   if (snapshot.screen === "PARTY_END_CONFIRM") {
-    return (
-      <EndPartyConfirmView
-        onCancel={goCinema}
-        onConfirm={confirmEndParty}
-      />
-    );
+    return <EndPartyConfirmView onCancel={goCinema} onConfirm={confirmEndParty} />;
   }
 
   return <HomeView onCreate={goCreateParty} onJoin={goJoinParty} />;

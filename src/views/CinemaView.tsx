@@ -15,15 +15,18 @@ import {
   submitCallSignal,
   type AppSnapshot,
 } from "../backend/appRuntime";
-import { ControlDock } from "../components/ControlDock";
-import { BufferingOverlay } from "../overlays/BufferingOverlay";
 import { CallTile } from "../overlays/CallTile";
-import { ChatOverlay } from "../overlays/ChatOverlay";
+import { BufferingOverlay } from "../overlays/BufferingOverlay";
 import { ProviderStatusOverlay } from "../overlays/ProviderStatusOverlay";
 import { FloatingReactions, ReactionTray } from "../overlays/ReactionTray";
 import { ReconnectOverlay } from "../overlays/ReconnectOverlay";
-import type { SyntheticEvent } from "react";
+import { ChatOverlay } from "../components/mp/ChatOverlay";
+import { CinemaControls } from "../components/mp/CinemaControls";
+import { SilkBackground } from "../components/mp/SilkBackground";
+import { StatusIndicator } from "../components/mp/StatusIndicator";
+import type { MouseEvent, SyntheticEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useReducedMotion } from "../hooks/useReducedMotion";
 
 type CinemaViewProps = {
   snapshot: AppSnapshot;
@@ -56,6 +59,7 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
   const [isCameraCardHidden, setIsCameraCardHidden] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [privacyNotice, setPrivacyNotice] = useState("");
+  const prefersReducedMotion = useReducedMotion();
   const callSessionKey = useRef("");
   const controlsTimer = useRef<number | null>(null);
   const isGhostMode = snapshot.ghostMode;
@@ -92,8 +96,19 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
     };
   }, [isComposing, isHistoryOpen, isPrivacyMode, controlsVisible]);
 
-  const revealControls = () => {
+  const revealControls = (event?: MouseEvent<HTMLElement>) => {
     setControlsVisible(true);
+    if (event && !prefersReducedMotion) {
+      const bounds = event.currentTarget.getBoundingClientRect();
+      event.currentTarget.style.setProperty(
+        "--cinema-pointer-x",
+        `${String(event.clientX - bounds.left)}px`,
+      );
+      event.currentTarget.style.setProperty(
+        "--cinema-pointer-y",
+        `${String(event.clientY - bounds.top)}px`,
+      );
+    }
   };
 
   useEffect(() => {
@@ -283,6 +298,7 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
 
   return (
     <main className="cinema-shell" aria-label="Cinema mode">
+      <SilkBackground variant="dim" />
       <section
         className={[
           "movie-surface",
@@ -293,21 +309,30 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
           .join(" ")}
         aria-label="Movie"
         onMouseMove={revealControls}
-        onFocus={revealControls}
+        onFocus={() => {
+          revealControls();
+        }}
       >
+        <div className="cinema-dot-grid" aria-hidden="true" />
         <div className="movie-frame">
           <div className="movie-light" />
           <span>{movieTitle}</span>
           <span className="player-position">
             {formatMs(snapshot.player.positionMs)}
-            {snapshot.player.durationMs != null
-              ? ` / ${formatMs(snapshot.player.durationMs)}`
-              : ""}
+            {snapshot.player.durationMs != null ? ` / ${formatMs(snapshot.player.durationMs)}` : ""}
             {snapshot.player.state === "BUFFERING" && " (Buffering...)"}
             {snapshot.player.errorMessage && (
               <span className="player-error">{snapshot.player.errorMessage}</span>
             )}
           </span>
+        </div>
+        <div className="sync-indicator" aria-live="polite">
+          <span aria-hidden="true" />
+          {snapshot.sync.roomState === "PLAYING" ? (
+            <StatusIndicator state="sync" label="In sync" showLabel={false} />
+          ) : (
+            <StatusIndicator state="waiting" label="Syncing" showLabel={false} />
+          )}
         </div>
         <CallTile
           peerName={peerName}
@@ -362,12 +387,11 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
           </div>
         ) : null}
         <ReactionTray warning={reactionWarning} onSendReaction={sendReaction} />
-        <ControlDock
-          isHost={isHost}
-          sharedControls={sharedControls}
+        <CinemaControls
+          visible={controlsVisible}
           isPlaying={snapshot.sync.roomState === "PLAYING"}
-          microphoneEnabled={microphoneEnabled}
-          cameraEnabled={cameraEnabled}
+          currentMs={snapshot.player.positionMs}
+          durationMs={snapshot.player.durationMs}
           onSeekRelative={(deltaMs) => {
             void seekRelative(deltaMs).then((next) => {
               if (next) {
@@ -383,6 +407,7 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
               }
             });
           }}
+          microphoneEnabled={microphoneEnabled}
           onToggleMicrophone={() => {
             void setMicrophoneEnabled(!microphoneEnabled).then((next) => {
               if (next) {
@@ -390,6 +415,7 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
               }
             });
           }}
+          cameraEnabled={cameraEnabled}
           onToggleCamera={() => {
             void setCameraEnabled(!cameraEnabled).then((next) => {
               if (next) {
@@ -398,12 +424,15 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
               }
             });
           }}
-          onOpenChat={() => {
-            setIsComposing(true);
+          chatOpen={isComposing || isHistoryOpen}
+          onToggleChat={() => {
+            setIsComposing((current) => !current);
           }}
-          onReact={() => {
+          onSendReaction={() => {
             sendReaction("👏");
           }}
+          isHost={isHost}
+          sharedControls={sharedControls}
           onToggleSharedControls={() => {
             void setSharedControls(!sharedControls).then((next) => {
               if (next) {
