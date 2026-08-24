@@ -70,8 +70,11 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
   const microphoneEnabled = snapshot.call.microphone.enabled;
   const callMode = snapshot.call.mode;
   const movieTitle = snapshot.media?.filename ?? snapshot.provider.url ?? "Movie";
+  const playerHasFailed = snapshot.player.state === "PLAYER_ERROR";
   const playerIsPreparing =
-    snapshot.player.presentation.mode === "UNAVAILABLE" || snapshot.player.state === "STOPPED";
+    playerHasFailed ||
+    snapshot.player.presentation.mode === "UNAVAILABLE" ||
+    snapshot.player.state === "STOPPED";
   const peer = snapshot.participants.find((participant) => participant.role !== snapshot.room.role);
   const peerName = peer?.displayName ?? "Peer";
   const encodedDraftLength = useMemo(() => new TextEncoder().encode(draft).length, [draft]);
@@ -320,10 +323,16 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
           <div className="movie-light" />
           <div className="movie-prep-state" aria-live="polite">
             <span className="movie-prep-kicker">
-              {playerIsPreparing ? "Preparing playback" : "Now screening"}
+              {playerHasFailed
+                ? "Playback unavailable"
+                : playerIsPreparing
+                  ? "Preparing playback"
+                  : "Now screening"}
             </span>
             <h1>{movieTitle}</h1>
-            {playerIsPreparing ? (
+            {playerHasFailed ? (
+              <p>The local player reported an error. Playback is paused for the room.</p>
+            ) : playerIsPreparing ? (
               <p>Setting up the local player and synchronizing the room.</p>
             ) : null}
           </div>

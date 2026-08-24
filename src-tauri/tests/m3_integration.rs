@@ -512,11 +512,22 @@ async fn test_17_appruntime_player_dispatch() {
 
     // Player snapshot should reflect initial state
     let player_state = &snap.player.state;
-    assert!(
-        player_state == "READY" || player_state == "STOPPED",
-        "expected READY or STOPPED, got: {}",
-        player_state
-    );
+    if player_state == "PLAYER_ERROR" {
+        assert!(
+            snap.player
+                .error_message
+                .as_deref()
+                .is_some_and(|error| error.contains("MP-MEDIA-001 libmpv is unavailable")),
+            "PLAYER_ERROR must carry the stable libmpv diagnostic; got: {:?}",
+            snap.player.error_message
+        );
+    } else {
+        assert!(
+            player_state == "READY" || player_state == "STOPPED",
+            "expected READY, STOPPED, or diagnostic PLAYER_ERROR, got: {}",
+            player_state
+        );
+    }
 
     // Pause should not error even if player is not playing
     runtime.pause_playback();

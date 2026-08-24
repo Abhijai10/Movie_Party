@@ -121,6 +121,26 @@ unsafe fn mpv_set_option(
     }
 }
 
+/// Convert an mpv return code into the stable player error contract.
+///
+/// Runtime dependency note: this backend is compiled only with the `mpv`
+/// feature, but the libmpv shared library must still be present at runtime.
+/// Missing libraries map to `MP-MEDIA-001`; command/property failures map to
+/// `MP-MEDIA-006` instead of being silently ignored.
+unsafe fn mpv_result(result: c_int, fns: &MpvFns, fallback: &str) -> Result<(), PlayerError> {
+    if result == MPV_ERROR_SUCCESS {
+        return Ok(());
+    }
+
+    let error_str = (fns.mpv_error_string)(result);
+    let message = if error_str.is_null() {
+        fallback.to_string()
+    } else {
+        CStr::from_ptr(error_str).to_string_lossy().into_owned()
+    };
+    Err(PlayerError::PlaybackError { message })
+}
+
 // ── MpvPlayer ────────────────────────────────────────────────────────────────
 
 /// Real libmpv player backend using dynamic loading.
@@ -407,12 +427,16 @@ impl LocalPlayer for MpvPlayer {
         let pause_false = CString::new("false").unwrap();
         let pause_name = CString::new("pause").unwrap();
         unsafe {
-            let _ = (fns.mpv_set_property)(
-                handle,
-                pause_name.as_ptr(),
-                MPV_FORMAT_STRING,
-                pause_false.as_ptr() as *const c_void,
-            );
+            mpv_result(
+                (fns.mpv_set_property)(
+                    handle,
+                    pause_name.as_ptr(),
+                    MPV_FORMAT_STRING,
+                    pause_false.as_ptr() as *const c_void,
+                ),
+                fns,
+                "failed to start playback",
+            )?;
             // Wait for play event
             (fns.mpv_wait_event)(handle, 0.05);
         }
@@ -425,12 +449,16 @@ impl LocalPlayer for MpvPlayer {
         let pause_true = CString::new("true").unwrap();
         let pause_name = CString::new("pause").unwrap();
         unsafe {
-            let _ = (fns.mpv_set_property)(
-                handle,
-                pause_name.as_ptr(),
-                MPV_FORMAT_STRING,
-                pause_true.as_ptr() as *const c_void,
-            );
+            mpv_result(
+                (fns.mpv_set_property)(
+                    handle,
+                    pause_name.as_ptr(),
+                    MPV_FORMAT_STRING,
+                    pause_true.as_ptr() as *const c_void,
+                ),
+                fns,
+                "failed to pause playback",
+            )?;
             (fns.mpv_wait_event)(handle, 0.05);
         }
         self.snapshot.state = PlayerState::Paused;
@@ -450,7 +478,11 @@ impl LocalPlayer for MpvPlayer {
             ptr::null(),
         ];
         unsafe {
-            let _ = (fns.mpv_command)(handle, args.as_ptr());
+            mpv_result(
+                (fns.mpv_command)(handle, args.as_ptr()),
+                fns,
+                "failed to seek playback",
+            )?;
             (fns.mpv_wait_event)(handle, 0.05);
         }
         self.snapshot.position_ms = position_ms;
@@ -463,12 +495,16 @@ impl LocalPlayer for MpvPlayer {
         let vol_str = CString::new(format!("{vol:.0}")).unwrap();
         let vol_name = CString::new("volume").unwrap();
         unsafe {
-            let _ = (fns.mpv_set_property)(
-                handle,
-                vol_name.as_ptr(),
-                MPV_FORMAT_STRING,
-                vol_str.as_ptr() as *const c_void,
-            );
+            mpv_result(
+                (fns.mpv_set_property)(
+                    handle,
+                    vol_name.as_ptr(),
+                    MPV_FORMAT_STRING,
+                    vol_str.as_ptr() as *const c_void,
+                ),
+                fns,
+                "failed to set volume",
+            )?;
         }
         self.snapshot.volume = volume;
         Ok(())
@@ -480,12 +516,16 @@ impl LocalPlayer for MpvPlayer {
         let rate_str = CString::new(format!("{rate}")).unwrap();
         let speed_name = CString::new("speed").unwrap();
         unsafe {
-            let _ = (fns.mpv_set_property)(
-                handle,
-                speed_name.as_ptr(),
-                MPV_FORMAT_STRING,
-                rate_str.as_ptr() as *const c_void,
-            );
+            mpv_result(
+                (fns.mpv_set_property)(
+                    handle,
+                    speed_name.as_ptr(),
+                    MPV_FORMAT_STRING,
+                    rate_str.as_ptr() as *const c_void,
+                ),
+                fns,
+                "failed to set playback rate",
+            )?;
         }
         self.snapshot.playback_rate = rate;
         Ok(())

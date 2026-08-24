@@ -1562,7 +1562,11 @@ impl AppRuntime {
                     {
                         let mut player = MpvPlayer::new();
                         if let Err(e) = player.open(path) {
-                            state.error = Some(format!("MP-MEDIA-001 {e}"));
+                            state.local_participant.media_ready = false;
+                            Self::set_player_diagnostic_error(
+                                &mut state,
+                                format!("MP-MEDIA-001 {e}"),
+                            );
                         } else {
                             state.player_snapshot = PlayerSnapshot::from(&player.snapshot());
                         }
@@ -1572,7 +1576,11 @@ impl AppRuntime {
                     {
                         let mut player = crate::media::player::LibMpvPlayer::new();
                         if let Err(e) = player.open(path) {
-                            state.error = Some(format!("MP-MEDIA-001 {e}"));
+                            state.local_participant.media_ready = false;
+                            Self::set_player_diagnostic_error(
+                                &mut state,
+                                format!("MP-MEDIA-001 {e}"),
+                            );
                         } else {
                             state.player_snapshot = PlayerSnapshot::from(&player.snapshot());
                         }
@@ -1776,7 +1784,11 @@ impl AppRuntime {
                 // Mirror the coordinator: a reconnecting room must NOT jump to
                 // LOBBY and resume blindly — the room stays RECONNECTING until
                 // the host runs a fresh play protocol cycle.
-                let room_state = state.sync_coordinator.lock().unwrap().room_state;
+                let room_state = state
+                    .sync_coordinator
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .room_state;
                 state.room_state = room_state;
                 sync_room_snapshot(&mut state);
                 let snapshot = snapshot_from_state(&state);
@@ -1897,7 +1909,7 @@ impl AppRuntime {
             let scheduled = state
                 .sync_coordinator
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .pending_scheduled
                 .clone();
             let Some(scheduled) = scheduled else { return };
@@ -1907,7 +1919,7 @@ impl AppRuntime {
             let _ = state
                 .sync_coordinator
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .commit_play(&scheduled);
             state.sync.position_ms = target;
             state.sync.strict_sync_paused = false;
@@ -1915,7 +1927,11 @@ impl AppRuntime {
             state.pending_operation_kind = None;
             state.last_committed_operation_id = Some(op_id);
             state.commit_scheduled_for = None;
-            let room_state = state.sync_coordinator.lock().unwrap().room_state;
+            let room_state = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .room_state;
             state.room_state = room_state;
             // M3: dispatch to live player
             Self::dispatch_player_play(&mut state);
@@ -1965,16 +1981,24 @@ impl AppRuntime {
             state
                 .sync_coordinator
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .commit_pause(target, PauseCause::Manual);
             state.sync.position_ms = target;
-            let strict_sync_paused = state.sync_coordinator.lock().unwrap().paused_by_strict_sync;
+            let strict_sync_paused = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .paused_by_strict_sync;
             state.sync.strict_sync_paused = strict_sync_paused;
             state.pending_operation_id = None;
             state.pending_operation_kind = None;
             state.last_committed_operation_id = Some(op_id);
             state.commit_scheduled_for = None;
-            let room_state = state.sync_coordinator.lock().unwrap().room_state;
+            let room_state = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .room_state;
             state.room_state = room_state;
             // M3: dispatch to live player
             Self::dispatch_player_pause(&mut state);
@@ -2027,7 +2051,7 @@ impl AppRuntime {
                 state
                     .sync_coordinator
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .commit_seek(target, resume_after_seek);
                 state.sync.position_ms = target;
                 state.sync.strict_sync_paused = !resume_after_seek;
@@ -2035,7 +2059,11 @@ impl AppRuntime {
                 state.pending_operation_kind = None;
                 state.last_committed_operation_id = Some(op_id);
                 state.commit_scheduled_for = None;
-                let room_state = state.sync_coordinator.lock().unwrap().room_state;
+                let room_state = state
+                    .sync_coordinator
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .room_state;
                 state.room_state = room_state;
                 // M3: dispatch to live player
                 Self::dispatch_player_seek(&mut state, target);
@@ -2134,7 +2162,11 @@ impl AppRuntime {
         }
         state.network.connected = false;
         state.network.path = "Peer disconnected".to_string();
-        let _ = state.sync_coordinator.lock().unwrap().peer_disconnected();
+        let _ = state
+            .sync_coordinator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .peer_disconnected();
         state.sync.strict_sync_paused = true;
         // Abort any in-flight operation: a disconnected guest cannot answer
         // READY, so the pending operation must not commit half-way.
@@ -2152,7 +2184,11 @@ impl AppRuntime {
             pauses_playback_for_both: plan.pauses_playback_for_both,
             requires_user_action: plan.requires_user_action,
         });
-        let room_state = state.sync_coordinator.lock().unwrap().room_state;
+        let room_state = state
+            .sync_coordinator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .room_state;
         state.room_state = room_state;
         sync_room_snapshot(&mut state);
         let snapshot = snapshot_from_state(&state);
@@ -2187,12 +2223,16 @@ impl AppRuntime {
                     <= state
                         .sync_coordinator
                         .lock()
-                        .unwrap()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .last_peer_seq_received()
                 {
                     return;
                 }
-                state.sync_coordinator.lock().unwrap().record_peer_seq(seq);
+                state
+                    .sync_coordinator
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .record_peer_seq(seq);
             }
 
             // The host orchestrates its own protocol operations directly
@@ -2271,7 +2311,7 @@ impl AppRuntime {
                         let _ = state
                             .sync_coordinator
                             .lock()
-                            .unwrap()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
                             .commit_play(&scheduled);
                         state.sync.position_ms = target_position_ms;
                         state.sync.strict_sync_paused = false;
@@ -2279,7 +2319,11 @@ impl AppRuntime {
                         state.pending_operation_kind = None;
                         state.last_committed_operation_id = Some(operation_id);
                         state.commit_scheduled_for = None;
-                        let room_state = state.sync_coordinator.lock().unwrap().room_state;
+                        let room_state = state
+                            .sync_coordinator
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .room_state;
                         state.room_state = room_state;
                         // M3: dispatch to live player
                         Self::dispatch_player_play(&mut state);
@@ -2331,17 +2375,24 @@ impl AppRuntime {
                         state
                             .sync_coordinator
                             .lock()
-                            .unwrap()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
                             .commit_pause(target_position_ms, PauseCause::Manual);
                         state.sync.position_ms = target_position_ms;
-                        let strict_sync_paused =
-                            state.sync_coordinator.lock().unwrap().paused_by_strict_sync;
+                        let strict_sync_paused = state
+                            .sync_coordinator
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .paused_by_strict_sync;
                         state.sync.strict_sync_paused = strict_sync_paused;
                         state.pending_operation_id = None;
                         state.pending_operation_kind = None;
                         state.last_committed_operation_id = Some(operation_id);
                         state.commit_scheduled_for = None;
-                        let room_state = state.sync_coordinator.lock().unwrap().room_state;
+                        let room_state = state
+                            .sync_coordinator
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .room_state;
                         state.room_state = room_state;
                         // M3: dispatch to live player
                         Self::dispatch_player_pause(&mut state);
@@ -2397,7 +2448,7 @@ impl AppRuntime {
                         state
                             .sync_coordinator
                             .lock()
-                            .unwrap()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
                             .commit_seek(target_position_ms, resume_after_seek);
                         state.sync.position_ms = target_position_ms;
                         state.sync.strict_sync_paused = !resume_after_seek;
@@ -2405,7 +2456,11 @@ impl AppRuntime {
                         state.pending_operation_kind = None;
                         state.last_committed_operation_id = Some(operation_id);
                         state.commit_scheduled_for = None;
-                        let room_state = state.sync_coordinator.lock().unwrap().room_state;
+                        let room_state = state
+                            .sync_coordinator
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .room_state;
                         state.room_state = room_state;
                         // M3: dispatch to live player
                         Self::dispatch_player_seek(&mut state, target_position_ms);
@@ -2432,7 +2487,7 @@ impl AppRuntime {
                     let _ = state
                         .sync_coordinator
                         .lock()
-                        .unwrap()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .buffer_low(buffering_role, position_ms);
                     state.sync.position_ms = position_ms;
                     state.sync.strict_sync_paused = true;
@@ -2445,7 +2500,11 @@ impl AppRuntime {
                             .map(|p| p.display_name.clone())
                     };
                     state.buffer.guest_buffer_ahead_ms = buffer_ahead_ms;
-                    let room_state = state.sync_coordinator.lock().unwrap().room_state;
+                    let room_state = state
+                        .sync_coordinator
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .room_state;
                     state.room_state = room_state;
                     sync_room_snapshot(&mut state);
                 }
@@ -2459,11 +2518,22 @@ impl AppRuntime {
                     // fresh host play-protocol cycle, never a silent side
                     // effect of recovery.
                     if Self::is_host_role(&state) {
-                        let _ = state.sync_coordinator.lock().unwrap().buffer_recovered();
-                        let strict_sync_paused =
-                            state.sync_coordinator.lock().unwrap().paused_by_strict_sync;
+                        let _ = state
+                            .sync_coordinator
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .buffer_recovered();
+                        let strict_sync_paused = state
+                            .sync_coordinator
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .paused_by_strict_sync;
                         state.sync.strict_sync_paused = strict_sync_paused;
-                        let room_state = state.sync_coordinator.lock().unwrap().room_state;
+                        let room_state = state
+                            .sync_coordinator
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .room_state;
                         state.room_state = room_state;
                     }
                     sync_room_snapshot(&mut state);
@@ -2477,12 +2547,20 @@ impl AppRuntime {
                     state
                         .sync_coordinator
                         .lock()
-                        .unwrap()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .apply_coordinator_state(host_ready, guest_ready, &coordinator_play_state);
-                    let room_state = state.sync_coordinator.lock().unwrap().room_state;
+                    let room_state = state
+                        .sync_coordinator
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .room_state;
                     state.room_state = room_state;
                     if state.sync.position_ms == 0 {
-                        let host_pos = state.sync_coordinator.lock().unwrap().host_position_ms;
+                        let host_pos = state
+                            .sync_coordinator
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .host_position_ms;
                         state.sync.position_ms = host_pos;
                     }
                     sync_room_snapshot(&mut state);
@@ -2494,7 +2572,11 @@ impl AppRuntime {
                     state.sync.position_ms = position_ms;
                     state.sync.strict_sync_paused =
                         room_state == "PAUSED" || room_state == "RECONNECTING";
-                    let room_state = state.sync_coordinator.lock().unwrap().room_state;
+                    let room_state = state
+                        .sync_coordinator
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .room_state;
                     state.room_state = room_state;
                     sync_room_snapshot(&mut state);
                 }
@@ -2648,7 +2730,10 @@ impl AppRuntime {
     fn send_host_event(state: &mut AppRuntimeState, event: QuicServerEvent) {
         if let Some(tx) = state.host_event_tx.as_ref() {
             let seq = {
-                let mut coordinator = state.sync_coordinator.lock().unwrap();
+                let mut coordinator = state
+                    .sync_coordinator
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 coordinator.coordinator_event_seq =
                     coordinator.coordinator_event_seq.wrapping_add(1);
                 coordinator.coordinator_event_seq
@@ -2686,7 +2771,7 @@ impl AppRuntime {
             state
                 .sync_coordinator
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .host_ready(ParticipantReadiness::ready(5_000));
 
             let target_position = state.sync.position_ms;
@@ -2695,7 +2780,7 @@ impl AppRuntime {
             let prepared = state
                 .sync_coordinator
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .prepare_play_scheduled(target_position, now + lead, 5_000);
             let scheduled = match prepared {
                 Ok(s) => s,
@@ -2719,7 +2804,11 @@ impl AppRuntime {
                 minimum_buffer_ms: 5_000,
             };
             Self::send_host_event(&mut state, event);
-            let room_state = state.sync_coordinator.lock().unwrap().room_state;
+            let room_state = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .room_state;
             state.room_state = room_state;
             sync_room_snapshot(&mut state);
             snapshot_from_state(&state)
@@ -2743,7 +2832,11 @@ impl AppRuntime {
             let target_position = state.sync.position_ms;
             let execute_at = monotonic_us() + clock::play_lead_us(state.peer_rtt_p95_us);
             let operation_id = Uuid::now_v7().to_string();
-            state.sync_coordinator.lock().unwrap().begin_pause();
+            state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .begin_pause();
             state.pending_operation_id = Some(operation_id.clone());
             state.pending_operation_kind = Some("PAUSE".to_string());
             state.pending_operation_target_ms = target_position;
@@ -2755,7 +2848,11 @@ impl AppRuntime {
                 target_position_ms: target_position,
             };
             Self::send_host_event(&mut state, event);
-            let room_state = state.sync_coordinator.lock().unwrap().room_state;
+            let room_state = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .room_state;
             state.room_state = room_state;
             sync_room_snapshot(&mut state);
             snapshot_from_state(&state)
@@ -2779,7 +2876,7 @@ impl AppRuntime {
             state
                 .sync_coordinator
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .begin_seek(target_position_ms);
             state.pending_operation_id = Some(operation_id.clone());
             state.pending_operation_kind = Some("SEEK".to_string());
@@ -2793,7 +2890,11 @@ impl AppRuntime {
                 initiator: state.local_participant.display_name.clone(),
             };
             Self::send_host_event(&mut state, event);
-            let room_state = state.sync_coordinator.lock().unwrap().room_state;
+            let room_state = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .room_state;
             state.room_state = room_state;
             sync_room_snapshot(&mut state);
             snapshot_from_state(&state)
@@ -2810,13 +2911,17 @@ impl AppRuntime {
             let _ = state
                 .sync_coordinator
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .buffer_low(PeerRole::Host, position_ms);
             state.sync.position_ms = position_ms;
             state.sync.strict_sync_paused = true;
             state.buffer.buffering_participant = Some(state.local_participant.display_name.clone());
             state.buffer.guest_buffer_ahead_ms = buffer_ahead_ms;
-            let room_state = state.sync_coordinator.lock().unwrap().room_state;
+            let room_state = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .room_state;
             state.room_state = room_state;
 
             let event = QuicServerEvent::BufferLow {
@@ -2838,13 +2943,25 @@ impl AppRuntime {
     pub fn report_buffer_recovered(&self, buffer_ahead_ms: u64) -> AppSnapshot {
         let snapshot = {
             let mut state = self.lock();
-            let _ = state.sync_coordinator.lock().unwrap().buffer_recovered();
+            let _ = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .buffer_recovered();
             state.buffer.buffering_participant = None;
             state.buffer.percent = 100;
             state.buffer.guest_buffer_ahead_ms = buffer_ahead_ms;
-            let strict_sync_paused = state.sync_coordinator.lock().unwrap().paused_by_strict_sync;
+            let strict_sync_paused = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .paused_by_strict_sync;
             state.sync.strict_sync_paused = strict_sync_paused;
-            let room_state = state.sync_coordinator.lock().unwrap().room_state;
+            let room_state = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .room_state;
             state.room_state = room_state;
 
             let event = QuicServerEvent::BufferRecovered { buffer_ahead_ms };
@@ -2929,13 +3046,28 @@ impl AppRuntime {
             } else {
                 ParticipantReadiness::not_ready("manual")
             };
-            state.sync_coordinator.lock().unwrap().host_ready(readiness);
+            state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .host_ready(readiness);
             let event = QuicServerEvent::RoomStateUpdate {
-                state: format!("{:?}", state.sync_coordinator.lock().unwrap().room_state),
+                state: format!(
+                    "{:?}",
+                    state
+                        .sync_coordinator
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .room_state
+                ),
                 position_ms: state.sync.position_ms,
             };
             Self::send_host_event(&mut state, event);
-            let room_state = state.sync_coordinator.lock().unwrap().room_state;
+            let room_state = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .room_state;
             state.room_state = room_state;
             sync_room_snapshot(&mut state);
             snapshot_from_state(&state)
@@ -2950,30 +3082,54 @@ impl AppRuntime {
 
     /// M3: Dispatch a play command to the live player instance, if present.
     fn dispatch_player_play(state: &mut AppRuntimeState) {
-        if let Some(ref player) = state.player {
-            if let Ok(mut p) = player.lock() {
-                let _ = p.play();
+        let Some(player) = state.player.clone() else {
+            return;
+        };
+        let mut p = player
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match p.play() {
+            Ok(()) => {
                 state.player_snapshot = PlayerSnapshot::from(&p.snapshot());
+            }
+            Err(error) => {
+                Self::set_player_command_error(state, format!("MP-MEDIA-006 {error}"));
             }
         }
     }
 
     /// M3: Dispatch a pause command to the live player instance, if present.
     fn dispatch_player_pause(state: &mut AppRuntimeState) {
-        if let Some(ref player) = state.player {
-            if let Ok(mut p) = player.lock() {
-                let _ = p.pause();
+        let Some(player) = state.player.clone() else {
+            return;
+        };
+        let mut p = player
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match p.pause() {
+            Ok(()) => {
                 state.player_snapshot = PlayerSnapshot::from(&p.snapshot());
+            }
+            Err(error) => {
+                Self::set_player_command_error(state, format!("MP-MEDIA-006 {error}"));
             }
         }
     }
 
     /// M3: Dispatch a seek command to the live player instance, if present.
     fn dispatch_player_seek(state: &mut AppRuntimeState, position_ms: u64) {
-        if let Some(ref player) = state.player {
-            if let Ok(mut p) = player.lock() {
-                let _ = p.seek(position_ms);
+        let Some(player) = state.player.clone() else {
+            return;
+        };
+        let mut p = player
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match p.seek(position_ms) {
+            Ok(()) => {
                 state.player_snapshot = PlayerSnapshot::from(&p.snapshot());
+            }
+            Err(error) => {
+                Self::set_player_command_error(state, format!("MP-MEDIA-006 {error}"));
             }
         }
     }
@@ -2981,11 +3137,39 @@ impl AppRuntime {
     /// M3: Sync the player snapshot from the live player.
     #[allow(dead_code)]
     fn sync_player_snapshot(state: &mut AppRuntimeState) {
-        if let Some(ref player) = state.player {
-            if let Ok(p) = player.lock() {
-                state.player_snapshot = PlayerSnapshot::from(&p.snapshot());
-            }
+        let Some(player) = state.player.clone() else {
+            return;
+        };
+        let p = player
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.player_snapshot = PlayerSnapshot::from(&p.snapshot());
+    }
+
+    fn set_player_error(state: &mut AppRuntimeState, message: String) {
+        state.room_state = RoomState::Error;
+        state.sync.strict_sync_paused = true;
+        state.error = Some(message.clone());
+        Self::set_player_diagnostic_error(state, message);
+    }
+
+    fn set_player_command_error(state: &mut AppRuntimeState, message: String) {
+        if message.contains("MP-MEDIA-001 libmpv is unavailable")
+            || state
+                .player_snapshot
+                .error_message
+                .as_deref()
+                .is_some_and(|error| error.contains("MP-MEDIA-001 libmpv is unavailable"))
+        {
+            Self::set_player_diagnostic_error(state, message);
+        } else {
+            Self::set_player_error(state, message);
         }
+    }
+
+    fn set_player_diagnostic_error(state: &mut AppRuntimeState, message: String) {
+        state.player_snapshot.state = "PLAYER_ERROR".to_string();
+        state.player_snapshot.error_message = Some(message);
     }
 
     /// M3: Spawn a background task that polls the live player for position,
@@ -3007,10 +3191,10 @@ impl AppRuntime {
                 let Some(player_arc) = player_arc else {
                     break; // No player — stop polling
                 };
-                let snap = match player_arc.lock() {
-                    Ok(p) => p.snapshot(),
-                    Err(_) => continue,
-                };
+                let snap = player_arc
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .snapshot();
                 let position_changed = snap.position_ms != last_position;
                 let state_changed = format!("{:?}", snap.state) != last_state_name;
                 if position_changed || state_changed {
@@ -3091,7 +3275,7 @@ impl AppRuntime {
                 state
                     .sync_coordinator
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .host_ready(ParticipantReadiness::ready(5_000));
                 // READY_CHECK consensus: once both participants are ready the
                 // coordinator fires CoordinatorStateUpdate (canonical), which
@@ -3099,13 +3283,13 @@ impl AppRuntime {
                 state
                     .sync_coordinator
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .update_readiness_consensus(5_000);
             } else {
                 state
                     .sync_coordinator
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .guest_ready(ParticipantReadiness::ready(5_000));
                 // Guest readiness must reach the host coordinator: send
                 // ReadyState over QUIC (fire-and-forget; the host coordinator
@@ -3121,7 +3305,11 @@ impl AppRuntime {
             }
             // Readiness consensus only: PLAYING arrives exclusively through a
             // committed play operation, never as a side effect of Ready.
-            let room_state = state.sync_coordinator.lock().unwrap().room_state;
+            let room_state = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .room_state;
             state.room_state = room_state;
             sync_room_snapshot(&mut state);
             snapshot_from_state(&state)
@@ -3147,8 +3335,13 @@ impl AppRuntime {
     pub fn enter_cinema(&self) -> AppSnapshot {
         let mut state = self.lock();
         state.screen = "CINEMA".to_string();
-        state.room_state = RoomState::Playing;
-        state.sync.strict_sync_paused = false;
+        if state.player_snapshot.error_message.is_some() {
+            state.room_state = RoomState::Error;
+            state.sync.strict_sync_paused = true;
+        } else {
+            state.room_state = RoomState::Playing;
+            state.sync.strict_sync_paused = false;
+        }
         sync_room_snapshot(&mut state);
         snapshot_from_state(&state)
     }
@@ -3583,9 +3776,10 @@ impl AppRuntime {
                 range.shutdown();
             }
             if let Some(player) = state.player.take() {
-                if let Ok(mut player) = player.lock() {
-                    player.close();
-                }
+                player
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .close();
             }
             state.guest_cache = None;
         }
@@ -3643,7 +3837,8 @@ impl AppRuntime {
             {
                 let mut player = MpvPlayer::new();
                 if let Err(e) = player.open(std::path::Path::new(&media_url)) {
-                    state.error = Some(format!("MP-MEDIA-001 {e}"));
+                    state.local_participant.media_ready = false;
+                    Self::set_player_error(&mut state, format!("MP-MEDIA-001 {e}"));
                 } else {
                     state.player_snapshot = PlayerSnapshot::from(&player.snapshot());
                 }
@@ -3653,17 +3848,18 @@ impl AppRuntime {
             {
                 let mut player = crate::media::player::LibMpvPlayer::new();
                 if let Err(e) = player.open(std::path::Path::new(&media_url)) {
-                    state.error = Some(format!("MP-MEDIA-001 {e}"));
+                    state.local_participant.media_ready = false;
+                    Self::set_player_error(&mut state, format!("MP-MEDIA-001 {e}"));
                 } else {
                     state.player_snapshot = PlayerSnapshot::from(&player.snapshot());
                 }
                 state.player = Some(Arc::new(std::sync::Mutex::new(player)));
             }
-            if !Self::is_host_role(&state) {
+            if !Self::is_host_role(&state) && state.player_snapshot.error_message.is_none() {
                 state
                     .sync_coordinator
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .guest_ready(crate::sync::consensus::ParticipantReadiness::ready(5_000));
             }
             sync_room_snapshot(&mut state);
@@ -3989,7 +4185,7 @@ fn apply_recovery_to_state(state: &mut AppRuntimeState, event: FailureEvent, pla
 
 #[cfg(test)]
 mod tests {
-    use super::AppRuntime;
+    use super::{AppRuntime, AppSnapshot};
     use crate::call::{CallSignal, CallSignalType};
     use crate::resilience::{FailureEvent, RecoveryAction};
 
@@ -4117,6 +4313,29 @@ mod tests {
             .is_some_and(|recovery| recovery.requires_user_action));
     }
 
+    #[test]
+    fn enter_cinema_preserves_player_error_state() {
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            AppRuntime::set_player_error(
+                &mut state,
+                "MP-MEDIA-006 simulated player failure".to_string(),
+            );
+        }
+
+        let snapshot = runtime.enter_cinema();
+
+        assert_eq!(snapshot.screen, "CINEMA");
+        assert_eq!(snapshot.sync.room_state, "ERROR");
+        assert!(snapshot.sync.strict_sync_paused);
+        assert_eq!(snapshot.player.state, "PLAYER_ERROR");
+        assert_eq!(
+            snapshot.player.error_message.as_deref(),
+            Some("MP-MEDIA-006 simulated player failure")
+        );
+    }
+
     // §6: dev loopback mode selection — all three scenarios in one test to avoid
     // env-var races from Rust's default parallel test runner.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4142,11 +4361,8 @@ mod tests {
             prev: std::env::var_os("MOVE_PARTY_DEV_LOOPBACK"),
         };
         let r0 = AppRuntime::new();
-        let err0 = r0.create_local_party(None).await;
-        assert!(
-            err0.is_err(),
-            "unset DEV_LOOPBACK must reach Tailscale path, not start a loopback QUIC server"
-        );
+        assert_not_dev_loopback(r0.create_local_party(None).await);
+        r0.leave_party();
         drop(_g0);
 
         // --- =0: same Tailscale path ---
@@ -4156,8 +4372,8 @@ mod tests {
         };
         std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "0");
         let r1 = AppRuntime::new();
-        let err1 = r1.create_local_party(None).await;
-        assert!(err1.is_err(), "DEV_LOOPBACK=0 must reach Tailscale path");
+        assert_not_dev_loopback(r1.create_local_party(None).await);
+        r1.leave_party();
         drop(_g1);
 
         // --- =1: loopback path, QUIC server on 127.0.0.1 ---
@@ -4201,8 +4417,22 @@ mod tests {
         assert!(media_snap.room.invite_code.is_some());
         assert!(media_snap.media.is_some());
         assert_eq!(media_snap.media.as_ref().unwrap().filename, "movie.mkv");
-        assert!(media_snap.participants[0].media_ready);
+        if media_snap.player.error_message.is_some() {
+            assert!(!media_snap.participants[0].media_ready);
+            assert_eq!(media_snap.screen, "LOBBY");
+        } else {
+            assert!(media_snap.participants[0].media_ready);
+        }
         r3.leave_party();
         std::fs::remove_dir_all(&dir).expect("cleanup");
+
+        fn assert_not_dev_loopback(result: Result<AppSnapshot, String>) {
+            if let Ok(snapshot) = result {
+                assert!(
+                    !snapshot.network.path.starts_with("Listening on 127.0.0.1:"),
+                    "production mode must not use loopback bind without MOVE_PARTY_DEV_LOOPBACK=1"
+                );
+            }
+        }
     }
 }

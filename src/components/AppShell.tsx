@@ -1,4 +1,5 @@
 import {
+  commandErrorMessage,
   createLocalParty,
   enterCinema,
   joinParty,
@@ -153,6 +154,9 @@ export function AppShell() {
 
       applySnapshot(next);
       return true;
+    } catch (error) {
+      setJoinError(commandErrorMessage(error, "Move Party could not join that invite."));
+      return false;
     } finally {
       setIsJoining(false);
     }
@@ -244,8 +248,7 @@ function createRoomErrorMessage(error: unknown): string {
     return fallback;
   }
 
-  const detail = error instanceof Error ? error.message : String(error);
-  return detail && detail !== "undefined" ? detail : fallback;
+  return commandErrorMessage(error, fallback);
 }
 
 function providerIdForInput(input: string | null): string | null {

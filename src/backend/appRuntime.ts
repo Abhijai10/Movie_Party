@@ -2,6 +2,24 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { CallMode } from "../call/webrtc";
 
+export type BackendFailureKind = "backend failure" | "network failure" | "invalid state";
+
+export class BackendCommandError extends Error {
+  readonly command: string;
+  readonly code: string;
+  readonly kind: BackendFailureKind;
+
+  constructor(command: string, detail: string) {
+    const sanitized = sanitizeErrorDetail(detail);
+    const code = extractErrorCode(sanitized);
+    super(`${command} failed: ${sanitized}`);
+    this.name = "BackendCommandError";
+    this.command = command;
+    this.code = code;
+    this.kind = classifyFailure(code);
+  }
+}
+
 export type ParticipantSnapshot = {
   id: string;
   displayName: string;
@@ -181,7 +199,7 @@ export async function launchProvider(providerId: string, url: string): Promise<A
 }
 
 export async function joinParty(inviteCode: string): Promise<AppSnapshot | null> {
-  return invokeSnapshot("join_party", { inviteCode });
+  return invokeSnapshotOrThrow("join_party", { inviteCode });
 }
 
 export async function markReady(): Promise<AppSnapshot | null> {
@@ -270,7 +288,8 @@ async function invokeSnapshot(
   try {
     return await invoke<AppSnapshot>(command, args);
   } catch (error) {
-    console.error(formatCommandError(command, error), error);
+    const commandError = toBackendCommandError(command, error);
+    console.error(commandError.message, commandError);
     return null;
   }
 }
@@ -282,20 +301,20 @@ async function invokeSnapshotOrThrow(
   try {
     return await invoke<AppSnapshot>(command, args);
   } catch (error) {
-    const message = formatCommandError(command, error);
-    console.error(message, error);
-    throw new Error(message);
+    const commandError = toBackendCommandError(command, error);
+    console.error(commandError.message, commandError);
+    throw commandError;
   }
 }
 
-function formatCommandError(command: string, error: unknown): string {
+function toBackendCommandError(command: string, error: unknown): BackendCommandError {
   const detail =
     typeof error === "string"
       ? error
       : error instanceof Error
         ? error.message
         : safeStringify(error);
-  return `${command} failed: ${detail || "backend exception"}`;
+  return new BackendCommandError(command, detail || "backend exception");
 }
 
 function safeStringify(value: unknown): string {
@@ -304,6 +323,38 @@ function safeStringify(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function sanitizeErrorDetail(detail: string): string {
+  return detail
+    .replace(/([A-Za-z]:\\|\/Users\/|\/Volumes\/|\/private\/|\/var\/|\/tmp\/)[^\s"'`]+/g, "[path]")
+    .trim();
+}
+
+function extractErrorCode(detail: string): string {
+  return detail.match(/\bMP-[A-Z]+-\d{3}\b/)?.[0] ?? "MP-BACKEND-001";
+}
+
+function classifyFailure(code: string): BackendFailureKind {
+  if (code.startsWith("MP-NET-")) {
+    return "network failure";
+  }
+  if (code.startsWith("MP-SYNC-") || code.startsWith("MP-ROOM-") || code.startsWith("MP-CTRL-")) {
+    return "invalid state";
+  }
+  return "backend failure";
+}
+
+export function commandErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof BackendCommandError) {
+    return `${error.kind}: ${error.message}`;
+  }
+
+  if (error instanceof Error && error.message.trim().length > 0) {
+    return sanitizeErrorDetail(error.message);
+  }
+
+  return fallback;
 }
 
 export async function initListener(): Promise<void> {

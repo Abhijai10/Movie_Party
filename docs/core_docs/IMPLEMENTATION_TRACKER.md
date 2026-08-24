@@ -36,6 +36,47 @@ M8: Chrome/player crash watchers not wired
 
 ---
 
+# M6 PRODUCTION HARDENING PASS (2026-08-25)
+
+## Implemented in this pass
+
+- **Runtime mutex recovery**: app-runtime sync coordinator and player locks now
+  recover from poisoned mutexes instead of panicking in production paths.
+- **Player failure propagation**: native player open/command failures now
+  surface stable `MP-MEDIA-*` diagnostics in the player snapshot. Real playback
+  command failures still move the room into strict media error; missing libmpv
+  during protocol-only fixture flows remains diagnostic so room/sync tests do
+  not fake a native decoder dependency.
+- **Backend bridge diagnostics**: frontend invoke failures now preserve command
+  name, stable error code, and failure kind in development builds while keeping
+  production copy user-safe.
+- **Render crash containment**: the React root is wrapped in an error boundary
+  that logs `MP-UI-001` and presents a recovery action instead of a blank app.
+- **Notification support honesty**: unsupported native-notification platforms
+  now return `MP-NOTIFY-001` instead of reporting success.
+- **Native player dependency notes**: the libmpv backend documents runtime
+  availability requirements and checks command/property return codes.
+
+## Verification
+
+- `npm run lint` ✅
+- `npm run test` ✅
+- `npm run build` ✅
+- `cargo test` ✅ with permission to bind local QUIC/network test endpoints.
+
+## Known Local Issue
+
+- `cargo fmt --check` still reports a pre-existing formatting diff in
+  `src-tauri/src/storage/sqlite.rs`; this pass did not modify that file.
+
+## External Verification Pending
+
+- Real OS keychain, native notification delivery, libmpv playback, Tailscale,
+  QUIC across devices, and provider playback still require platform/manual
+  verification.
+
+---
+
 # M6 UI POLISH PASS (2026-08-25)
 
 ## Implemented in this pass

@@ -42,7 +42,7 @@ impl Notifier for NativeNotifier {
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = (title, body);
-            Ok(())
+            Err("MP-NOTIFY-001 native notifications are unsupported on this platform".to_string())
         }
     }
 }
