@@ -202,6 +202,23 @@ export async function joinParty(inviteCode: string): Promise<AppSnapshot | null>
   return invokeSnapshotOrThrow("join_party", { inviteCode });
 }
 
+export async function takePendingDeepLinks(): Promise<string[]> {
+  try {
+    return await invoke<string[]>("take_pending_deep_links");
+  } catch (error) {
+    console.error("take_pending_deep_links failed", error);
+    return [];
+  }
+}
+
+export async function listenToDeepLinks(
+  onDeepLink: (url: string) => void,
+): Promise<UnlistenFn> {
+  return listen<string>("deep_link_opened", (event) => {
+    onDeepLink(event.payload);
+  });
+}
+
 export async function markReady(): Promise<AppSnapshot | null> {
   return invokeSnapshot("mark_ready");
 }

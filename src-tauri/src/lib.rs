@@ -22,11 +22,30 @@ pub const APP_NAME: &str = "Move Party";
 pub const PROTOCOL_MAJOR: u16 = 1;
 pub const PROTOCOL_MINOR: u16 = 0;
 
-use tauri::Manager;
+use std::sync::Mutex;
+use tauri::{Emitter, Manager};
+
+const DEEP_LINK_OPENED_EVENT: &str = "deep_link_opened";
+
+#[derive(Default)]
+struct PendingDeepLinks(Mutex<Vec<String>>);
+
+impl PendingDeepLinks {
+    fn push(&self, url: String) {
+        let mut links = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        links.push(url);
+    }
+
+    fn take(&self) -> Vec<String> {
+        let mut links = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::mem::take(&mut *links)
+    }
+}
 
 pub fn run() {
     let result = tauri::Builder::default()
         .manage(app_runtime::AppRuntime::new_without_emitter())
+        .manage(PendingDeepLinks::default())
         .setup(|app| {
             // M4: Initialize the SQLite database on startup, restore identity,
             // detect overdue preloads (notification-only — never consumes
@@ -37,10 +56,19 @@ pub fn run() {
             runtime.check_overdue_schedules();
             runtime.setup_real_preload_executor();
             runtime.spawn_scheduler_worker();
+
+            let pending_links = app.state::<PendingDeepLinks>();
+            for arg in std::env::args().skip(1) {
+                if is_move_party_deep_link(&arg) {
+                    pending_links.push(arg.trim().to_string());
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             app_metadata,
+            take_pending_deep_links,
             get_app_snapshot,
             show_home,
             show_join_party,
@@ -76,12 +104,36 @@ pub fn run() {
             retention_remove,
             retention_save_as,
         ])
-        .run(tauri::generate_context!());
+        .build(tauri::generate_context!());
 
-    if let Err(error) = result {
-        eprintln!("Move Party failed to start: {error}");
-        std::process::exit(1);
+    match result {
+        Ok(app) => {
+            app.run(|app_handle, event| {
+                #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
+                if let tauri::RunEvent::Opened { urls } = event {
+                    let pending_links = app_handle.state::<PendingDeepLinks>();
+                    for url in urls {
+                        let url = url.to_string();
+                        if is_move_party_deep_link(&url) {
+                            pending_links.push(url.clone());
+                            let _ = app_handle.emit(DEEP_LINK_OPENED_EVENT, url);
+                        }
+                    }
+                }
+            });
+        }
+        Err(error) => {
+            eprintln!("Move Party failed to start: {error}");
+            std::process::exit(1);
+        }
     }
+}
+
+fn is_move_party_deep_link(value: &str) -> bool {
+    value
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("moveparty://")
 }
 
 #[tauri::command]
@@ -97,6 +149,11 @@ fn app_metadata() -> AppMetadata {
         protocol_major: PROTOCOL_MAJOR,
         protocol_minor: PROTOCOL_MINOR,
     }
+}
+
+#[tauri::command]
+fn take_pending_deep_links(pending_links: tauri::State<'_, PendingDeepLinks>) -> Vec<String> {
+    pending_links.take()
 }
 
 #[tauri::command]

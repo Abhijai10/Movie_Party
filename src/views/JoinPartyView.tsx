@@ -1,26 +1,40 @@
 import { motion } from "framer-motion";
 import { ArrowLeft, ArrowRight, Check, ClipboardPaste, Copy } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CinemaButton } from "../components/mp/CinemaButton";
 import { MovieTicket } from "../components/mp/MovieTicket";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
+import { previewInviteRoomCode } from "../invites/deepLinks";
 
 type JoinPartyViewProps = {
   isJoining: boolean;
   error: string | null;
+  initialInvite?: string;
   onBack: () => void;
   onJoin: (inviteCode: string) => Promise<boolean>;
 };
 
-export function JoinPartyView({ isJoining, error, onBack, onJoin }: JoinPartyViewProps) {
+export function JoinPartyView({
+  isJoining,
+  error,
+  initialInvite = "",
+  onBack,
+  onJoin,
+}: JoinPartyViewProps) {
   const [code, setCode] = useState("");
   const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (initialInvite) {
+      setCode(initialInvite);
+    }
+  }, [initialInvite]);
 
   const paste = async () => {
     try {
       const text = await navigator.clipboard.readText();
-      setCode(text.trim().slice(0, 40).toUpperCase());
+      setCode(text.trim());
     } catch {
       /* clipboard unavailable */
     }
@@ -43,7 +57,7 @@ export function JoinPartyView({ isJoining, error, onBack, onJoin }: JoinPartyVie
     void onJoin(code.trim());
   };
 
-  const displayCode = code ? code.padEnd(6, "•").slice(0, 6).split("").join(" ") : "— — — — — —";
+  const displayCode = previewInviteRoomCode(code);
 
   return (
     <div className="relative w-screen h-screen overflow-hidden">
@@ -94,7 +108,7 @@ export function JoinPartyView({ isJoining, error, onBack, onJoin }: JoinPartyVie
 
           <div className="mt-10 max-w-md">
             <label className="text-[11px] tracking-[0.24em] uppercase text-white/45">
-              Move Party invite link or room code
+              Move Party invite link
             </label>
 
             <div className="mt-3 relative flex items-center rounded-xl border border-white/10 bg-white/[0.03] focus-within:border-[#9F7AEA]/50 transition">
@@ -102,10 +116,11 @@ export function JoinPartyView({ isJoining, error, onBack, onJoin }: JoinPartyVie
                 type="text"
                 value={code}
                 onChange={(e) => {
-                  setCode(e.target.value.toUpperCase());
+                  setCode(e.target.value);
                 }}
-                placeholder="XXXXXX"
-                className="flex-1 bg-transparent px-4 py-3.5 text-white text-lg tracking-[0.35em] font-mono-mp placeholder:text-white/25 focus:outline-none"
+                placeholder="moveparty://join/..."
+                maxLength={4096}
+                className="min-w-0 flex-1 bg-transparent px-4 py-3.5 text-white text-sm tracking-[0.04em] font-mono-mp placeholder:text-white/25 focus:outline-none"
                 data-testid="join-code-input"
               />
               <button

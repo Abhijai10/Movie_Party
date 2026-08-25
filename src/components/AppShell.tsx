@@ -1,4 +1,5 @@
 import {
+  BackendCommandError,
   commandErrorMessage,
   createLocalParty,
   enterCinema,
@@ -10,9 +11,12 @@ import {
   setSharedControls,
   showHome,
   showJoinParty,
+  listenToDeepLinks,
+  takePendingDeepLinks,
   type AppSnapshot,
 } from "../backend/appRuntime";
 import { useAppSnapshot } from "../hooks/useAppSnapshot";
+import { parseMovePartyInvite } from "../invites/deepLinks";
 import { CinemaView } from "../views/CinemaView";
 import { CreatePartyView } from "../views/CreatePartyView";
 import { EndPartyConfirmView } from "../views/EndPartyConfirmView";
@@ -21,7 +25,7 @@ import { JoinPartyView } from "../views/JoinPartyView";
 import { LobbyView } from "../views/LobbyView";
 import { ReadyCheckView } from "../views/ReadyCheckView";
 import { LoadingState } from "./LoadingState";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 type LocalScreen = "CREATE_PARTY" | null;
 type DevScreen = "HOME" | "CREATE" | "JOIN" | "LOBBY" | "READY" | "CINEMA" | null;
@@ -36,6 +40,7 @@ export function AppShell() {
   const [isJoining, setIsJoining] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [joinError, setJoinError] = useState<string | null>(null);
+  const [pendingInvite, setPendingInvite] = useState("");
   const [devScreen, setDevScreen] = useState<DevScreen>(null);
 
   useEffect(() => {
@@ -58,17 +63,65 @@ export function AppShell() {
     };
   }, []);
 
-  const applySnapshot = (next: AppSnapshot | null) => {
+  const applySnapshot = useCallback((next: AppSnapshot | null) => {
     if (next) {
       setSnapshot(next);
     }
-  };
+  }, [setSnapshot]);
+
+  const openJoinWithInvite = useCallback(
+    (rawInvite: string) => {
+      const parsed = parseMovePartyInvite(rawInvite);
+      setDevScreen(null);
+      setLocalScreen(null);
+
+      if (!parsed.ok) {
+        setPendingInvite(rawInvite.trim());
+        setJoinError(parsed.message);
+        void showJoinParty().then(applySnapshot);
+        return;
+      }
+
+      setPendingInvite(parsed.invite);
+      setJoinError(null);
+      void showJoinParty().then(applySnapshot);
+    },
+    [applySnapshot],
+  );
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    void takePendingDeepLinks().then((links) => {
+      if (disposed) return;
+      links.forEach(openJoinWithInvite);
+    });
+
+    void listenToDeepLinks((url) => {
+      if (!disposed) {
+        openJoinWithInvite(url);
+      }
+    }).then((nextUnlisten) => {
+      if (disposed) {
+        nextUnlisten();
+        return;
+      }
+      unlisten = nextUnlisten;
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [openJoinWithInvite]);
 
   const goHome = () => {
     setDevScreen(null);
     setLocalScreen(null);
     setCreateError(null);
     setJoinError(null);
+    setPendingInvite("");
     void showHome().then(applySnapshot);
   };
 
@@ -132,20 +185,21 @@ export function AppShell() {
     setDevScreen(null);
     setLocalScreen(null);
     setJoinError(null);
+    setPendingInvite("");
     void showJoinParty().then(applySnapshot);
   };
 
   const submitJoin = async (inviteCode: string): Promise<boolean> => {
-    const code = inviteCode.trim();
-    if (!code) {
-      setJoinError("Enter an invite link or code.");
+    const parsed = parseMovePartyInvite(inviteCode);
+    if (!parsed.ok) {
+      setJoinError(parsed.message);
       return false;
     }
 
     setJoinError(null);
     setIsJoining(true);
     try {
-      const next = await joinParty(code);
+      const next = await joinParty(parsed.invite);
       if (next?.screen !== "LOBBY") {
         applySnapshot(next);
         setJoinError(next?.error ?? "Move Party could not join that invite.");
@@ -155,7 +209,7 @@ export function AppShell() {
       applySnapshot(next);
       return true;
     } catch (error) {
-      setJoinError(commandErrorMessage(error, "Move Party could not join that invite."));
+      setJoinError(joinFailureMessage(error));
       return false;
     } finally {
       setIsJoining(false);
@@ -209,6 +263,7 @@ export function AppShell() {
       <JoinPartyView
         isJoining={isJoining}
         error={joinError ?? snapshot.error}
+        initialInvite={pendingInvite}
         onBack={goHome}
         onJoin={submitJoin}
       />
@@ -250,6 +305,20 @@ function createRoomErrorMessage(error: unknown): string {
   }
 
   return commandErrorMessage(error, fallback);
+}
+
+function joinFailureMessage(error: unknown): string {
+  if (error instanceof BackendCommandError) {
+    if (error.code === "MP-ROOM-001") {
+      return "That invite is invalid, expired, or incomplete. Ask the host to copy a fresh invite.";
+    }
+    if (error.code.startsWith("MP-NET-")) {
+      return "Move Party could not reach the host. Check that both devices are online and connected to Tailscale.";
+    }
+    return "Move Party could not join that room right now.";
+  }
+
+  return "Move Party could not join that invite.";
 }
 
 function providerIdForInput(input: string | null): string | null {
