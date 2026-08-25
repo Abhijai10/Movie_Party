@@ -3,7 +3,9 @@ import {
   commandErrorMessage,
   createLocalParty,
   enterCinema,
+  getProviderCapabilities,
   joinParty,
+  launchGenericLink,
   launchProvider,
   leaveParty,
   markReady,
@@ -14,11 +16,12 @@ import {
   listenToDeepLinks,
   takePendingDeepLinks,
   type AppSnapshot,
+  type ProviderCapability,
 } from "../backend/appRuntime";
 import { useAppSnapshot } from "../hooks/useAppSnapshot";
 import { parseMovePartyInvite } from "../invites/deepLinks";
 import { CinemaView } from "../views/CinemaView";
-import { CreatePartyView } from "../views/CreatePartyView";
+import { CreatePartyView, type CreatePartyRequest } from "../views/CreatePartyView";
 import { EndPartyConfirmView } from "../views/EndPartyConfirmView";
 import { HomeView } from "../views/HomeView";
 import { JoinPartyView } from "../views/JoinPartyView";
@@ -40,6 +43,7 @@ export function AppShell() {
   const [isJoining, setIsJoining] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [joinError, setJoinError] = useState<string | null>(null);
+  const [providerCapabilities, setProviderCapabilities] = useState<ProviderCapability[]>([]);
   const [pendingInvite, setPendingInvite] = useState("");
   const [devScreen, setDevScreen] = useState<DevScreen>(null);
 
@@ -116,6 +120,10 @@ export function AppShell() {
     };
   }, [openJoinWithInvite]);
 
+  useEffect(() => {
+    void getProviderCapabilities().then(setProviderCapabilities);
+  }, []);
+
   const goHome = () => {
     setDevScreen(null);
     setLocalScreen(null);
@@ -131,19 +139,24 @@ export function AppShell() {
     setLocalScreen("CREATE_PARTY");
   };
 
-  const createParty = async (mediaPath: string | null): Promise<boolean> => {
-    const source = mediaPath?.trim() ?? "";
+  const createParty = async (request: CreatePartyRequest): Promise<boolean> => {
+    const source = request.source === "local" ? request.mediaPath?.trim() ?? "" : request.url.trim();
     if (!source) {
-      setCreateError("Select a movie file or enter a provider URL.");
+      setCreateError("Select a movie file, provider page, or direct link.");
       return false;
     }
 
-    const provider = providerIdForInput(source);
     setCreateError(null);
     setIsCreating(true);
 
     try {
-      if (provider) {
+      if (request.source === "provider") {
+        if (request.mode !== "PROVIDER_SYNC") {
+          setCreateError(
+            "Provider Shared is experimental and unavailable until capture is verified on this device.",
+          );
+          return false;
+        }
         const partySnapshot = await createLocalParty(null);
         if (partySnapshot?.screen !== "LOBBY") {
           applySnapshot(partySnapshot);
@@ -151,14 +164,34 @@ export function AppShell() {
           return false;
         }
 
-        const providerSnapshot = await launchProvider(provider, source);
-        if (!providerSnapshot) {
+        const providerSnapshot = await launchProvider(request.providerId, source, request.mode);
+        if (!providerSnapshot || providerSnapshot.error) {
           applySnapshot(partySnapshot);
-          setLocalScreen(null);
-          return true;
+          setCreateError(providerSnapshot?.error ?? "Move Party could not prepare that provider.");
+          return false;
         }
 
         applySnapshot(providerSnapshot);
+        setLocalScreen(null);
+        return true;
+      }
+
+      if (request.source === "link") {
+        const partySnapshot = await createLocalParty(null);
+        if (partySnapshot?.screen !== "LOBBY") {
+          applySnapshot(partySnapshot);
+          setCreateError(partySnapshot?.error ?? "Move Party could not create the room.");
+          return false;
+        }
+
+        const linkSnapshot = await launchGenericLink(source);
+        if (!linkSnapshot || linkSnapshot.error) {
+          applySnapshot(partySnapshot);
+          setCreateError(linkSnapshot?.error ?? "Move Party could not prepare that link.");
+          return false;
+        }
+
+        applySnapshot(linkSnapshot);
         setLocalScreen(null);
         return true;
       }
@@ -252,8 +285,9 @@ export function AppShell() {
       <CreatePartyView
         isCreating={isCreating}
         error={createError ?? snapshot.error}
+        providerCapabilities={providerCapabilities}
         onBack={goHome}
-        onCreateLocalParty={createParty}
+        onCreateParty={createParty}
       />
     );
   }
@@ -319,43 +353,4 @@ function joinFailureMessage(error: unknown): string {
   }
 
   return "Move Party could not join that invite.";
-}
-
-function providerIdForInput(input: string | null): string | null {
-  const value = input?.trim();
-  if (!value) {
-    return null;
-  }
-
-  let host = "";
-  try {
-    host = new URL(value).hostname.toLowerCase();
-  } catch {
-    return null;
-  }
-
-  if (host === "youtu.be" || host === "youtube.com" || host.endsWith(".youtube.com")) {
-    return "youtube";
-  }
-  if (host === "netflix.com" || host.endsWith(".netflix.com")) {
-    return "netflix";
-  }
-  if (
-    host === "primevideo.com" ||
-    host.endsWith(".primevideo.com") ||
-    host === "amazon.com" ||
-    host.endsWith(".amazon.com")
-  ) {
-    return "prime";
-  }
-  if (
-    host === "hotstar.com" ||
-    host.endsWith(".hotstar.com") ||
-    host === "jiocinema.com" ||
-    host.endsWith(".jiocinema.com")
-  ) {
-    return "jiohotstar";
-  }
-
-  return null;
 }

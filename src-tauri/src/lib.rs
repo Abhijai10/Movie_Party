@@ -24,6 +24,7 @@ pub const PROTOCOL_MINOR: u16 = 0;
 
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
+use tauri_plugin_deep_link::DeepLinkExt;
 
 const DEEP_LINK_OPENED_EVENT: &str = "deep_link_opened";
 
@@ -44,6 +45,8 @@ impl PendingDeepLinks {
 
 pub fn run() {
     let result = tauri::Builder::default()
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_single_instance::init(|_, _, _| {}))
         .manage(app_runtime::AppRuntime::new_without_emitter())
         .manage(PendingDeepLinks::default())
         .setup(|app| {
@@ -64,6 +67,21 @@ pub fn run() {
                 }
             }
 
+            #[cfg(windows)]
+            if let Err(error) = app.deep_link().register_all() {
+                tracing::warn!(error = %error, "Move Party could not register the Windows invite protocol");
+            }
+
+            let app_handle = app.handle().clone();
+            app.deep_link().on_open_url(move |event| {
+                for url in event.urls() {
+                    let value = url.to_string();
+                    if is_move_party_deep_link(&value) {
+                        let _ = app_handle.emit(DEEP_LINK_OPENED_EVENT, value);
+                    }
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -75,6 +93,7 @@ pub fn run() {
             request_end_party,
             init_listener,
             create_local_party,
+            get_provider_capabilities,
             join_party,
             mark_ready,
             enter_cinema,
@@ -95,6 +114,7 @@ pub fn run() {
             set_ghost_mode,
             pick_media_file,
             launch_provider,
+            launch_generic_link,
             create_schedule,
             list_schedules,
             update_schedule_media,
@@ -107,21 +127,7 @@ pub fn run() {
         .build(tauri::generate_context!());
 
     match result {
-        Ok(app) => {
-            app.run(|app_handle, event| {
-                #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
-                if let tauri::RunEvent::Opened { urls } = event {
-                    let pending_links = app_handle.state::<PendingDeepLinks>();
-                    for url in urls {
-                        let url = url.to_string();
-                        if is_move_party_deep_link(&url) {
-                            pending_links.push(url.clone());
-                            let _ = app_handle.emit(DEEP_LINK_OPENED_EVENT, url);
-                        }
-                    }
-                }
-            });
-        }
+        Ok(app) => app.run(|_, _| {}),
         Err(error) => {
             eprintln!("Move Party failed to start: {error}");
             std::process::exit(1);
@@ -186,6 +192,11 @@ async fn create_local_party(
     media_path: Option<String>,
 ) -> Result<app_runtime::AppSnapshot, String> {
     runtime.create_local_party(media_path).await
+}
+
+#[tauri::command]
+fn get_provider_capabilities() -> Vec<crate::providers::sync::ProviderCapability> {
+    crate::providers::sync::provider_capabilities()
 }
 
 #[tauri::command]
@@ -341,6 +352,7 @@ fn pick_media_file() -> Result<String, String> {
 fn launch_provider(
     provider_id: String,
     url: String,
+    mode: String,
     runtime: tauri::State<'_, app_runtime::AppRuntime>,
 ) -> Result<app_runtime::AppSnapshot, String> {
     use crate::providers::chrome::{
@@ -348,6 +360,16 @@ fn launch_provider(
         launch_managed_chrome,
     };
     use crate::providers::sync::{provider_accepts_url, provider_id_from_str};
+
+    if mode == "PROVIDER_SHARED" {
+        return Err(
+            "MP-CAPTURE-001 Provider Shared is experimental and unavailable until capture is verified on this device."
+                .to_string(),
+        );
+    }
+    if mode != "PROVIDER_SYNC" {
+        return Err("MP-PROVIDER-002 unsupported provider mode".to_string());
+    }
 
     let provider = provider_id_from_str(&provider_id)
         .ok_or_else(|| "MP-PROVIDER-002 unsupported provider".to_string())?;
@@ -375,6 +397,43 @@ fn launch_provider(
     };
 
     Ok(runtime.store_launched_provider(provider_id, url, session))
+}
+
+#[tauri::command]
+fn launch_generic_link(
+    url: String,
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<app_runtime::AppSnapshot, String> {
+    use crate::providers::chrome::{
+        allocate_local_cdp_port, build_launch_plan, default_chrome_candidates, find_chrome,
+        launch_managed_chrome,
+    };
+
+    if !crate::providers::sync::generic_link_accepts_url(&url) {
+        return Err("MP-PROVIDER-002 invalid third-party link".to_string());
+    }
+
+    let chrome_path = match find_chrome(&default_chrome_candidates()) {
+        Ok(path) => path,
+        Err(error) => return Ok(runtime.generic_link_unavailable(url, error.to_string())),
+    };
+    let profiles_root = std::env::temp_dir().join("MovePartyProfiles");
+    let cdp_port = match allocate_local_cdp_port() {
+        Ok(port) => port,
+        Err(error) => return Ok(runtime.generic_link_unavailable(url, error.to_string())),
+    };
+    let plan = match build_launch_plan(chrome_path, &profiles_root, "generic-link", cdp_port, &url)
+    {
+        Ok(plan) => plan,
+        Err(error) => return Ok(runtime.generic_link_unavailable(url, error.to_string())),
+    };
+    runtime.close_provider_session();
+    let session = match launch_managed_chrome(plan) {
+        Ok(session) => session,
+        Err(error) => return Ok(runtime.generic_link_unavailable(url, error.to_string())),
+    };
+
+    Ok(runtime.store_launched_generic_link(url, session))
 }
 
 #[tauri::command]

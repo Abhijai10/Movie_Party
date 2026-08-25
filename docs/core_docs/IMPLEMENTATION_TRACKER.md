@@ -38,6 +38,40 @@ M8: Chrome/player crash watchers not wired
 
 # M6 PRODUCTION HARDENING PASS (2026-08-25)
 
+## M6 INVITE + PROVIDER MODE INTEGRATION PASS (2026-08-25)
+
+## Implemented in this pass
+
+- **Windows invite support**: configured the official Tauri deep-link plugin
+  for `moveparty://`; the official single-instance companion forwards a second
+  invite activation to the running application. Cold starts continue through
+  the existing pending-link buffer and Join Party parser.
+- **Provider source separation**: Create Party now submits distinct Local,
+  Provider Sync, and Generic Link requests. Named Provider Sync uses the
+  existing managed-Chrome/CDP launch path; generic links use the existing
+  generic HTML-media adapter path without provider identity inference.
+- **Capability honesty**: the native provider registry now exposes capability
+  data to the frontend. Provider Shared is shown as Experimental but disabled
+  because capture readiness has not been verified or wired as a runtime start
+  path.
+
+## Verification
+
+- `npm run lint` ✅
+- `npm run test` ✅
+- `npm run build` ✅
+- `cargo check` ✅ using a fresh temporary target directory because the
+  external-drive cache contains a pre-existing Apple metadata file with invalid
+  UTF-8.
+- `cargo test --lib providers::sync::tests` ✅ (9 tests)
+
+## External Verification Pending
+
+- Windows installer registration, cold-start invite activation, and forwarding
+  a second invite to a running application.
+- Real provider login, page detection, playback control, and Provider Shared
+  capture capability on supported Windows/macOS hardware.
+
 ## Implemented in this pass
 
 - **Runtime mutex recovery**: app-runtime sync coordinator and player locks now

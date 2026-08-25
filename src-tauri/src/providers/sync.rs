@@ -1,3 +1,5 @@
+use serde::Serialize;
+
 use super::{
     chrome::CdpCommand,
     generic::GenericProviderAdapter,
@@ -21,6 +23,17 @@ pub enum ProviderSupportLevel {
     Experimental,
     SyncOnly,
     Unsupported,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCapability {
+    pub id: String,
+    pub display_name: String,
+    pub sync_available: bool,
+    pub shared_available: bool,
+    pub shared_reason: String,
+    pub verification: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +89,26 @@ pub fn provider_id_from_str(provider_id: &str) -> Option<ProviderId> {
     }
 }
 
+pub fn provider_capabilities() -> Vec<ProviderCapability> {
+    [
+        ("youtube", "YouTube"),
+        ("netflix", "Netflix"),
+        ("prime", "Prime Video"),
+        ("jiohotstar", "JioHotstar"),
+    ]
+    .into_iter()
+    .map(|(id, display_name)| ProviderCapability {
+        id: id.to_string(),
+        display_name: display_name.to_string(),
+        sync_available: true,
+        shared_available: false,
+        shared_reason: "Provider Shared is experimental and unavailable until capture is verified on this device."
+            .to_string(),
+        verification: "EXTERNAL_VERIFICATION_PENDING".to_string(),
+    })
+    .collect()
+}
+
 pub fn provider_accepts_url(provider: ProviderId, url: &str) -> bool {
     let host = match host_from_url(url) {
         Some(host) => host.to_ascii_lowercase(),
@@ -98,6 +131,10 @@ pub fn provider_accepts_url(provider: ProviderId, url: &str) -> bool {
                 || host.ends_with(".jiocinema.com")
         }
     }
+}
+
+pub fn generic_link_accepts_url(url: &str) -> bool {
+    host_from_url(url).is_some()
 }
 
 fn host_from_url(url: &str) -> Option<&str> {
@@ -276,6 +313,26 @@ mod tests {
             Some(ProviderId::JioHotstar)
         );
         assert_eq!(provider_id_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn capabilities_expose_sync_without_claiming_shared_readiness() {
+        let capabilities = provider_capabilities();
+
+        assert_eq!(capabilities.len(), 4);
+        assert!(capabilities.iter().all(|capability| capability.sync_available));
+        assert!(capabilities.iter().all(|capability| !capability.shared_available));
+        assert!(capabilities
+            .iter()
+            .all(|capability| capability.verification == "EXTERNAL_VERIFICATION_PENDING"));
+    }
+
+    #[test]
+    fn generic_links_require_an_http_url_with_a_host() {
+        assert!(generic_link_accepts_url("https://example.com/movie.mp4"));
+        assert!(generic_link_accepts_url("http://media.example/movie.m3u8"));
+        assert!(!generic_link_accepts_url("moveparty://join/room"));
+        assert!(!generic_link_accepts_url("not-a-url"));
     }
 
     #[test]

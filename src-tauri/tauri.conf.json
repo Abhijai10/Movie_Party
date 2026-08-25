@@ -33,5 +33,14 @@
     "category": "Entertainment",
     "shortDescription": "Watch together and stay synchronized.",
     "longDescription": "Private two-person desktop cinema app for synchronized local media and provider playback."
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "moveparty"
+        ]
+      }
+    }
   }
 }

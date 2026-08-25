@@ -23,6 +23,10 @@ describe("parseMovePartyInvite", () => {
       });
   });
 
+  it("keeps duplicate platform deliveries idempotent at the parser boundary", () => {
+    expect(parseMovePartyInvite(invite)).toEqual(parseMovePartyInvite(invite));
+  });
+
   it("rejects missing room codes", () => {
     expect(parseMovePartyInvite(`moveparty://join/#${descriptor}`)).toMatchObject({
       ok: false,

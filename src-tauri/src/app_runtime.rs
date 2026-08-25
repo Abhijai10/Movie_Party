@@ -873,6 +873,36 @@ impl AppRuntime {
         snapshot_from_state(&state)
     }
 
+    pub fn store_launched_generic_link(
+        &self,
+        url: String,
+        session: crate::providers::chrome::ManagedChromeSession,
+    ) -> AppSnapshot {
+        let cdp_port = session.plan.cdp_port;
+        let mut state = self.lock();
+        state.chrome_session = Some(session);
+        state.provider.mode = "GENERIC_LINK".to_string();
+        state.provider.provider_id = None;
+        state.provider.url = Some(url);
+        state.provider.state =
+            format!("Chrome launched on CDP port {cdp_port}; waiting for media detection");
+        state.screen = "LOBBY".to_string();
+        state.local_participant.media_ready = false;
+        state.error = None;
+        snapshot_from_state(&state)
+    }
+
+    pub fn generic_link_unavailable(&self, url: String, reason: String) -> AppSnapshot {
+        let mut state = self.lock();
+        state.provider.mode = "GENERIC_LINK".to_string();
+        state.provider.provider_id = None;
+        state.provider.url = Some(url);
+        state.provider.state = format!("Unavailable: {reason}");
+        state.screen = "LOBBY".to_string();
+        state.error = Some(reason);
+        snapshot_from_state(&state)
+    }
+
     /// M4: Detect overdue preload schedules and send local notifications.
     /// Notification failure is recoverable: an Err never aborts or panics.
     pub fn check_overdue_schedules(&self) {

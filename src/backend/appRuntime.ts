@@ -49,6 +49,17 @@ export type TransferProgress = {
   goodputBps: number;
 };
 
+export type ProviderMode = "PROVIDER_SYNC" | "PROVIDER_SHARED";
+
+export type ProviderCapability = {
+  id: string;
+  displayName: string;
+  syncAvailable: boolean;
+  sharedAvailable: boolean;
+  sharedReason: string;
+  verification: "EXTERNAL_VERIFICATION_PENDING" | "VERIFIED";
+};
+
 export type AppSnapshot = {
   screen: string;
   room: {
@@ -194,8 +205,25 @@ export async function pickMediaFile(): Promise<string | null> {
   }
 }
 
-export async function launchProvider(providerId: string, url: string): Promise<AppSnapshot | null> {
-  return invokeSnapshotOrThrow("launch_provider", { providerId, url });
+export async function getProviderCapabilities(): Promise<ProviderCapability[]> {
+  try {
+    return await invoke<ProviderCapability[]>("get_provider_capabilities");
+  } catch (error) {
+    console.error("get_provider_capabilities failed", error);
+    return [];
+  }
+}
+
+export async function launchProvider(
+  providerId: string,
+  url: string,
+  mode: ProviderMode,
+): Promise<AppSnapshot | null> {
+  return invokeSnapshotOrThrow("launch_provider", { providerId, url, mode });
+}
+
+export async function launchGenericLink(url: string): Promise<AppSnapshot | null> {
+  return invokeSnapshotOrThrow("launch_generic_link", { url });
 }
 
 export async function joinParty(inviteCode: string): Promise<AppSnapshot | null> {

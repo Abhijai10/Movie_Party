@@ -11,19 +11,30 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { useState } from "react";
-import { pickMediaFile } from "../backend/appRuntime";
+import { useEffect, useState } from "react";
+import {
+  pickMediaFile,
+  type ProviderCapability,
+  type ProviderMode,
+} from "../backend/appRuntime";
 import { CinemaButton } from "../components/mp/CinemaButton";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { SourceCard } from "../components/mp/SourceCard";
+import { isGenericLink, providerModeStatus } from "../providers/providerSelection";
 
 type SourceKind = "local" | "stream" | "link";
+
+export type CreatePartyRequest =
+  | { source: "local"; mediaPath: string | null }
+  | { source: "provider"; providerId: string; url: string; mode: ProviderMode }
+  | { source: "link"; url: string };
 
 type CreatePartyViewProps = {
   isCreating: boolean;
   error: string | null;
+  providerCapabilities: ProviderCapability[];
   onBack: () => void;
-  onCreateLocalParty: (mediaPath: string | null) => Promise<boolean>;
+  onCreateParty: (request: CreatePartyRequest) => Promise<boolean>;
 };
 
 const sources = [
@@ -45,13 +56,16 @@ const sources = [
 export function CreatePartyView({
   isCreating,
   error,
+  providerCapabilities,
   onBack,
-  onCreateLocalParty,
+  onCreateParty,
 }: CreatePartyViewProps) {
   const [selected, setSelected] = useState<SourceKind>("local");
   const [file, setFile] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [path, setPath] = useState("");
+  const [providerId, setProviderId] = useState("");
+  const [providerMode, setProviderMode] = useState<ProviderMode>("PROVIDER_SYNC");
   const [status, setStatus] = useState<"idle" | "error">("idle");
   const [preparing, setPreparing] = useState(false);
 
@@ -62,6 +76,12 @@ export function CreatePartyView({
     setPath("");
     setPreparing(false);
   };
+
+  useEffect(() => {
+    if (!providerId && providerCapabilities[0]) {
+      setProviderId(providerCapabilities[0].id);
+    }
+  }, [providerCapabilities, providerId]);
 
   const onFile = (f: File | null) => {
     if (!f) return;
@@ -74,8 +94,11 @@ export function CreatePartyView({
     setStatus("idle");
   };
 
-  const activeSource = selected === "local" ? path.trim() : path.trim();
+  const activeSource = path.trim();
+  const selectedProvider = providerCapabilities.find((provider) => provider.id === providerId) ?? null;
   const hasSelection = selected === "local" ? Boolean(file || activeSource) : Boolean(activeSource);
+  const providerStatus = providerModeStatus(selectedProvider, providerMode);
+  const canPrepareProvider = selected !== "stream" || providerStatus.canPrepare;
   const selectedMovieName =
     file?.name ?? (path.trim() ? (path.trim().split(/[\\/]/).at(-1) ?? "") : "");
 
@@ -84,12 +107,36 @@ export function CreatePartyView({
       setStatus("error");
       return;
     }
+    if (
+      selected === "stream" &&
+      !providerStatus.canPrepare
+    ) {
+      setStatus("error");
+      return;
+    }
+    if (selected === "link" && !isGenericLink(activeSource)) {
+      setStatus("error");
+      return;
+    }
     setStatus("idle");
     setPreparing(true);
   };
 
   const create = () => {
-    void onCreateLocalParty(activeSource || null);
+    if (selected === "stream" && selectedProvider) {
+      void onCreateParty({
+        source: "provider",
+        providerId: selectedProvider.id,
+        url: activeSource,
+        mode: providerMode,
+      });
+      return;
+    }
+    if (selected === "link") {
+      void onCreateParty({ source: "link", url: activeSource });
+      return;
+    }
+    void onCreateParty({ source: "local", mediaPath: activeSource || null });
   };
 
   return (
@@ -267,7 +314,74 @@ export function CreatePartyView({
               >
                 <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-6 flex-1 flex flex-col justify-center">
                   <label className="text-[11px] tracking-[0.24em] uppercase text-white/45">
-                    Provider URL
+                    Provider
+                  </label>
+                  <select
+                    value={providerId}
+                    onChange={(event) => {
+                      setProviderId(event.target.value);
+                      setStatus("idle");
+                    }}
+                    disabled={providerCapabilities.length === 0}
+                    className="mt-3 w-full appearance-none rounded-xl border border-white/10 bg-[#0D0B14] px-4 py-3 text-sm text-white focus:outline-none focus:border-[#9F7AEA]/60 disabled:cursor-not-allowed disabled:opacity-50"
+                    data-testid="provider-select"
+                  >
+                    {providerCapabilities.length === 0 ? (
+                      <option value="">Checking provider availability...</option>
+                    ) : (
+                      providerCapabilities.map((provider) => (
+                        <option key={provider.id} value={provider.id}>
+                          {provider.displayName}
+                        </option>
+                      ))
+                    )}
+                  </select>
+
+                  <span className="mt-6 text-[11px] tracking-[0.24em] uppercase text-white/45">
+                    Mode
+                  </span>
+                  <div className="mt-3 grid grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      aria-pressed={providerMode === "PROVIDER_SYNC"}
+                      onClick={() => {
+                        setProviderMode("PROVIDER_SYNC");
+                        setStatus("idle");
+                      }}
+                      className={`rounded-xl border px-4 py-3 text-left transition ${
+                        providerMode === "PROVIDER_SYNC"
+                          ? "border-[#9F7AEA]/60 bg-[#6B46C1]/30 text-white"
+                          : "border-white/10 bg-white/[0.03] text-white/65 hover:bg-white/[0.06]"
+                      }`}
+                      data-testid="provider-sync-mode"
+                    >
+                      <span className="block text-sm">Sync</span>
+                      <span className="mt-1 block text-[10px] text-white/45">Both viewers sign in</span>
+                    </button>
+                    <button
+                      type="button"
+                      aria-disabled={!selectedProvider?.sharedAvailable}
+                      disabled={!selectedProvider?.sharedAvailable}
+                      onClick={() => {
+                        setProviderMode("PROVIDER_SHARED");
+                        setStatus("idle");
+                      }}
+                      className="rounded-xl border border-white/10 bg-white/[0.02] px-4 py-3 text-left text-white/40 transition disabled:cursor-not-allowed disabled:opacity-60"
+                      data-testid="provider-shared-mode"
+                    >
+                      <span className="block text-sm">Shared</span>
+                      <span className="mt-1 block text-[10px]">Experimental</span>
+                    </button>
+                  </div>
+
+                  {selectedProvider && !selectedProvider.sharedAvailable ? (
+                    <p className="mt-3 text-white/40 text-xs leading-relaxed" data-testid="provider-shared-status">
+                      {selectedProvider.sharedReason}
+                    </p>
+                  ) : null}
+
+                  <label className="mt-6 text-[11px] tracking-[0.24em] uppercase text-white/45">
+                    Provider page URL
                   </label>
                   <input
                     type="url"
@@ -281,8 +395,8 @@ export function CreatePartyView({
                     data-testid="provider-url-input"
                   />
                   <p className="mt-5 text-white/40 text-xs leading-relaxed">
-                    Open a supported provider URL from your own signed-in browser profile. Move
-                    Party never receives your provider credentials.
+                    Sync opens the selected provider in its dedicated browser profile. Each viewer
+                    signs in directly; Move Party never receives provider credentials.
                   </p>
                 </div>
               </motion.div>
@@ -326,7 +440,10 @@ export function CreatePartyView({
               data-testid="create-error"
             >
               <AlertCircle className="w-4 h-4" />{" "}
-              {error ?? "Unsupported source. Try MP4, MKV or a direct URL."}
+              {error ??
+                (selected === "stream"
+                  ? "Choose an available provider, a supported mode, and its matching page URL."
+                  : "Unsupported source. Try MP4, MKV or a direct URL.")}
             </div>
           )}
 
@@ -356,7 +473,9 @@ export function CreatePartyView({
                     Selected source
                   </span>
                   <p className="font-serif-display text-xl text-white truncate">
-                    {selectedMovieName || "Streaming session"}
+                    {selected === "stream"
+                      ? selectedProvider?.displayName ?? "Provider session"
+                      : selectedMovieName || "Streaming session"}
                   </p>
                 </div>
               </div>
@@ -382,7 +501,13 @@ export function CreatePartyView({
                     className={`w-full ${isCreating ? "[&_svg]:animate-spin" : ""}`}
                     data-testid="create-room-btn"
                   >
-                    {isCreating ? "Creating" : "Create cinema room"}
+                  {isCreating
+                    ? "Creating"
+                    : selected === "stream"
+                      ? "Prepare provider"
+                      : selected === "link"
+                        ? "Open link room"
+                        : "Create cinema room"}
                   </CinemaButton>
                 </div>
               </div>
@@ -394,11 +519,15 @@ export function CreatePartyView({
               </span>
               <CinemaButton
                 onClick={prepare}
-                disabled={!hasSelection}
+                disabled={!hasSelection || !canPrepareProvider}
                 icon={ArrowRight}
                 data-testid="prepare-cinema-btn"
               >
-                Prepare Cinema
+                {selected === "stream"
+                  ? "Prepare provider"
+                  : selected === "link"
+                    ? "Prepare link"
+                    : "Prepare Cinema"}
               </CinemaButton>
             </div>
           )}
