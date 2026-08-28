@@ -313,6 +313,21 @@ impl From<&LibPlayerSnapshot> for PlayerSnapshot {
     }
 }
 
+impl PlayerSnapshot {
+    fn from_player(player: &dyn LocalPlayer) -> Self {
+        Self::from_parts(player.snapshot(), player.presentation_status())
+    }
+
+    fn from_parts(
+        snapshot: LibPlayerSnapshot,
+        presentation: PlayerPresentationStatus,
+    ) -> Self {
+        let mut output = Self::from(&snapshot);
+        output.presentation = presentation;
+        output
+    }
+}
+
 // ── RuntimeInner / AppRuntimeState ────────────────────────────────────────────
 
 struct RuntimeInner {
@@ -404,6 +419,7 @@ struct AppRuntimeState {
     chat: Vec<ChatSnapshot>,
     reactions: Vec<ReactionSnapshot>,
     ghost_mode: bool,
+    ghost_mode_before_privacy: bool,
     privacy_mode: bool,
     last_recovery: Option<RuntimeRecoverySnapshot>,
     shared_controls: bool,
@@ -614,6 +630,7 @@ impl AppRuntime {
                     chat: Vec::new(),
                     reactions: Vec::new(),
                     ghost_mode: false,
+                    ghost_mode_before_privacy: false,
                     privacy_mode: false,
                     last_recovery: None,
                     shared_controls: false,
@@ -1452,21 +1469,12 @@ impl AppRuntime {
             .filter(|p| !p.trim().is_empty())
             .map(PathBuf::from);
 
-        let is_dev = std::env::var("MOVE_PARTY_DEV_LOOPBACK")
-            .map(|v| v == "1")
-            .unwrap_or(false);
+        let is_dev = crate::network::tailscale::dev_loopback_enabled();
         let (bind_addr, tailscale_ip) = if is_dev {
             (loopback_bind_addr(), "127.0.0.1".to_string())
         } else {
-            let status = crate::network::tailscale::detect_status()
-                .await
-                .map_err(|e| format!("MP-NET-001 tailscale detection failed: {e}"))?;
-            if !status.signed_in {
-                return Err("MP-NET-001 tailscale is not signed in".to_string());
-            }
-            let ipv4 = status
-                .local_ipv4
-                .ok_or_else(|| "MP-NET-001 tailscale has no local IPv4".to_string())?;
+            let readiness = crate::network::tailscale::local_readiness().await;
+            let ipv4 = crate::network::tailscale::required_ipv4(&readiness)?;
             (
                 tailscale_bind_addr(ipv4).map_err(|e| e.to_string())?,
                 ipv4.to_string(),
@@ -1598,7 +1606,7 @@ impl AppRuntime {
                                 Self::media_load_error_message(&e),
                             );
                         } else {
-                            state.player_snapshot = PlayerSnapshot::from(&player.snapshot());
+                            state.player_snapshot = PlayerSnapshot::from_player(&player);
                         }
                         state.player = Some(Arc::new(std::sync::Mutex::new(player)));
                     }
@@ -1612,7 +1620,7 @@ impl AppRuntime {
                                 Self::media_load_error_message(&e),
                             );
                         } else {
-                            state.player_snapshot = PlayerSnapshot::from(&player.snapshot());
+                            state.player_snapshot = PlayerSnapshot::from_player(&player);
                         }
                         state.player = Some(Arc::new(std::sync::Mutex::new(player)));
                     }
@@ -1664,6 +1672,15 @@ impl AppRuntime {
         quic::validate_quic_bind_addr(addr)
             .map_err(|e| format!("MP-NET-001 invalid peer endpoint: {e}"))?;
 
+        if !crate::network::tailscale::dev_loopback_enabled() {
+            let readiness = crate::network::tailscale::local_readiness().await;
+            if !readiness.is_usable() {
+                return Err(readiness
+                    .stable_error()
+                    .unwrap_or_else(|| "MP-NET-TS-004 Tailscale has no usable private IPv4 address".to_string()));
+            }
+        }
+
         let credentials = room::invite_to_credentials(&invite);
         let identity = self.inner.identity();
         let display_name = self.lock().local_participant.display_name.clone();
@@ -1676,7 +1693,12 @@ impl AppRuntime {
             display_name,
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| match error {
+            quic::QuicError::Connection(_) | quic::QuicError::Connect(_) => {
+                "MP-NET-TS-005 host is not reachable through Tailscale".to_string()
+            }
+            _ => error.to_string(),
+        })?;
 
         if auth_accept.host_device_id != invite.host_device_id {
             return Err("MP-NET-001 authenticated host identity mismatch".to_string());
@@ -3120,7 +3142,7 @@ impl AppRuntime {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match p.play() {
             Ok(()) => {
-                state.player_snapshot = PlayerSnapshot::from(&p.snapshot());
+                state.player_snapshot = PlayerSnapshot::from_player(&*p);
             }
             Err(error) => {
                 Self::set_player_command_error(state, &error);
@@ -3138,7 +3160,7 @@ impl AppRuntime {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match p.pause() {
             Ok(()) => {
-                state.player_snapshot = PlayerSnapshot::from(&p.snapshot());
+                state.player_snapshot = PlayerSnapshot::from_player(&*p);
             }
             Err(error) => {
                 Self::set_player_command_error(state, &error);
@@ -3156,7 +3178,7 @@ impl AppRuntime {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match p.seek(position_ms) {
             Ok(()) => {
-                state.player_snapshot = PlayerSnapshot::from(&p.snapshot());
+                state.player_snapshot = PlayerSnapshot::from_player(&*p);
             }
             Err(error) => {
                 Self::set_player_command_error(state, &error);
@@ -3173,7 +3195,7 @@ impl AppRuntime {
         let p = player
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.player_snapshot = PlayerSnapshot::from(&p.snapshot());
+        state.player_snapshot = PlayerSnapshot::from_player(&*p);
     }
 
     fn set_player_error(state: &mut AppRuntimeState, message: String) {
@@ -3240,15 +3262,17 @@ impl AppRuntime {
                 let Some(player_arc) = player_arc else {
                     break; // No player — stop polling
                 };
-                let snap = player_arc
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .snapshot();
+                let (snap, presentation) = {
+                    let player = player_arc
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    (player.snapshot(), player.presentation_status())
+                };
                 let position_changed = snap.position_ms != last_position;
                 let state_changed = format!("{:?}", snap.state) != last_state_name;
                 if position_changed || state_changed {
                     let mut state = inner.lock();
-                    state.player_snapshot = PlayerSnapshot::from(&snap);
+                    state.player_snapshot = PlayerSnapshot::from_parts(snap.clone(), presentation);
                     last_position = snap.position_ms;
                     last_state_name = format!("{:?}", snap.state);
                     state.sync.position_ms = snap.position_ms;
@@ -3393,6 +3417,35 @@ impl AppRuntime {
         }
         sync_room_snapshot(&mut state);
         snapshot_from_state(&state)
+    }
+
+    /// Attach the already-selected local source to Cinema's native host.
+    /// This only changes presentation; coordinator ownership and media source
+    /// selection remain unchanged.
+    pub fn attach_native_video_surface(&self, surface_handle: usize) -> AppSnapshot {
+        let mut state = self.lock();
+        let Some(player) = state.player.clone() else {
+            Self::set_player_diagnostic_error(
+                &mut state,
+                "MP-MEDIA-008 no local player is available for this room".to_string(),
+            );
+            return snapshot_from_state(&state);
+        };
+        let mut player = player
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match player.attach_native_surface(surface_handle) {
+            Ok(()) => {
+                state.player_snapshot = PlayerSnapshot::from_player(&*player);
+                sync_room_snapshot(&mut state);
+                snapshot_from_state(&state)
+            }
+            Err(error) => {
+                let message = Self::media_command_error_message(&error);
+                Self::set_player_diagnostic_error(&mut state, message.clone());
+                snapshot_from_state(&state)
+            }
+        }
     }
 
     pub fn pause_playback(&self) -> AppSnapshot {
@@ -3749,6 +3802,9 @@ impl AppRuntime {
 
     pub fn set_privacy_mode(&self, enabled: bool) -> AppSnapshot {
         let mut state = self.lock();
+        if enabled && !state.privacy_mode {
+            state.ghost_mode_before_privacy = state.ghost_mode;
+        }
         state.privacy_mode = enabled;
         if enabled {
             state.ghost_mode = true;
@@ -3760,6 +3816,10 @@ impl AppRuntime {
             state.call_signal_ledger.reset();
             state.local_participant.camera_enabled = false;
             state.local_participant.microphone_enabled = false;
+        } else {
+            // Privacy never revives local device tracks. It only restores the
+            // prior visual Ghost state after the user leaves Privacy Mode.
+            state.ghost_mode = state.ghost_mode_before_privacy;
         }
         snapshot_from_state(&state)
     }
@@ -3889,7 +3949,7 @@ impl AppRuntime {
                     state.local_participant.media_ready = false;
                     Self::set_player_error(&mut state, Self::media_load_error_message(&e));
                 } else {
-                    state.player_snapshot = PlayerSnapshot::from(&player.snapshot());
+                    state.player_snapshot = PlayerSnapshot::from_player(&player);
                 }
                 state.player = Some(Arc::new(std::sync::Mutex::new(player)));
             }
@@ -3900,7 +3960,7 @@ impl AppRuntime {
                     state.local_participant.media_ready = false;
                     Self::set_player_error(&mut state, Self::media_load_error_message(&e));
                 } else {
-                    state.player_snapshot = PlayerSnapshot::from(&player.snapshot());
+                    state.player_snapshot = PlayerSnapshot::from_player(&player);
                 }
                 state.player = Some(Arc::new(std::sync::Mutex::new(player)));
             }
@@ -4332,6 +4392,33 @@ mod tests {
             snapshot.call.status,
             crate::call::CallRuntimeStatus::Unavailable
         );
+    }
+
+    #[test]
+    fn ghost_mode_keeps_local_call_devices_unchanged() {
+        let runtime = AppRuntime::new();
+        runtime.set_camera_enabled(true);
+        runtime.set_microphone_enabled(true);
+
+        let snapshot = runtime.set_ghost_mode(true);
+
+        assert!(snapshot.ghost_mode);
+        assert!(snapshot.call.camera.enabled);
+        assert!(snapshot.call.microphone.enabled);
+    }
+
+    #[test]
+    fn leaving_privacy_does_not_reenable_devices_or_stick_ghost_mode() {
+        let runtime = AppRuntime::new();
+        let private = runtime.set_privacy_mode(true);
+        assert!(private.ghost_mode);
+
+        let restored = runtime.set_privacy_mode(false);
+
+        assert!(!restored.privacy_mode);
+        assert!(!restored.ghost_mode);
+        assert!(!restored.call.camera.enabled);
+        assert!(!restored.call.microphone.enabled);
     }
 
     #[test]

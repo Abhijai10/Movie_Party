@@ -323,7 +323,7 @@ export function CreatePartyView({
                       setStatus("idle");
                     }}
                     disabled={providerCapabilities.length === 0}
-                    className="mt-3 w-full appearance-none rounded-xl border border-white/10 bg-[#0D0B14] px-4 py-3 text-sm text-white focus:outline-none focus:border-[#9F7AEA]/60 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="provider-select mt-3 w-full appearance-none rounded-xl border border-white/10 px-4 py-3 text-sm focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                     data-testid="provider-select"
                   >
                     {providerCapabilities.length === 0 ? (

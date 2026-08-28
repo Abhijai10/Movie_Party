@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod presentation;
+pub mod native_surface;
 
 pub const LOCAL_PLAYER_BACKEND: &str = "libmpv";
 
@@ -59,6 +60,8 @@ pub enum PlayerError {
     PlaybackError { message: String },
     #[error("MP-MEDIA-007 failed to load media: {reason}")]
     LoadFailed { reason: String },
+    #[error("MP-MEDIA-008 native video surface is unavailable: {reason}")]
+    NativeSurfaceUnavailable { reason: String },
 }
 
 /// Player abstraction layer. The sync coordinator communicates ONLY through
@@ -101,6 +104,18 @@ pub trait LocalPlayer {
     /// Release all resources held by the player (mpv context, render context, etc.).
     /// After `close()` the player may be reused by calling `open()` again.
     fn close(&mut self);
+
+    /// Attach the platform-native video host used for local playback.
+    /// The default keeps non-native test players honest about unsupported presentation.
+    fn attach_native_surface(&mut self, _surface_handle: usize) -> Result<(), PlayerError> {
+        Err(PlayerError::NativeSurfaceUnavailable {
+            reason: "this player backend cannot embed native video".to_string(),
+        })
+    }
+
+    fn presentation_status(&self) -> presentation::PlayerPresentationStatus {
+        presentation::PlayerPresentationStatus::native_render_host_required()
+    }
 }
 
 // ── LibMpv availability detection ────────────────────────────────────────────
@@ -250,6 +265,14 @@ impl LocalPlayer for LibMpvPlayer {
     fn close(&mut self) {
         self.media_path = None;
         self.snapshot = PlayerSnapshot::default();
+    }
+
+    fn presentation_status(&self) -> presentation::PlayerPresentationStatus {
+        if self.available {
+            presentation::PlayerPresentationStatus::native_render_host_required()
+        } else {
+            presentation::PlayerPresentationStatus::unavailable("libmpv is unavailable in this environment.")
+        }
     }
 }
 

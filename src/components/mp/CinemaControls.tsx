@@ -28,6 +28,9 @@ type CinemaControlsProps = {
   onToggleChat: () => void;
   onSendReaction: () => void;
   hasUnreadChat: boolean;
+  socialControlsHidden: boolean;
+  callTileHidden: boolean;
+  onShowCallTile: () => void;
   isHost: boolean;
   sharedControls: boolean;
   onToggleSharedControls: () => void;
@@ -60,6 +63,9 @@ export function CinemaControls({
   onToggleChat,
   onSendReaction,
   hasUnreadChat,
+  socialControlsHidden,
+  callTileHidden,
+  onShowCallTile,
   isHost,
   sharedControls,
   onToggleSharedControls,
@@ -135,28 +141,32 @@ export function CinemaControls({
               <RotateCw className="w-4 h-4" strokeWidth={1.6} />
             </IconBtn>
 
-            <IconBtn
-              onClick={onToggleMicrophone}
-              label={microphoneEnabled ? "Mute microphone" : "Unmute microphone"}
-              testId="cinema-mic-btn"
-            >
-              {microphoneEnabled ? (
-                <Mic className="w-4 h-4" strokeWidth={1.6} />
-              ) : (
-                <MicOff className="w-4 h-4 text-white/60" strokeWidth={1.6} />
-              )}
-            </IconBtn>
-            <IconBtn
-              onClick={onToggleCamera}
-              label={cameraEnabled ? "Turn camera off" : "Turn camera on"}
-              testId="cinema-camera-btn"
-            >
-              {cameraEnabled ? (
-                <Video className="w-4 h-4" strokeWidth={1.6} />
-              ) : (
-                <VideoOff className="w-4 h-4 text-white/60" strokeWidth={1.6} />
-              )}
-            </IconBtn>
+            {!socialControlsHidden ? (
+              <>
+                <IconBtn
+                  onClick={onToggleMicrophone}
+                  label={microphoneEnabled ? "Mute microphone" : "Unmute microphone"}
+                  testId="cinema-mic-btn"
+                >
+                  {microphoneEnabled ? (
+                    <Mic className="w-4 h-4" strokeWidth={1.6} />
+                  ) : (
+                    <MicOff className="w-4 h-4 text-white/60" strokeWidth={1.6} />
+                  )}
+                </IconBtn>
+                <IconBtn
+                  onClick={onToggleCamera}
+                  label={cameraEnabled ? "Turn camera off" : "Turn camera on"}
+                  testId="cinema-camera-btn"
+                >
+                  {cameraEnabled ? (
+                    <Video className="w-4 h-4" strokeWidth={1.6} />
+                  ) : (
+                    <VideoOff className="w-4 h-4 text-white/60" strokeWidth={1.6} />
+                  )}
+                </IconBtn>
+              </>
+            ) : null}
 
             <div className="font-mono-mp text-xs text-white/70 tracking-widest ml-2">
               {formatMs(currentMs)}
@@ -166,28 +176,35 @@ export function CinemaControls({
           </div>
 
           <div className="flex items-center gap-1.5">
-            <IconBtn
-              onClick={onToggleChat}
-              label="Chat"
-              active={chatOpen}
-              hasDot={hasUnreadChat && !chatOpen}
-              testId="cinema-chat-btn"
-            >
-              <MessageCircle className="w-4 h-4" strokeWidth={1.6} />
-            </IconBtn>
-            <IconBtn onClick={onSendReaction} label="Send reaction" testId="cinema-react-btn">
-              <Smile className="w-4 h-4" strokeWidth={1.6} />
-            </IconBtn>
-            {isHost && (
-              <IconBtn
-                onClick={onToggleSharedControls}
-                label={sharedControls ? "Switch to Host Only" : "Switch to Shared Controls"}
-                active={sharedControls}
-                testId="cinema-shared-btn"
-              >
-                <Users className="w-4 h-4" strokeWidth={1.6} />
-              </IconBtn>
-            )}
+            {!socialControlsHidden ? (
+              <>
+                <IconBtn
+                  onClick={onToggleChat}
+                  label="Chat"
+                  active={chatOpen}
+                  hasDot={hasUnreadChat && !chatOpen}
+                  testId="cinema-chat-btn"
+                >
+                  <MessageCircle className="w-4 h-4" strokeWidth={1.6} />
+                </IconBtn>
+                <IconBtn onClick={onShowCallTile} label="Show call" active={!callTileHidden} testId="cinema-call-btn">
+                  <Video className="w-4 h-4" strokeWidth={1.6} />
+                </IconBtn>
+                <IconBtn onClick={onSendReaction} label="Send reaction" testId="cinema-react-btn">
+                  <Smile className="w-4 h-4" strokeWidth={1.6} />
+                </IconBtn>
+                {isHost && (
+                  <IconBtn
+                    onClick={onToggleSharedControls}
+                    label={sharedControls ? "Switch to Host Only" : "Switch to Shared Controls"}
+                    active={sharedControls}
+                    testId="cinema-shared-btn"
+                  >
+                    <Users className="w-4 h-4" strokeWidth={1.6} />
+                  </IconBtn>
+                )}
+              </>
+            ) : null}
             <IconBtn onClick={onLeave} label="Leave cinema" testId="cinema-leave-btn">
               <LogOut className="w-4 h-4" strokeWidth={1.6} />
             </IconBtn>

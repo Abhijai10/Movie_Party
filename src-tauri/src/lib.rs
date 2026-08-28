@@ -28,6 +28,14 @@ use tauri_plugin_deep_link::DeepLinkExt;
 
 const DEEP_LINK_OPENED_EVENT: &str = "deep_link_opened";
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum TailscaleSetupAction {
+    Install,
+    SignIn,
+    PartnerHelp,
+}
+
 #[derive(Default)]
 struct PendingDeepLinks(Mutex<Vec<String>>);
 
@@ -49,6 +57,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|_, _, _| {}))
         .manage(app_runtime::AppRuntime::new_without_emitter())
         .manage(PendingDeepLinks::default())
+        .manage(media::player::native_surface::NativeVideoSurfaceState::default())
         .setup(|app| {
             // M4: Initialize the SQLite database on startup, restore identity,
             // detect overdue preloads (notification-only — never consumes
@@ -88,6 +97,8 @@ pub fn run() {
             app_metadata,
             take_pending_deep_links,
             get_app_snapshot,
+            get_tailscale_readiness,
+            open_tailscale_setup,
             show_home,
             show_join_party,
             request_end_party,
@@ -112,6 +123,9 @@ pub fn run() {
             set_camera_enabled,
             set_privacy_mode,
             set_ghost_mode,
+            attach_native_video_surface,
+            resize_native_video_surface,
+            detach_native_video_surface,
             pick_media_file,
             launch_provider,
             launch_generic_link,
@@ -170,6 +184,35 @@ fn get_app_snapshot(
 }
 
 #[tauri::command]
+async fn get_tailscale_readiness() -> crate::network::tailscale::TailscaleReadiness {
+    crate::network::tailscale::local_readiness().await
+}
+
+#[tauri::command]
+async fn open_tailscale_setup(action: TailscaleSetupAction) -> Result<(), String> {
+    match action {
+        TailscaleSetupAction::SignIn => crate::network::tailscale::begin_sign_in()
+            .await
+            .map_err(|error| error.to_string()),
+        TailscaleSetupAction::Install => open_external_url("https://tailscale.com/download"),
+        TailscaleSetupAction::PartnerHelp => open_external_url("https://tailscale.com/kb/1084/sharing"),
+    }
+}
+
+fn open_external_url(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("explorer.exe").arg(url).spawn();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let result: Result<std::process::Child, std::io::Error> = Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "external setup actions are unsupported on this platform",
+    ));
+    result.map(|_| ()).map_err(|error| format!("MP-NET-TS-003 could not open Tailscale setup: {error}"))
+}
+
+#[tauri::command]
 fn show_home(runtime: tauri::State<'_, app_runtime::AppRuntime>) -> app_runtime::AppSnapshot {
     runtime.return_home()
 }
@@ -215,6 +258,40 @@ fn mark_ready(runtime: tauri::State<'_, app_runtime::AppRuntime>) -> app_runtime
 #[tauri::command]
 fn enter_cinema(runtime: tauri::State<'_, app_runtime::AppRuntime>) -> app_runtime::AppSnapshot {
     runtime.enter_cinema()
+}
+
+#[tauri::command]
+fn attach_native_video_surface(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    surface: tauri::State<'_, media::player::native_surface::NativeVideoSurfaceState>,
+    bounds: media::player::native_surface::NativeVideoBounds,
+) -> Result<app_runtime::AppSnapshot, String> {
+    let handle = surface
+        .attach(&app, bounds)
+        .map_err(|error| error.to_string())?;
+    Ok(runtime.attach_native_video_surface(handle))
+}
+
+#[tauri::command]
+fn resize_native_video_surface(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    surface: tauri::State<'_, media::player::native_surface::NativeVideoSurfaceState>,
+    bounds: media::player::native_surface::NativeVideoBounds,
+) -> Result<app_runtime::AppSnapshot, String> {
+    let handle = surface
+        .attach(&app, bounds)
+        .map_err(|error| error.to_string())?;
+    Ok(runtime.attach_native_video_surface(handle))
+}
+
+#[tauri::command]
+fn detach_native_video_surface(
+    app: tauri::AppHandle,
+    surface: tauri::State<'_, media::player::native_surface::NativeVideoSurfaceState>,
+) -> Result<(), String> {
+    surface.detach(&app).map_err(|error| error.to_string())
 }
 
 #[tauri::command]

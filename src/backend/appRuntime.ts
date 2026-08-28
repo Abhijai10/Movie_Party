@@ -51,6 +51,16 @@ export type TransferProgress = {
 
 export type ProviderMode = "PROVIDER_SYNC" | "PROVIDER_SHARED";
 
+export type TailscaleState = "NOT_INSTALLED" | "SIGNED_OUT" | "CONNECTED" | "UNAVAILABLE";
+
+export type TailscaleReadiness = {
+  state: TailscaleState;
+  code: string | null;
+  ip: string | null;
+  deviceName: string | null;
+  message: string;
+};
+
 export type ProviderCapability = {
   id: string;
   displayName: string;
@@ -179,6 +189,32 @@ export async function getAppSnapshot(): Promise<AppSnapshot | null> {
   return invokeSnapshot("get_app_snapshot");
 }
 
+export async function getTailscaleReadiness(): Promise<TailscaleReadiness> {
+  try {
+    return await invoke<TailscaleReadiness>("get_tailscale_readiness");
+  } catch {
+    return {
+      state: "UNAVAILABLE",
+      code: "MP-NET-TS-003",
+      ip: null,
+      deviceName: null,
+      message: "Tailscale status could not be checked. Make sure its service is running.",
+    };
+  }
+}
+
+export async function openTailscaleSetup(
+  action: "INSTALL" | "SIGN_IN" | "PARTNER_HELP",
+): Promise<boolean> {
+  try {
+    await invoke("open_tailscale_setup", { action });
+    return true;
+  } catch (error) {
+    console.error("open_tailscale_setup failed", error);
+    return false;
+  }
+}
+
 export async function showHome(): Promise<AppSnapshot | null> {
   return invokeSnapshot("show_home");
 }
@@ -253,6 +289,33 @@ export async function markReady(): Promise<AppSnapshot | null> {
 
 export async function enterCinema(): Promise<AppSnapshot | null> {
   return invokeSnapshot("enter_cinema");
+}
+
+export type NativeVideoBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export async function attachNativeVideoSurface(
+  bounds: NativeVideoBounds,
+): Promise<AppSnapshot | null> {
+  return invokeSnapshot("attach_native_video_surface", { bounds });
+}
+
+export async function resizeNativeVideoSurface(
+  bounds: NativeVideoBounds,
+): Promise<AppSnapshot | null> {
+  return invokeSnapshot("resize_native_video_surface", { bounds });
+}
+
+export async function detachNativeVideoSurface(): Promise<void> {
+  try {
+    await invoke("detach_native_video_surface");
+  } catch (error) {
+    console.error("detach_native_video_surface failed", error);
+  }
 }
 
 export async function pausePlayback(): Promise<AppSnapshot | null> {

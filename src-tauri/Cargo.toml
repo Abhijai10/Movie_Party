@@ -11,7 +11,7 @@ name = "move_party_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = []
+default = ["mpv"]
 mpv = ["dep:libloading"]
 
 [build-dependencies]

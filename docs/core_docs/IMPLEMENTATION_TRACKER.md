@@ -26,13 +26,145 @@ Architecture:
 LOCKED
 
 Critical Blockers:
-M3: Native mpv render host attachment requires platform-window integration verification
+M3: Native mpv Cinema host is implemented; real macOS/Windows libmpv playback requires external verification
 M4: OS Keychain/Credential Manager and notification dispatch require platform verification
 M5: Real two-device WebRTC call needs physical devices and OS permission prompts
 M6: Real Chrome/provider login and media playback require external verification
 M7: ScreenCaptureKit needs macOS permission dialog
 M8: Chrome/player crash watchers not wired
 ````
+
+---
+
+# M6 SOCIAL OVERLAY + PRIVACY STATE PASS (2026-08-28)
+
+## Implemented in this pass
+
+- **Local and remote call presentation**: Cinema and Lobby device controls
+  remain local-outgoing controls; the floating peer tile now renders from the
+  separate peer participant snapshot fields and is display-only. It no longer
+  presents local device state, device inventory, call-mode controls, or raw
+  diagnostics as peer UI.
+- **Call tile interaction**: tile position, hidden state, and minimized state
+  are held in AppShell for the active party. The practical tile surface is
+  draggable with pointer capture, viewport clamping, selection prevention, and
+  an explicit overlay layer above Lobby/Cinema content. Close hides locally;
+  minimize keeps a compact, draggable video/avatar tile with restore control.
+- **Lobby and chat**: Lobby social controls remain floating overlays, the
+  Ready Check action wraps within its own footer at narrow desktop widths, and
+  the provider select explicitly uses the dark native control scheme. Cinema
+  and Lobby chat use the same larger translucent panel; Cinema now separates a
+  five-second incoming preview from a manually-opened composing session.
+- **Ghost and Privacy**: Ghost Mode conceals local social UI only and leaves
+  call device state untouched. Privacy Mode conceals those overlays while
+  disabling local camera/microphone; leaving Privacy restores the prior Ghost
+  visual state without re-enabling either device.
+
+## Verification
+
+- `npm run lint` ✅
+- `npm run test` ✅ (6 files, 19 tests)
+- `npm run build` ✅
+- `cargo check` ✅ using `/private/tmp/moveparty-batch3-target`
+- focused Ghost/Privacy runtime tests ✅
+
+## External Verification Pending
+
+- Verify on macOS and Windows that local mic/camera controls change outgoing
+  tracks only, while the peer tile follows the peer participant status.
+- Verify pointer dragging, viewport bounds, z-order over Lobby cards, compact
+  minimize/restore, local close/reopen, and narrow-window Ready Check layout.
+- Verify real remote camera/microphone transitions with a second device. The
+  current protocol does not yet send live remote device-track telemetry, so
+  participant fields remain the existing remote-status boundary.
+- Verify Ghost and Privacy behavior with actual camera/microphone permissions:
+  Ghost must preserve remote delivery; Privacy must stop it and require an
+  explicit user re-enable afterward.
+
+---
+
+# M6 TAILSCALE ONBOARDING + REACHABILITY PASS (2026-08-26)
+
+## Implemented in this pass
+
+- **Typed local readiness**: the existing `tailscale status --json` boundary
+  now reports `NOT_INSTALLED`, `SIGNED_OUT`, `CONNECTED`, or `UNAVAILABLE`,
+  with a usable Tailscale IPv4 and device name only for a healthy connection.
+  CLI calls use structured arguments and a bounded timeout; loopback remains
+  available only under the explicit `MOVE_PARTY_DEV_LOOPBACK=1` flag.
+- **First-run setup gate**: Home/Create/Join remain unchanged underneath a
+  small prerequisite surface. It opens official Tailscale install/help pages
+  or asks the locally installed Tailscale CLI to start its own sign-in flow;
+  Move Party never collects credentials or tailnet administration access.
+- **Host precondition**: production room creation now rejects missing,
+  signed-out, unavailable, or address-less Tailscale before starting QUIC.
+  A healthy host can still create a room without any guest preconnection.
+- **Guest reachability**: Join validates local Tailscale readiness before the
+  existing authenticated QUIC connection. Endpoint connection failures map to
+  `MP-NET-TS-005`, which presents a concise partner-connect recovery surface.
+- **Invite preservation**: a pending deep link or pasted invite remains in
+  AppShell state while onboarding blocks the screen, then resumes the existing
+  Join Party flow after a successful refresh.
+
+## Verification
+
+- `cargo check` ✅ using a temporary target directory
+- `cargo test network::tailscale --lib` ✅ (9 tests)
+- `npm run lint` ✅
+- `npm run test` ✅ (includes pending deep-link parsing tests)
+- `npm run build` ✅
+
+## External Verification Pending
+
+- macOS: fresh install, signed-out, service-offline, and healthy signed-in
+  Tailscale paths; official setup/sign-in launch behavior; host creation and
+  guest join across two devices.
+- Windows: installer detection, `tailscale up` handoff, external help launch,
+  and child join reachability across a real tailnet.
+- Separate-tailnet sharing/ACL cases remain user-managed in Tailscale; Move
+  Party provides guidance only and does not use admin credentials or APIs.
+
+---
+
+# M3 NATIVE CINEMA PRESENTATION PASS (2026-08-25)
+
+## Implemented in this pass
+
+- **Embedded local-media presentation**: Local Perfect playback now defers
+  libmpv initialization until Cinema attaches a native video host. libmpv is
+  initialized with its `wid` option, so it renders into the supplied native
+  child surface instead of opening a detached player window.
+- **Cinema lifecycle bridge**: `CinemaView` measures the existing movie frame
+  on mount and through `ResizeObserver`, then uses narrow attach/resize/detach
+  Tauri commands. The native host is placed behind the transparent Cinema
+  webview; existing React controls and overlays remain above the video.
+- **Platform hosts**: macOS uses an `NSView` sibling beneath the `WKWebView`;
+  Windows has a DPI-aware child `HWND` host path. Bounds are validated before
+  platform attachment.
+- **Truthful presentation state**: `EMBEDDED_NATIVE` is reported only after a
+  surface and libmpv context are attached. A missing libmpv library or failed
+  host attach remains a stable `MP-MEDIA-*` diagnostic rather than pretending
+  the Cinema player is usable.
+- **Production feature selection**: the native `mpv` feature is now enabled by
+  default; libmpv itself remains a required runtime dependency.
+
+## Verification
+
+- `npm run lint` ✅
+- `npm run test` ✅ (4 files, 15 tests)
+- `npm run build` ✅
+- `cargo check` ✅ using a fresh temporary target directory because the
+  external-drive target contains a pre-existing Apple metadata file with
+  invalid UTF-8.
+- `cargo test native_surface --lib` ✅ (2 tests)
+- `cargo test mpv_player --lib` ✅ (1 test)
+
+## External Verification Pending
+
+- macOS: install/bundle libmpv, create a Local Movie party, enter Cinema, and
+  verify frames render in the movie surface while React overlays remain usable.
+- Windows: verify the child-HWND z-order, DPI scaling, resizing, and libmpv
+  playback on a real supported machine.
 
 ---
 

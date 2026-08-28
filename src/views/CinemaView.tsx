@@ -1,12 +1,13 @@
-import { enumerateCallDevices, type CallDeviceInventory } from "../call/mediaDevices";
-import { runLocalPeerConnectionLoopback, type CallMode } from "../call/webrtc";
+import { runLocalPeerConnectionLoopback } from "../call/webrtc";
 import {
   pausePlayback,
+  attachNativeVideoSurface,
+  detachNativeVideoSurface,
   resumePlayback,
+  resizeNativeVideoSurface,
   sendChatMessage,
   sendReaction as sendBackendReaction,
   seekRelative,
-  setCallMode,
   setCameraEnabled,
   setGhostMode,
   setMicrophoneEnabled,
@@ -16,6 +17,7 @@ import {
   type AppSnapshot,
 } from "../backend/appRuntime";
 import { CallTile } from "../overlays/CallTile";
+import type { CallTileSessionState } from "../overlays/callTileState";
 import { BufferingOverlay } from "../overlays/BufferingOverlay";
 import { ProviderStatusOverlay } from "../overlays/ProviderStatusOverlay";
 import { FloatingReactions, ReactionTray } from "../overlays/ReactionTray";
@@ -27,11 +29,21 @@ import { StatusIndicator } from "../components/mp/StatusIndicator";
 import type { MouseEvent, SyntheticEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useReducedMotion } from "../hooks/useReducedMotion";
+import {
+  closeChatPreview,
+  closedChatOverlay,
+  isChatOverlayOpen,
+  openChatManually,
+  openChatPreview,
+  type ChatOverlayVisibility,
+} from "../chat/overlayState";
 
 type CinemaViewProps = {
   snapshot: AppSnapshot;
   onSnapshot: (snapshot: AppSnapshot) => void;
   onLeave: () => void;
+  callTileSession: CallTileSessionState;
+  onCallTileSessionChange: (next: CallTileSessionState) => void;
 };
 
 const chatBodyLimitBytes = 2_000;
@@ -49,14 +61,16 @@ function formatMs(ms: number): string {
   return `${String(minutes)}:${String(seconds).padStart(2, "0")}`;
 }
 
-export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
+export function CinemaView({
+  snapshot,
+  onSnapshot,
+  onLeave,
+  callTileSession,
+  onCallTileSessionChange,
+}: CinemaViewProps) {
   const [draft, setDraft] = useState("");
-  const [isComposing, setIsComposing] = useState(false);
-  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [chatVisibility, setChatVisibility] = useState<ChatOverlayVisibility>(closedChatOverlay);
   const [reactionWarning, setReactionWarning] = useState("");
-  const [callDevices, setCallDevices] = useState<CallDeviceInventory | null>(null);
-  const [isCameraCardMinimized, setIsCameraCardMinimized] = useState(false);
-  const [isCameraCardHidden, setIsCameraCardHidden] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [privacyNotice, setPrivacyNotice] = useState("");
   const [hasUnreadChat, setHasUnreadChat] = useState(false);
@@ -67,16 +81,18 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
   const controlsTimer = useRef<number | null>(null);
   const previousChatLength = useRef(snapshot.chat.length);
   const chatPreviewTimer = useRef<number | null>(null);
+  const movieFrameRef = useRef<HTMLDivElement | null>(null);
   const isGhostMode = snapshot.ghostMode;
   const isPrivacyMode = snapshot.privacyMode;
   const isHost = snapshot.room.role === "HOST";
   const sharedControls = snapshot.room.sharedControls;
   const snapshotCameraEnabled = snapshot.call.camera.enabled;
   const snapshotMicrophoneEnabled = snapshot.call.microphone.enabled;
-  const cameraEnabled = snapshotCameraEnabled && cameraManuallyEnabled;
-  const microphoneEnabled = snapshotMicrophoneEnabled && microphoneManuallyEnabled;
+  const localCameraEnabled = snapshotCameraEnabled && cameraManuallyEnabled;
+  const localMicrophoneEnabled = snapshotMicrophoneEnabled && microphoneManuallyEnabled;
   const callMode = snapshot.call.mode;
   const movieTitle = snapshot.media?.filename ?? snapshot.provider.url ?? "Movie";
+  const localMediaId = snapshot.media?.mediaId;
   const playerHasFailed = snapshot.player.state === "PLAYER_ERROR";
   const playerIsPreparing =
     playerHasFailed ||
@@ -84,8 +100,39 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
     snapshot.player.state === "STOPPED";
   const peer = snapshot.participants.find((participant) => participant.role !== snapshot.room.role);
   const peerName = peer?.displayName ?? "Peer";
+  const isComposing = chatVisibility.manualOpen;
+  const isHistoryOpen = isChatOverlayOpen(chatVisibility);
   const encodedDraftLength = useMemo(() => new TextEncoder().encode(draft).length, [draft]);
   const isDraftTooLong = encodedDraftLength > chatBodyLimitBytes;
+
+  useEffect(() => {
+    if (snapshot.provider.mode !== "LOCAL_PERFECT" || localMediaId == null) {
+      return;
+    }
+    const frame = movieFrameRef.current;
+    if (!frame) {
+      return;
+    }
+    let attached = false;
+    const updateSurface = () => {
+      const rect = frame.getBoundingClientRect();
+      const bounds = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+      const request = attached ? resizeNativeVideoSurface(bounds) : attachNativeVideoSurface(bounds);
+      attached = true;
+      void request.then((next) => {
+        if (next) {
+          onSnapshot(next);
+        }
+      });
+    };
+    updateSurface();
+    const observer = new ResizeObserver(updateSurface);
+    observer.observe(frame);
+    return () => {
+      observer.disconnect();
+      void detachNativeVideoSurface();
+    };
+  }, [localMediaId, onSnapshot, snapshot.provider.mode]);
 
   useEffect(() => {
     if (isComposing || isHistoryOpen || isPrivacyMode) {
@@ -113,21 +160,21 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
     const hasNewMessage = nextLength > previousChatLength.current;
     previousChatLength.current = nextLength;
 
-    if (!hasNewMessage || isPrivacyMode || isComposing || isHistoryOpen) {
+    if (!hasNewMessage || isGhostMode || isPrivacyMode || chatVisibility.manualOpen) {
       return;
     }
 
     setHasUnreadChat(true);
-    setIsHistoryOpen(true);
+    setChatVisibility(openChatPreview());
 
     if (chatPreviewTimer.current != null) {
       window.clearTimeout(chatPreviewTimer.current);
     }
     chatPreviewTimer.current = window.setTimeout(() => {
-      setIsHistoryOpen(false);
+      setChatVisibility((current) => closeChatPreview(current));
       chatPreviewTimer.current = null;
     }, 5_000);
-  }, [isComposing, isHistoryOpen, isPrivacyMode, snapshot.chat.length]);
+  }, [chatVisibility.manualOpen, isGhostMode, isPrivacyMode, snapshot.chat.length]);
 
   useEffect(() => {
     return () => {
@@ -136,21 +183,6 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
       }
     };
   }, []);
-
-  useEffect(() => {
-    if (isPrivacyMode || (!isComposing && !isHistoryOpen) || draft.trim().length > 0) {
-      return;
-    }
-
-    const inactivityTimer = window.setTimeout(() => {
-      setIsComposing(false);
-      setIsHistoryOpen(false);
-    }, 8_000);
-
-    return () => {
-      window.clearTimeout(inactivityTimer);
-    };
-  }, [draft, isComposing, isHistoryOpen, isPrivacyMode, snapshot.chat.length]);
 
   const revealControls = (event?: MouseEvent<HTMLElement>) => {
     setControlsVisible(true);
@@ -168,21 +200,7 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
   };
 
   useEffect(() => {
-    let isMounted = true;
-
-    void enumerateCallDevices().then((inventory) => {
-      if (isMounted) {
-        setCallDevices(inventory);
-      }
-    });
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    const nextKey = `${callMode}:${String(cameraEnabled)}:${String(microphoneEnabled)}:${String(isPrivacyMode)}`;
+    const nextKey = `${callMode}:${String(localCameraEnabled)}:${String(localMicrophoneEnabled)}:${String(isPrivacyMode)}`;
     if (callMode === "OFF" || isPrivacyMode) {
       callSessionKey.current = "";
       return;
@@ -195,8 +213,8 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
     const controller = new AbortController();
     void runLocalPeerConnectionLoopback(
       callMode,
-      cameraEnabled,
-      microphoneEnabled,
+      localCameraEnabled,
+      localMicrophoneEnabled,
       async (signal) => {
         const next = await submitCallSignal(signal);
         if (next) {
@@ -220,7 +238,7 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
     return () => {
       controller.abort();
     };
-  }, [callMode, cameraEnabled, microphoneEnabled, isPrivacyMode, onSnapshot]);
+  }, [callMode, localCameraEnabled, localMicrophoneEnabled, isPrivacyMode, onSnapshot]);
 
   useEffect(() => {
     let noticeTimeout: number | undefined;
@@ -240,8 +258,7 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
         target instanceof HTMLSelectElement;
 
       if (event.key === "Escape") {
-        setIsComposing(false);
-        setIsHistoryOpen(false);
+        setChatVisibility(closedChatOverlay);
         return;
       }
 
@@ -259,8 +276,7 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
           }
           showNotice(nextGhostMode ? "Ghost Mode on" : "Ghost Mode off", ghostNoticeMs);
         });
-        setIsComposing(false);
-        setIsHistoryOpen(false);
+        setChatVisibility(closedChatOverlay);
         return;
       }
 
@@ -278,8 +294,7 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
             return;
           }
 
-          setIsComposing(false);
-          setIsHistoryOpen(false);
+          setChatVisibility(closedChatOverlay);
           showNotice("Privacy Mode on", ghostNoticeMs);
         });
         return;
@@ -291,12 +306,12 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
 
       if (event.key === "Enter") {
         event.preventDefault();
-        setIsComposing(true);
+        setChatVisibility(openChatManually());
       }
 
       if (event.key.toLowerCase() === "c") {
         event.preventDefault();
-        setIsHistoryOpen((current) => !current);
+        setChatVisibility((current) => (current.manualOpen ? closedChatOverlay : openChatManually()));
       }
     };
 
@@ -320,7 +335,6 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
         previousChatLength.current = next.chat.length;
         onSnapshot(next);
         setDraft("");
-        setIsComposing(false);
       }
     });
   };
@@ -345,21 +359,13 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
     );
   };
 
-  const chooseCallMode = (mode: CallMode) => {
-    void setCallMode(mode).then((next) => {
-      if (next) {
-        onSnapshot(next);
-      }
-    });
-  };
-
   return (
     <main className="cinema-shell" aria-label="Cinema mode">
       <SilkBackground variant="dim" />
       <section
         className={[
           "movie-surface",
-          isGhostMode ? "privacy-hidden" : "",
+          isGhostMode || isPrivacyMode ? "social-hidden" : "",
           controlsVisible ? "controls-visible" : "controls-idle",
         ]
           .filter(Boolean)
@@ -371,7 +377,10 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
         }}
       >
         <div className="cinema-dot-grid" aria-hidden="true" />
-        <div className="movie-frame">
+        <div
+          ref={movieFrameRef}
+          className={`movie-frame ${snapshot.player.presentation.mode === "EMBEDDED_NATIVE" ? "native-video-active" : ""}`}
+        >
           <div className="movie-light" />
           <div className="movie-prep-state" aria-live="polite">
             <span className="movie-prep-kicker">
@@ -407,23 +416,11 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
         </div>
         <CallTile
           peerName={peerName}
-          callMode={callMode}
-          callStatus={snapshot.call.status}
-          cameraEnabled={cameraEnabled}
-          microphoneEnabled={microphoneEnabled}
-          callDevices={callDevices}
-          isMinimized={isCameraCardMinimized}
-          isHidden={isCameraCardHidden}
-          onRestore={() => {
-            setIsCameraCardHidden(false);
-          }}
-          onToggleMinimized={() => {
-            setIsCameraCardMinimized((current) => !current);
-          }}
-          onHide={() => {
-            setIsCameraCardHidden(true);
-          }}
-          onChooseCallMode={chooseCallMode}
+          remoteCameraEnabled={peer?.cameraEnabled ?? false}
+          remoteMicrophoneEnabled={peer?.microphoneEnabled ?? false}
+          remoteConnected={peer?.connected ?? false}
+          session={callTileSession}
+          onSessionChange={onCallTileSessionChange}
         />
         <ChatOverlay
           snapshot={snapshot}
@@ -434,14 +431,14 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
           onDraftChange={setDraft}
           onSubmit={sendMessage}
           onCloseCompose={() => {
-            setIsComposing(false);
+            setChatVisibility((current) => ({ ...current, manualOpen: false }));
           }}
           onCloseHistory={() => {
             if (chatPreviewTimer.current != null) {
               window.clearTimeout(chatPreviewTimer.current);
               chatPreviewTimer.current = null;
             }
-            setIsHistoryOpen(false);
+            setChatVisibility(closedChatOverlay);
           }}
         />
         <FloatingReactions reactions={snapshot.reactions.slice(-4)} />
@@ -482,9 +479,9 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
               }
             });
           }}
-          microphoneEnabled={microphoneEnabled}
+          microphoneEnabled={localMicrophoneEnabled}
           onToggleMicrophone={() => {
-            const nextEnabled = !microphoneEnabled;
+            const nextEnabled = !localMicrophoneEnabled;
             setMicrophoneManuallyEnabled(nextEnabled);
             if (snapshotMicrophoneEnabled === nextEnabled) {
               return;
@@ -495,20 +492,16 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
               }
             });
           }}
-          cameraEnabled={cameraEnabled}
+          cameraEnabled={localCameraEnabled}
           onToggleCamera={() => {
-            const nextEnabled = !cameraEnabled;
+            const nextEnabled = !localCameraEnabled;
             setCameraManuallyEnabled(nextEnabled);
             if (snapshotCameraEnabled === nextEnabled) {
-              if (nextEnabled) {
-                setIsCameraCardHidden(false);
-              }
               return;
             }
             void setCameraEnabled(nextEnabled).then((next) => {
               if (next) {
                 onSnapshot(next);
-                setIsCameraCardHidden(false);
               }
             });
           }}
@@ -520,18 +513,21 @@ export function CinemaView({ snapshot, onSnapshot, onLeave }: CinemaViewProps) {
               chatPreviewTimer.current = null;
             }
             if (isComposing) {
-              setIsComposing(false);
-              setIsHistoryOpen(false);
+              setChatVisibility(closedChatOverlay);
               return;
             }
             setHasUnreadChat(false);
-            setIsHistoryOpen(true);
-            setIsComposing(true);
+            setChatVisibility(openChatManually());
           }}
           onSendReaction={() => {
             sendReaction("👏");
           }}
           isHost={isHost}
+          socialControlsHidden={isGhostMode || isPrivacyMode}
+          callTileHidden={callTileSession.isHidden}
+          onShowCallTile={() => {
+            onCallTileSessionChange({ ...callTileSession, isHidden: false });
+          }}
           sharedControls={sharedControls}
           onToggleSharedControls={() => {
             void setSharedControls(!sharedControls).then((next) => {

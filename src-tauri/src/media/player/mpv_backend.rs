@@ -153,29 +153,24 @@ pub struct MpvPlayer {
     fns: Option<MpvFns>,
     loaded_path: Option<std::path::PathBuf>,
     snapshot: PlayerSnapshot,
+    surface_handle: Option<usize>,
 }
 
 impl MpvPlayer {
-    /// Create a new MpvPlayer by attempting to dynamically load libmpv.
+    /// Create a player whose libmpv context is initialized only once Cinema
+    /// supplies a native presentation host.
     pub fn new() -> Self {
-        match Self::load_library() {
-            Ok((handle, fns)) => Self {
-                handle: Some(handle),
-                fns: Some(fns),
-                loaded_path: None,
-                snapshot: PlayerSnapshot::default(),
-            },
-            Err(_) => Self {
-                handle: None,
-                fns: None,
-                loaded_path: None,
-                snapshot: PlayerSnapshot::default(),
-            },
+        Self {
+            handle: None,
+            fns: None,
+            loaded_path: None,
+            snapshot: PlayerSnapshot::default(),
+            surface_handle: None,
         }
     }
 
     /// Attempt to load the mpv shared library and create an mpv context.
-    fn load_library() -> Result<(MpvHandle, MpvFns), PlayerError> {
+    fn load_library(surface_handle: usize) -> Result<(MpvHandle, MpvFns), PlayerError> {
         let lib = Self::open_mpv_library()?;
         let fns = MpvFns {
             mpv_create: unsafe {
@@ -262,11 +257,10 @@ impl MpvPlayer {
             });
         }
 
-        // Prevent libmpv from creating its own user-facing window. Visible
-        // presentation must be provided by the native render host; without
-        // that host the runtime reports presentation as unavailable.
+        // `wid` must be configured before initialization. It makes libmpv
+        // render into our native child view instead of creating a second window.
         unsafe {
-            mpv_set_option(mpv, &fns, "vo", "libmpv")?;
+            mpv_set_option(mpv, &fns, "wid", &surface_handle.to_string())?;
         }
 
         // Initialize the mpv context
@@ -338,6 +332,62 @@ impl MpvPlayer {
             _ => Err(PlayerError::LibMpvUnavailable),
         }
     }
+
+    fn load_current_media(&mut self) -> Result<(), PlayerError> {
+        let (handle, fns) = self.ensure_ready()?;
+        let path = self.loaded_path.as_ref().ok_or(PlayerError::NotReady)?;
+        let path_str = path.to_str().ok_or_else(|| PlayerError::LoadFailed {
+            reason: "path contains invalid UTF-8".to_string(),
+        })?;
+        let c_path = CString::new(path_str).map_err(|_| PlayerError::LoadFailed {
+            reason: "path contains null byte".to_string(),
+        })?;
+        let pause_true = CString::new("true").map_err(|_| PlayerError::PlaybackError {
+            message: "invalid pause value".to_string(),
+        })?;
+        let pause_name = CString::new("pause").map_err(|_| PlayerError::PlaybackError {
+            message: "invalid pause property".to_string(),
+        })?;
+        unsafe {
+            mpv_result(
+                (fns.mpv_set_property)(
+                    handle,
+                    pause_name.as_ptr(),
+                    MPV_FORMAT_STRING,
+                    pause_true.as_ptr() as *const c_void,
+                ),
+                fns,
+                "failed to prepare media paused",
+            )?;
+        }
+        let loadfile_cmd = CString::new("loadfile").map_err(|_| PlayerError::LoadFailed {
+            reason: "invalid loadfile command".to_string(),
+        })?;
+        let replace_arg = CString::new("replace").map_err(|_| PlayerError::LoadFailed {
+            reason: "invalid loadfile mode".to_string(),
+        })?;
+        let args = [
+            loadfile_cmd.as_ptr(),
+            c_path.as_ptr(),
+            replace_arg.as_ptr(),
+            ptr::null(),
+        ];
+        let result = unsafe { (fns.mpv_command)(handle, args.as_ptr()) };
+        if result != MPV_ERROR_SUCCESS {
+            let error_str = unsafe { (fns.mpv_error_string)(result) };
+            let reason = if error_str.is_null() {
+                "loadfile failed".to_string()
+            } else {
+                unsafe { CStr::from_ptr(error_str).to_string_lossy().into_owned() }
+            };
+            return Err(PlayerError::LoadFailed { reason });
+        }
+        unsafe { (fns.mpv_wait_event)(handle, 0.1) };
+        if let Some(duration) = unsafe { mpv_get_double(handle, fns, "duration") } {
+            self.snapshot.duration_ms = Some((duration * 1000.0) as u64);
+        }
+        Ok(())
+    }
 }
 
 impl Default for MpvPlayer {
@@ -368,76 +418,25 @@ impl Drop for MpvPlayer {
 
 impl LocalPlayer for MpvPlayer {
     fn open(&mut self, path: &Path) -> Result<(), PlayerError> {
-        let (handle, fns) = match (self.handle, &self.fns) {
-            (Some(h), Some(fns)) => (h, fns),
-            _ => return Err(PlayerError::LibMpvUnavailable),
-        };
-
         if !is_streaming_media_source(path) && !path.exists() {
             return Err(PlayerError::MissingMedia {
                 path: path.display().to_string(),
             });
         }
-
-        let path_str = path.to_str().ok_or_else(|| PlayerError::LoadFailed {
-            reason: "path contains invalid UTF-8".to_string(),
-        })?;
-        let c_path = CString::new(path_str).map_err(|_| PlayerError::LoadFailed {
-            reason: "path contains null byte".to_string(),
-        })?;
-
-        let pause_true = CString::new("true").unwrap();
-        let pause_name = CString::new("pause").unwrap();
-        unsafe {
-            mpv_result(
-                (fns.mpv_set_property)(
-                    handle,
-                    pause_name.as_ptr(),
-                    MPV_FORMAT_STRING,
-                    pause_true.as_ptr() as *const c_void,
-                ),
-                fns,
-                "failed to prepare media paused",
-            )?;
-        }
-
-        // Execute: loadfile <path> replace
-        let loadfile_cmd = CString::new("loadfile").unwrap();
-        let replace_arg = CString::new("replace").unwrap();
-        let args = [
-            loadfile_cmd.as_ptr(),
-            c_path.as_ptr(),
-            replace_arg.as_ptr(),
-            ptr::null(),
-        ];
-        let result = unsafe { (fns.mpv_command)(handle, args.as_ptr()) };
-
-        if result != MPV_ERROR_SUCCESS {
-            let error_str = unsafe { (fns.mpv_error_string)(result) };
-            let msg = if error_str.is_null() {
-                "loadfile failed".to_string()
-            } else {
-                unsafe { CStr::from_ptr(error_str).to_string_lossy().into_owned() }
-            };
-            return Err(PlayerError::LoadFailed { reason: msg });
-        }
-
         self.loaded_path = Some(path.to_path_buf());
         self.snapshot.state = PlayerState::Ready;
         self.snapshot.error_message = None;
-
-        // Wait briefly for the file to be loaded and metadata to become available
-        unsafe { (fns.mpv_wait_event)(handle, 0.1) };
-
-        // Query duration
-        if let Some(dur) = unsafe { mpv_get_double(handle, fns, "duration") } {
-            self.snapshot.duration_ms = Some((dur * 1000.0) as u64);
+        if self.handle.is_some() {
+            self.load_current_media()?;
         }
-
         Ok(())
     }
 
     fn play(&mut self) -> Result<(), PlayerError> {
+        if self.handle.is_none() && self.loaded_path.is_some() {
+            self.snapshot.state = PlayerState::Playing;
+            return Ok(());
+        }
         let (handle, fns) = self.ensure_ready()?;
         let pause_false = CString::new("false").unwrap();
         let pause_name = CString::new("pause").unwrap();
@@ -460,6 +459,10 @@ impl LocalPlayer for MpvPlayer {
     }
 
     fn pause(&mut self) -> Result<(), PlayerError> {
+        if self.handle.is_none() && self.loaded_path.is_some() {
+            self.snapshot.state = PlayerState::Paused;
+            return Ok(());
+        }
         let (handle, fns) = self.ensure_ready()?;
         let pause_true = CString::new("true").unwrap();
         let pause_name = CString::new("pause").unwrap();
@@ -481,6 +484,10 @@ impl LocalPlayer for MpvPlayer {
     }
 
     fn seek(&mut self, position_ms: u64) -> Result<(), PlayerError> {
+        if self.handle.is_none() && self.loaded_path.is_some() {
+            self.snapshot.position_ms = position_ms;
+            return Ok(());
+        }
         let (handle, fns) = self.ensure_ready()?;
         let seek_cmd = CString::new("seek").unwrap();
         let position_seconds = position_ms as f64 / 1_000.0;
@@ -609,6 +616,47 @@ impl LocalPlayer for MpvPlayer {
         }
         self.loaded_path = None;
         self.snapshot = PlayerSnapshot::default();
+    }
+
+    fn attach_native_surface(&mut self, surface_handle: usize) -> Result<(), PlayerError> {
+        if surface_handle == 0 {
+            return Err(PlayerError::NativeSurfaceUnavailable {
+                reason: "native surface handle is null".to_string(),
+            });
+        }
+        if self.surface_handle == Some(surface_handle) && self.handle.is_some() {
+            return Ok(());
+        }
+        if self.handle.is_some() {
+            return Err(PlayerError::NativeSurfaceUnavailable {
+                reason: "the active player cannot move to another native surface".to_string(),
+            });
+        }
+        let desired = self.snapshot.clone();
+        let (handle, fns) = Self::load_library(surface_handle)?;
+        self.handle = Some(handle);
+        self.fns = Some(fns);
+        self.surface_handle = Some(surface_handle);
+        if self.loaded_path.is_some() {
+            self.load_current_media()?;
+            if desired.position_ms > 0 {
+                self.seek(desired.position_ms)?;
+            }
+            if desired.state == PlayerState::Playing {
+                self.play()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn presentation_status(&self) -> super::presentation::PlayerPresentationStatus {
+        if self.handle.is_some() && self.surface_handle.is_some() {
+            super::presentation::PlayerPresentationStatus::embedded_native(
+                super::presentation::embedded_native_bridge(),
+            )
+        } else {
+            super::presentation::PlayerPresentationStatus::native_render_host_required()
+        }
     }
 }
 

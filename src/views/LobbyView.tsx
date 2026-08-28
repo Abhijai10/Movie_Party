@@ -2,14 +2,14 @@ import { motion } from "framer-motion";
 import { ArrowLeft, ArrowRight, Check, Copy, Film, MessageCircle, Users, Video } from "lucide-react";
 import { useMemo, useState, type SyntheticEvent } from "react";
 import type { AppSnapshot } from "../backend/appRuntime";
-import { sendChatMessage, setCallMode } from "../backend/appRuntime";
-import type { CallMode } from "../call/webrtc";
+import { sendChatMessage } from "../backend/appRuntime";
 import { ChatOverlay } from "../components/mp/ChatOverlay";
 import { CinemaButton } from "../components/mp/CinemaButton";
 import { ParticipantCard } from "../components/mp/ParticipantCard";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
 import { CallTile } from "../overlays/CallTile";
+import type { CallTileSessionState } from "../overlays/callTileState";
 
 type LobbyViewProps = {
   snapshot: AppSnapshot;
@@ -18,6 +18,8 @@ type LobbyViewProps = {
   onCinema: () => void;
   onToggleSharedControls: (enabled: boolean) => void;
   onSnapshot: (snapshot: AppSnapshot | null) => void;
+  callTileSession: CallTileSessionState;
+  onCallTileSessionChange: (next: CallTileSessionState) => void;
 };
 
 function formatBytes(bytes: number): string {
@@ -33,13 +35,12 @@ export function LobbyView({
   onCinema,
   onToggleSharedControls,
   onSnapshot,
+  callTileSession,
+  onCallTileSessionChange,
 }: LobbyViewProps) {
   const [copied, setCopied] = useState(false);
   const [draft, setDraft] = useState("");
   const [isChatOpen, setIsChatOpen] = useState(false);
-  const [isCallHidden, setIsCallHidden] = useState(false);
-  const [isCallMinimized, setIsCallMinimized] = useState(false);
-  const [lobbyCallMode, setLobbyCallMode] = useState<CallMode>("OFF");
   const encodedDraftLength = useMemo(() => new TextEncoder().encode(draft).length, [draft]);
   const isDraftTooLong = encodedDraftLength > 2_000;
 
@@ -98,13 +99,12 @@ export function LobbyView({
     });
   };
 
-  const chooseLobbyCallMode = (mode: CallMode) => {
-    setLobbyCallMode(mode);
-    void setCallMode(mode).then(onSnapshot);
-  };
-
   return (
-    <div className="relative w-screen h-screen overflow-hidden">
+    <div
+      className={`relative w-screen h-screen overflow-hidden ${
+        snapshot.ghostMode || snapshot.privacyMode ? "social-hidden" : ""
+      }`}
+    >
       <SilkBackground variant="calm" />
 
       <header className="relative z-10 flex items-center justify-between px-12 pt-8">
@@ -288,16 +288,26 @@ export function LobbyView({
             </div>
           ) : null}
 
-          <div className="flex items-center justify-between">
+          <div className="lobby-ready-actions">
             <StatusIndicator
               state={everyoneReady ? "ready" : "waiting"}
               label={everyoneReady ? "Everyone ready" : "Waiting for everyone"}
             />
-            <div className="flex items-center gap-3">
-              <CinemaButton variant="ghost" onClick={onCinema} data-testid="lobby-preview-btn">
+            <div className="lobby-ready-actions-buttons">
+              <CinemaButton
+                variant="ghost"
+                className="lobby-ready-action"
+                onClick={onCinema}
+                data-testid="lobby-preview-btn"
+              >
                 Preview
               </CinemaButton>
-              <CinemaButton onClick={onReady} icon={ArrowRight} data-testid="lobby-continue-btn">
+              <CinemaButton
+                className="lobby-ready-action"
+                onClick={onReady}
+                icon={ArrowRight}
+                data-testid="lobby-continue-btn"
+              >
                 Ready check
               </CinemaButton>
             </div>
@@ -321,8 +331,7 @@ export function LobbyView({
         <button
           type="button"
           onClick={() => {
-            setIsCallHidden(false);
-            setIsCallMinimized(false);
+            onCallTileSessionChange({ ...callTileSession, isHidden: false });
           }}
           data-testid="lobby-call-btn"
           aria-label="Show lobby call"
@@ -350,23 +359,11 @@ export function LobbyView({
 
       <CallTile
         peerName={peerName}
-        callMode={lobbyCallMode}
-        callStatus={snapshot.call.status}
-        cameraEnabled={false}
-        microphoneEnabled={false}
-        callDevices={null}
-        isMinimized={isCallMinimized}
-        isHidden={isCallHidden}
-        onRestore={() => {
-          setIsCallHidden(false);
-        }}
-        onToggleMinimized={() => {
-          setIsCallMinimized((current) => !current);
-        }}
-        onHide={() => {
-          setIsCallHidden(true);
-        }}
-        onChooseCallMode={chooseLobbyCallMode}
+        remoteCameraEnabled={peer?.cameraEnabled ?? false}
+        remoteMicrophoneEnabled={peer?.microphoneEnabled ?? false}
+        remoteConnected={peer?.connected ?? false}
+        session={callTileSession}
+        onSessionChange={onCallTileSessionChange}
       />
     </div>
   );

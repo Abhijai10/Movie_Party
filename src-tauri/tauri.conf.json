@@ -13,6 +13,7 @@
     "windows": [
       {
         "title": "Move Party",
+        "transparent": true,
         "width": 1024,
         "height": 700,
         "minWidth": 900,

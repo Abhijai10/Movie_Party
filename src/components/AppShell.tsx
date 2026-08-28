@@ -4,11 +4,13 @@ import {
   createLocalParty,
   enterCinema,
   getProviderCapabilities,
+  getTailscaleReadiness,
   joinParty,
   launchGenericLink,
   launchProvider,
   leaveParty,
   markReady,
+  openTailscaleSetup,
   requestEndParty,
   setSharedControls,
   showHome,
@@ -17,6 +19,7 @@ import {
   takePendingDeepLinks,
   type AppSnapshot,
   type ProviderCapability,
+  type TailscaleReadiness,
 } from "../backend/appRuntime";
 import { useAppSnapshot } from "../hooks/useAppSnapshot";
 import { parseMovePartyInvite } from "../invites/deepLinks";
@@ -27,6 +30,9 @@ import { HomeView } from "../views/HomeView";
 import { JoinPartyView } from "../views/JoinPartyView";
 import { LobbyView } from "../views/LobbyView";
 import { ReadyCheckView } from "../views/ReadyCheckView";
+import { PartnerConnectView } from "../views/PartnerConnectView";
+import { TailscaleSetupView } from "../views/TailscaleSetupView";
+import { createCallTileSessionState, type CallTileSessionState } from "../overlays/callTileState";
 import { LoadingState } from "./LoadingState";
 import { useCallback, useEffect, useState } from "react";
 
@@ -43,9 +49,15 @@ export function AppShell() {
   const [isJoining, setIsJoining] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [joinError, setJoinError] = useState<string | null>(null);
+  const [joinFailureCode, setJoinFailureCode] = useState<string | null>(null);
   const [providerCapabilities, setProviderCapabilities] = useState<ProviderCapability[]>([]);
   const [pendingInvite, setPendingInvite] = useState("");
   const [devScreen, setDevScreen] = useState<DevScreen>(null);
+  const [tailscaleReadiness, setTailscaleReadiness] = useState<TailscaleReadiness | null>(null);
+  const [isRefreshingConnectivity, setIsRefreshingConnectivity] = useState(false);
+  const [callTileSession, setCallTileSession] = useState<CallTileSessionState>(() =>
+    createCallTileSessionState(),
+  );
 
   useEffect(() => {
     if (!developmentPreviewEnabled) return;
@@ -82,12 +94,14 @@ export function AppShell() {
       if (!parsed.ok) {
         setPendingInvite(rawInvite.trim());
         setJoinError(parsed.message);
+        setJoinFailureCode(null);
         void showJoinParty().then(applySnapshot);
         return;
       }
 
       setPendingInvite(parsed.invite);
       setJoinError(null);
+      setJoinFailureCode(null);
       void showJoinParty().then(applySnapshot);
     },
     [applySnapshot],
@@ -124,18 +138,34 @@ export function AppShell() {
     void getProviderCapabilities().then(setProviderCapabilities);
   }, []);
 
+  const refreshConnectivity = useCallback(async () => {
+    setIsRefreshingConnectivity(true);
+    try {
+      setTailscaleReadiness(await getTailscaleReadiness());
+    } finally {
+      setIsRefreshingConnectivity(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshConnectivity();
+  }, [refreshConnectivity]);
+
   const goHome = () => {
     setDevScreen(null);
     setLocalScreen(null);
     setCreateError(null);
     setJoinError(null);
+    setJoinFailureCode(null);
     setPendingInvite("");
+    setCallTileSession(createCallTileSessionState());
     void showHome().then(applySnapshot);
   };
 
   const goCreateParty = () => {
     setDevScreen(null);
     setCreateError(null);
+    setCallTileSession(createCallTileSessionState());
     setLocalScreen("CREATE_PARTY");
   };
 
@@ -218,7 +248,9 @@ export function AppShell() {
     setDevScreen(null);
     setLocalScreen(null);
     setJoinError(null);
+    setJoinFailureCode(null);
     setPendingInvite("");
+    setCallTileSession(createCallTileSessionState());
     void showJoinParty().then(applySnapshot);
   };
 
@@ -226,10 +258,13 @@ export function AppShell() {
     const parsed = parseMovePartyInvite(inviteCode);
     if (!parsed.ok) {
       setJoinError(parsed.message);
+      setJoinFailureCode(null);
       return false;
     }
 
+    setPendingInvite(parsed.invite);
     setJoinError(null);
+    setJoinFailureCode(null);
     setIsJoining(true);
     try {
       const next = await joinParty(parsed.invite);
@@ -242,6 +277,7 @@ export function AppShell() {
       applySnapshot(next);
       return true;
     } catch (error) {
+      setJoinFailureCode(error instanceof BackendCommandError ? error.code : null);
       setJoinError(joinFailureMessage(error));
       return false;
     } finally {
@@ -275,6 +311,39 @@ export function AppShell() {
   if (!snapshot) {
     return (
       <LoadingState title="Starting Move Party" message="Connecting to the local app runtime." />
+    );
+  }
+
+  if (!tailscaleReadiness) {
+    return <LoadingState title="Checking private connection" message="Verifying Tailscale on this device." />;
+  }
+
+  if (tailscaleReadiness.state !== "CONNECTED") {
+    return (
+      <TailscaleSetupView
+        readiness={tailscaleReadiness}
+        isRefreshing={isRefreshingConnectivity}
+        onRefresh={() => void refreshConnectivity()}
+        onOpenSetup={(action) => {
+          void openTailscaleSetup(action);
+        }}
+      />
+    );
+  }
+
+  if (joinFailureCode === "MP-NET-TS-005") {
+    return (
+      <PartnerConnectView
+        isRetrying={isJoining}
+        onRetry={() => {
+          if (pendingInvite) {
+            void submitJoin(pendingInvite);
+          }
+        }}
+        onOpenHelp={() => {
+          void openTailscaleSetup("PARTNER_HELP");
+        }}
+      />
     );
   }
 
@@ -313,6 +382,8 @@ export function AppShell() {
         onCinema={goCinema}
         onToggleSharedControls={handleToggleSharedControls}
         onSnapshot={applySnapshot}
+        callTileSession={callTileSession}
+        onCallTileSessionChange={setCallTileSession}
       />
     );
   }
@@ -322,7 +393,15 @@ export function AppShell() {
   }
 
   if (snapshot.screen === "CINEMA" || devScreen === "CINEMA") {
-    return <CinemaView snapshot={snapshot} onSnapshot={setSnapshot} onLeave={requestPartyEnd} />;
+    return (
+      <CinemaView
+        snapshot={snapshot}
+        onSnapshot={setSnapshot}
+        onLeave={requestPartyEnd}
+        callTileSession={callTileSession}
+        onCallTileSessionChange={setCallTileSession}
+      />
+    );
   }
 
   if (snapshot.screen === "PARTY_END_CONFIRM") {
@@ -334,6 +413,13 @@ export function AppShell() {
 
 function createRoomErrorMessage(error: unknown): string {
   const fallback = "Move Party could not create the room.";
+  if (error instanceof BackendCommandError) {
+    if (error.code === "MP-NET-TS-001") return "Install Tailscale before creating a private cinema.";
+    if (error.code === "MP-NET-TS-002") return "Sign in to Tailscale before creating a private cinema.";
+    if (error.code === "MP-NET-TS-003" || error.code === "MP-NET-TS-004") {
+      return "Tailscale is not ready on this device. Check its connection and try again.";
+    }
+  }
   if (!developmentPreviewEnabled) {
     return fallback;
   }
@@ -347,6 +433,9 @@ function joinFailureMessage(error: unknown): string {
       return "That invite is invalid, expired, or incomplete. Ask the host to copy a fresh invite.";
     }
     if (error.code.startsWith("MP-NET-")) {
+      if (error.code === "MP-NET-TS-005") {
+        return "MP-NET-TS-005 host is not reachable through Tailscale";
+      }
       return "Move Party could not reach the host. Check that both devices are online and connected to Tailscale.";
     }
     return "Move Party could not join that room right now.";

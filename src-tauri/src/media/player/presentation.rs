@@ -48,11 +48,11 @@ impl PlayerPresentationStatus {
         Self {
             mode: PlayerPresentationMode::Unavailable,
             platform: std::env::consts::OS.to_string(),
-            bridge: planned_embedded_bridge().to_string(),
+            bridge: embedded_native_bridge().to_string(),
             resize_managed: false,
             ipc_managed: true,
             lifecycle_managed: true,
-            message: "libmpv is configured not to create a second window; attach the native render host to present video."
+            message: "Waiting for the Cinema native video surface before starting local playback."
                 .to_string(),
         }
     }
@@ -70,14 +70,14 @@ impl PlayerPresentationStatus {
     }
 }
 
-pub fn planned_embedded_bridge() -> &'static str {
+pub fn embedded_native_bridge() -> &'static str {
     #[cfg(target_os = "macos")]
     {
-        "NSView/CALayer host for libmpv render context"
+        "NSView child host via libmpv wid"
     }
     #[cfg(target_os = "windows")]
     {
-        "HWND host for libmpv render context"
+        "HWND child host via libmpv wid"
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
@@ -101,7 +101,7 @@ mod tests {
 
     #[test]
     fn embedded_status_covers_resize_ipc_and_lifecycle() {
-        let status = PlayerPresentationStatus::embedded_native(planned_embedded_bridge());
+        let status = PlayerPresentationStatus::embedded_native(embedded_native_bridge());
 
         assert_eq!(status.mode, PlayerPresentationMode::EmbeddedNative);
         assert!(status.resize_managed);
