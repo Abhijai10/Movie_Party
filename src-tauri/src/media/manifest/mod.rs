@@ -35,6 +35,38 @@ pub enum ManifestError {
     Io(#[from] std::io::Error),
     #[error("MP-MEDIA-001 media path has no filename")]
     MissingFilename,
+    #[error("MP-MEDIA-002 media manifest is invalid: {0}")]
+    InvalidManifest(&'static str),
+}
+
+impl MediaManifest {
+    /// Validate a manifest received from a peer before it is allowed to name
+    /// any local cache resources. The filename remains metadata only, but it
+    /// must never be a path supplied by the remote host.
+    pub fn validate_for_guest(&self) -> Result<(), ManifestError> {
+        if self.media_id.is_empty()
+            || self.media_id.contains("..")
+            || self.media_id.contains(['/', '\\'])
+        {
+            return Err(ManifestError::InvalidManifest("unsafe media id"));
+        }
+        if self.filename.is_empty()
+            || self.filename.contains("..")
+            || self.filename.contains(['/', '\\'])
+        {
+            return Err(ManifestError::InvalidManifest("unsafe filename"));
+        }
+        if self.file_size == 0 || self.chunk_size != DEFAULT_CHUNK_SIZE_BYTES {
+            return Err(ManifestError::InvalidManifest("invalid media size or chunk size"));
+        }
+        if self.chunk_count != self.file_size.div_ceil(self.chunk_size) {
+            return Err(ManifestError::InvalidManifest("inconsistent chunk count"));
+        }
+        if self.quick_fingerprint.file_size != self.file_size {
+            return Err(ManifestError::InvalidManifest("inconsistent fingerprint size"));
+        }
+        Ok(())
+    }
 }
 
 pub fn build_manifest(path: &Path) -> Result<MediaManifest, ManifestError> {
@@ -123,7 +155,10 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::{build_manifest, definitely_identical};
+    use super::{
+        build_manifest, definitely_identical, MediaManifest, QuickFingerprint,
+        DEFAULT_CHUNK_SIZE_BYTES,
+    };
 
     #[test]
     fn detects_identical_and_different_files() {
@@ -143,6 +178,27 @@ mod tests {
         assert!(definitely_identical(&manifest_a, &manifest_b));
         assert!(!definitely_identical(&manifest_a, &manifest_c));
         fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn rejects_remote_path_like_manifest_metadata() {
+        let mut manifest = MediaManifest {
+            media_id: "local-12-safe".to_string(),
+            filename: "movie.mkv".to_string(),
+            file_size: DEFAULT_CHUNK_SIZE_BYTES,
+            container: Some("mkv".to_string()),
+            full_hash: "hash".to_string(),
+            quick_fingerprint: QuickFingerprint {
+                file_size: DEFAULT_CHUNK_SIZE_BYTES,
+                first_hash: "first".to_string(),
+                last_hash: "last".to_string(),
+            },
+            chunk_size: DEFAULT_CHUNK_SIZE_BYTES,
+            chunk_count: 1,
+        };
+        assert!(manifest.validate_for_guest().is_ok());
+        manifest.filename = "../host-file.mkv".to_string();
+        assert!(manifest.validate_for_guest().is_err());
     }
 
     fn write_file(path: &std::path::Path, bytes: &[u8]) {

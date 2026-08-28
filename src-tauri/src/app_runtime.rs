@@ -3198,6 +3198,14 @@ impl AppRuntime {
         state.player_snapshot = PlayerSnapshot::from_player(&*p);
     }
 
+    fn transfer_percent(state: &AppRuntimeState) -> u8 {
+        state
+            .transfer
+            .as_ref()
+            .map(|progress| (progress.fraction() * 100.0).round().clamp(0.0, 100.0) as u8)
+            .unwrap_or(0)
+    }
+
     fn set_player_error(state: &mut AppRuntimeState, message: String) {
         state.room_state = RoomState::Error;
         state.sync.strict_sync_paused = true;
@@ -3248,9 +3256,11 @@ impl AppRuntime {
     /// frontend every ~200 ms so the UI stays in sync with the actual player.
     fn spawn_player_event_loop(&self) {
         let inner = Arc::clone(&self.inner);
+        let runtime = self.clone();
         let task = tokio::spawn(async move {
             let mut last_position: u64 = 0;
             let mut last_state_name = String::new();
+            let mut was_buffering = false;
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 // Clone the Arc to the player so we don't hold an immutable
@@ -3271,17 +3281,57 @@ impl AppRuntime {
                 let position_changed = snap.position_ms != last_position;
                 let state_changed = format!("{:?}", snap.state) != last_state_name;
                 if position_changed || state_changed {
+                    let buffering_now = matches!(snap.state, crate::media::player::PlayerState::Buffering);
+                    let mut buffer_transition = None;
+                    let mut correction = None;
                     let mut state = inner.lock();
                     state.player_snapshot = PlayerSnapshot::from_parts(snap.clone(), presentation);
                     last_position = snap.position_ms;
                     last_state_name = format!("{:?}", snap.state);
-                    state.sync.position_ms = snap.position_ms;
-                    // M2: Feed buffering state into strict-sync
-                    if matches!(snap.state, crate::media::player::PlayerState::Buffering) {
-                        state.sync.strict_sync_paused = true;
+                    let headroom_ms = snap.buffered_ahead_ms.unwrap_or(0);
+                    state.local_participant.buffer_ahead_ms = headroom_ms;
+                    state.buffer.guest_buffer_ahead_ms = headroom_ms;
+                    state.buffer.percent = Self::transfer_percent(&state);
+                    if Self::is_host_role(&state) {
+                        // The host owns the canonical position. A guest must
+                        // retain the last host commit for drift comparison.
+                        state.sync.position_ms = snap.position_ms;
+                    } else if !state.sync.strict_sync_paused
+                        && state.room_state == RoomState::Playing
+                    {
+                        correction = Some((snap.position_ms as i64 - state.sync.position_ms as i64, snap.position_ms));
+                    }
+                    if buffering_now != was_buffering {
+                        buffer_transition = Some((snap.position_ms, headroom_ms, buffering_now));
+                        was_buffering = buffering_now;
                     }
                     let out = snapshot_from_state(&state);
+                    drop(state);
                     inner.emit(out);
+                    if let Some((position_ms, buffer_ahead_ms, stalled)) = buffer_transition {
+                        // This is the canonical BUFFER_LOW/RECOVERED path.
+                        // Recovery only returns the room to Ready Check; it
+                        // never resumes playback independently.
+                        runtime.report_buffer_status(position_ms, buffer_ahead_ms, stalled);
+                    }
+                    if let Some((drift_ms, position_ms)) = correction {
+                        use crate::sync::drift::{correction_for_drift, DriftCorrection};
+                        let mut player = player_arc
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        match correction_for_drift(drift_ms, position_ms as i64) {
+                            DriftCorrection::Ignore => {
+                                let _ = player.set_playback_rate(1.0);
+                            }
+                            DriftCorrection::PlaybackRate { rate } => {
+                                let _ = player.set_playback_rate(rate);
+                            }
+                            DriftCorrection::MicroSeek { target_position_ms }
+                            | DriftCorrection::HardSeek { target_position_ms } => {
+                                let _ = player.seek(target_position_ms.max(0) as u64);
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -3665,7 +3715,7 @@ impl AppRuntime {
             };
         }
         let mut state = self.lock();
-        state.buffer.percent = if stalled { 0 } else { 100 };
+        state.buffer.percent = Self::transfer_percent(&state);
         state.buffer.guest_buffer_ahead_ms = buffer_ahead_ms;
         state.buffer.buffering_participant = if stalled {
             Some(state.local_participant.display_name.clone())
@@ -3861,6 +3911,10 @@ impl AppRuntime {
     /// Range request for uncached bytes. `leave_party` aborts every owned
     /// task and releases the cache.
     pub async fn guest_fetch_media(&self) -> Result<AppSnapshot, String> {
+        self.guest_prepare_media(false).await
+    }
+
+    async fn guest_prepare_media(&self, preload: bool) -> Result<AppSnapshot, String> {
         use crate::media::cache::SparseCache;
         use crate::media::manifest::MediaManifest;
         use crate::media::stream::range_server::{start_range_server, RangeServerConfig};
@@ -3902,11 +3956,53 @@ impl AppRuntime {
                 .await
                 .map_err(|e| e.to_string())?
         };
+        manifest
+            .validate_for_guest()
+            .map_err(|e| e.to_string())?;
 
         // 2. Create/open sparse cache
-        let cache_root = std::env::temp_dir().join("MovePartyCache");
-        let cache = SparseCache::open(&cache_root, manifest.clone())
+        let cache_root = {
+            let mut state = self.lock();
+            state
+                .cache_root
+                .get_or_insert_with(|| std::env::temp_dir().join("MovePartyCache"))
+                .clone()
+        };
+        let mut cache = SparseCache::open(&cache_root, manifest.clone())
             .map_err(|e| format!("MP-MEDIA-002 cache open failed: {e}"))?;
+
+        // The first verified chunk is the minimum gate for a playable local
+        // source. Do not advertise readiness before it exists in the guest's
+        // own sparse cache.
+        if !cache.chunk_map().is_available(0) {
+            let client = self
+                .lock()
+                .client
+                .clone()
+                .ok_or_else(|| "MP-NET-001 no QUIC client".to_string())?;
+            let started = Instant::now();
+            let packet = client
+                .fetch_local_media_chunk(&manifest.media_id, 0)
+                .await
+                .map_err(|e| format!("MP-NET-003 initial media chunk failed: {e}"))?;
+            validate_chunk_packet(&manifest, &packet)
+                .map_err(|e| format!("MP-MEDIA-002 initial media chunk rejected: {e}"))?;
+            cache
+                .write_chunk(0, &packet.payload)
+                .map_err(|e| format!("MP-MEDIA-002 initial cache write failed: {e}"))?;
+            let elapsed_ms = started.elapsed().as_millis().max(1) as u64;
+            let goodput_bps = packet.payload.len() as u64 * 8 * 1_000 / elapsed_ms;
+            self.lock().network.goodput_bps = goodput_bps;
+        }
+        let initial_bytes_available = cache.bytes_available();
+        if self.lock().db.is_some() {
+            self.register_cached_media(
+                &manifest.media_id,
+                &manifest.filename,
+                manifest.file_size,
+                &manifest.full_hash,
+            )?;
+        }
 
         // 3. Shared demand channel between range server and transfer worker
         let demand = ChunkDemandHandle::new();
@@ -3932,14 +4028,21 @@ impl AppRuntime {
         let media_url = range_handle.media_url.clone();
 
         {
-            self.lock().guest_cache = Some(cache_arc.clone());
+            let mut state = self.lock();
+            state.guest_cache = Some(cache_arc.clone());
+            state.transfer = Some(transfer_progress(
+                &manifest,
+                initial_bytes_available,
+                0,
+                state.network.goodput_bps,
+            ));
         }
 
         // 4. Open player with range-server HTTP URL
         {
             let mut state = self.lock();
             state.media = Some(manifest.clone());
-            state.local_participant.media_ready = true;
+            state.local_participant.media_ready = false;
             state.local_participant.buffer_ahead_ms = 0;
             state.range_server_handle = Some(range_handle);
             #[cfg(feature = "mpv")]
@@ -3964,7 +4067,12 @@ impl AppRuntime {
                 }
                 state.player = Some(Arc::new(std::sync::Mutex::new(player)));
             }
-            if !Self::is_host_role(&state) && state.player_snapshot.error_message.is_none() {
+            let playable = initial_bytes_available > 0 && state.player_snapshot.error_message.is_none();
+            state.local_participant.media_ready = playable;
+            state.buffer.percent = Self::transfer_percent(&state);
+            state.buffer.guest_buffer_ahead_ms = state.player_snapshot.buffered_ahead_ms.unwrap_or(0);
+            state.local_participant.buffer_ahead_ms = state.buffer.guest_buffer_ahead_ms;
+            if !Self::is_host_role(&state) && playable && state.buffer.guest_buffer_ahead_ms >= 5_000 {
                 state
                     .sync_coordinator
                     .lock()
@@ -4002,6 +4110,7 @@ impl AppRuntime {
                         demand_worker.finish_fetch(request.index);
                         break;
                     };
+                    let started = Instant::now();
                     match client
                         .fetch_local_media_chunk(&manifest_worker.media_id, request.index)
                         .await
@@ -4025,16 +4134,28 @@ impl AppRuntime {
                             let write_result = {
                                 let mut c = cache.lock().await;
                                 c.write_chunk(u64::from(packet.chunk_index), &packet.payload)
+                                    .map(|()| c.bytes_available())
                             };
                             match write_result {
-                                Ok(()) => {
+                                Ok(bytes_available) => {
                                     {
                                         let mut state = inner.lock();
-                                        if let Some(ref mut t) = state.transfer {
-                                            t.bytes_available += packet.payload.len() as u64;
-                                        }
+                                        let elapsed_ms = started.elapsed().as_millis().max(1) as u64;
+                                        let goodput_bps = packet.payload.len() as u64 * 8 * 1_000 / elapsed_ms;
+                                        state.network.goodput_bps = goodput_bps;
+                                        state.transfer = Some(transfer_progress(
+                                            &manifest_worker,
+                                            bytes_available,
+                                            state.buffer.guest_buffer_ahead_ms,
+                                            goodput_bps,
+                                        ));
+                                        state.buffer.percent = Self::transfer_percent(&state);
+                                        inner.emit(snapshot_from_state(&state));
                                     }
                                     chunk_wake_worker.notify();
+                                    if preload && request.index.saturating_add(1) < manifest_worker.chunk_count {
+                                        demand_worker.request(request.index + 1, ChunkPriority::Background);
+                                    }
                                 }
                                 Err(_) => {
                                     // Write failed (disk/IO): requeue the
@@ -4057,6 +4178,13 @@ impl AppRuntime {
         };
         {
             self.lock().transfer_task = Some(transfer_task);
+        }
+
+        // Scheduled preload keeps progressing sequentially through missing
+        // media after the verified opening chunk. Range demand remains
+        // higher priority, so playback always wins over background preload.
+        if preload && manifest.chunk_count > 1 {
+            demand.request(1, ChunkPriority::ImmediateFuture);
         }
 
         if self.lock().player.is_some() {
@@ -4162,7 +4290,7 @@ impl crate::scheduling::preload::PreloadExecutor for AppRuntimePreloadExecutor {
             // Real preload preparation for the scheduled session: fetch the
             // manifest, open the sparse cache, start the demand-driven range
             // server and transfer worker so bytes are ready by show time.
-            let _ = runtime.guest_fetch_media().await;
+            let _ = runtime.guest_prepare_media(true).await;
             let _ = schedule;
         });
         Ok(crate::scheduling::preload::PreloadOutcome::Started)

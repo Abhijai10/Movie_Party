@@ -21,6 +21,11 @@ use crate::media::manifest::MediaManifest;
 use crate::media::stream::parse_http_range;
 use crate::media::transfer::{ChunkDemandHandle, ChunkPriority};
 
+/// libmpv normally keeps only a small number of HTTP range reads active. A
+/// bounded listener prevents malformed or stalled local clients from turning
+/// that into unbounded blocking tasks.
+pub const MAX_RANGE_CONNECTIONS: usize = 8;
+
 /// Bounded condition variable shared between the transfer worker (writer) and
 /// waiting HTTP range requests (readers). The worker bumps a generation
 /// counter and notifies all waiters after persisting a chunk; waiters wake,
@@ -142,6 +147,7 @@ pub async fn start_range_server(
     let chunk_wake = config.chunk_wake;
     let wait_timeout_ms = config.wait_timeout_ms;
     let chunk_wake_for_task = chunk_wake.clone();
+    let connection_limit = Arc::new(tokio::sync::Semaphore::new(MAX_RANGE_CONNECTIONS));
     let media_url = format!(
         "http://127.0.0.1:{}/media/{}?token={}",
         addr.port(),
@@ -155,12 +161,20 @@ pub async fn start_range_server(
                 accept_result = listener.accept() => {
                     match accept_result {
                         Ok((tokio_stream, peer_addr)) => {
+                            let permit = tokio::select! {
+                                permit = connection_limit.clone().acquire_owned() => match permit {
+                                    Ok(permit) => permit,
+                                    Err(_) => break,
+                                },
+                                _ = shutdown_clone.notified() => break,
+                            };
                             let manifest = manifest.clone();
                             let cache = cache.clone();
                             let token = token.clone();
                             let demand = demand.clone();
                             let chunk_wake = chunk_wake_for_task.clone();
                             tokio::task::spawn_blocking(move || {
+                                let _permit = permit;
                                 if let Ok(std_stream) = tokio_stream.into_std() {
                                     let _ = std_stream.set_nonblocking(false);
                                     handle_connection(std_stream, peer_addr, &manifest, &cache, &token, &demand, &chunk_wake, wait_timeout_ms);

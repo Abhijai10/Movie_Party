@@ -2502,3 +2502,38 @@ Move Party/
         └── adr/
             └── ADR_TEMPLATE.md
 ````
+
+---
+
+## 2026-08-29 — Batch 4 Local Perfect code-completion pass
+
+Completed at code level:
+
+- Guest manifest acceptance validates cache-safe media metadata before a sparse
+  cache is opened. Guest cache paths remain locally owned and are registered
+  under the runtime cache root used by retention.
+- Guest preparation fetches, validates, and persists the opening chunk before
+  exposing the loopback source or media-ready state. Transfer progress now
+  comes from sparse-cache coverage.
+- Scheduled preload uses the existing scheduler/executor: verified opening
+  data first, then sequential background chunks while playback demand remains
+  higher priority.
+- Actual player buffering transitions use the existing canonical
+  BUFFER_LOW/BUFFER_RECOVERED flow. Recovery returns to Ready Check and never
+  resumes independently.
+- Guest player position no longer overwrites host canonical position. The
+  existing drift policy is called only while playing and not in strict buffer
+  recovery; its seek direction converges toward the canonical position.
+- Loopback range serving is capped at eight concurrent connections. Existing
+  leave/replacement cleanup remains the owner of player, range, transfer, and
+  cache resources.
+
+Validation:
+
+- `cargo check` passed with a clean temporary target directory.
+- Focused manifest, sparse-cache, transfer/integrity, and drift tests passed.
+- Range-server socket tests could not bind loopback in the sandbox
+  (`Operation not permitted`); this is an environment limitation, not a test
+  assertion failure.
+- macOS ↔ Windows media playback, buffering, preload timing, reconnect, OS
+  notification delivery, and retention actions remain manual verification.

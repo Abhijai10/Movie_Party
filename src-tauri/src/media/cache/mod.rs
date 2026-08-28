@@ -100,8 +100,10 @@ impl SparseCache {
             .open(&data_path)?;
         data.set_len(manifest.file_size)?;
 
-        let chunk_map =
-            read_chunk_map(&root).unwrap_or_else(|_| ChunkMap::new(manifest.chunk_count));
+        let chunk_map = match read_chunk_map(&root) {
+            Ok(map) if map.chunks.len() == manifest.chunk_count as usize => map,
+            _ => ChunkMap::new(manifest.chunk_count),
+        };
 
         Ok(Self {
             root,

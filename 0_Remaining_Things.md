@@ -364,14 +364,11 @@ Retain:
 
 ## 6.5 Audit items to re-check
 
-⚠️ Re-validate these against the current branch before modifying them:
-
-- accurate buffer percentage instead of only 0/100;
-- bounded range-server concurrency;
-- reconnect/resume behavior after QUIC loss;
-- binary transfer path remains the production path;
-- drift correction is actually called by runtime;
-- stale/overlapping operation cancellation behavior.
+🧪 Code-level validation is complete for binary QUIC chunks, manifest/cache
+validation, sparse-cache resume, bounded range serving, real cache-derived
+transfer progress, and runtime drift correction. Real two-device playback,
+buffering, disconnect/recovery, and stale-worker behavior remain manual
+verification items.
 
 ---
 
@@ -379,7 +376,9 @@ Retain:
 
 ## Status
 
-🟡 Scheduling foundations exist; production preload integration still needs completion.
+🧪 The scheduler now invokes Local Perfect preparation with opening-range
+priority and background continuation. Real scheduled two-device validation and
+OS notification delivery remain pending.
 
 ## 7.1 Local Perfect scheduled preload
 
@@ -1423,10 +1422,10 @@ Verify:
 
 ## Phase 7 — Scheduling / preload
 
-37. 🟡 Local Perfect scheduled pre-transfer
-38. 🟡 online/offline notification flow
-39. 🟡 preload percentage/readiness
-40. 🟡 retention flow proof
+37. 🧪 Local Perfect scheduled pre-transfer
+38. 🧪 online/offline notification flow
+39. 🧪 preload percentage/readiness
+40. 🧪 retention flow proof
 41. 🔮 Provider Sync scheduled preflight
 
 ## Phase 8 — Provider Shared
