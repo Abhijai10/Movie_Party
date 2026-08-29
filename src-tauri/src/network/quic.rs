@@ -675,6 +675,13 @@ impl QuicClient {
     }
 
     pub async fn heartbeat(&self) -> Result<(), QuicError> {
+        self.heartbeat_room_state().await.map(|_| ())
+    }
+
+    /// Return the host's current canonical room state. This is used after an
+    /// authenticated transport replacement; it does not authorize a guest to
+    /// resume playback on its own.
+    pub async fn heartbeat_room_state(&self) -> Result<String, QuicError> {
         let response = self
             .send_request(ClientRequest::Heartbeat {
                 seq: self.next_seq(),
@@ -686,7 +693,7 @@ impl QuicClient {
             .await?;
 
         match response {
-            ServerResponse::HeartbeatAck { .. } => Ok(()),
+            ServerResponse::HeartbeatAck { room_state } => Ok(room_state),
             _ => Err(QuicError::UnexpectedResponse),
         }
     }
@@ -1362,7 +1369,15 @@ async fn handle_request(
             ..
         } => match validate_authenticated_sequence(&session, &sender, seq) {
             Ok(()) => ServerResponse::HeartbeatAck {
-                room_state: "LOBBY".to_string(),
+                room_state: coordinator
+                    .as_ref()
+                    .and_then(|coordinator| {
+                        coordinator
+                            .lock()
+                            .ok()
+                            .map(|c| format!("{:?}", c.room_state).to_ascii_uppercase())
+                    })
+                    .unwrap_or_else(|| "LOBBY".to_string()),
             },
             Err(code) => ServerResponse::AuthReject { code },
         },

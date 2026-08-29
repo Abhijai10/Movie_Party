@@ -2537,3 +2537,66 @@ Validation:
   assertion failure.
 - macOS ↔ Windows media playback, buffering, preload timing, reconnect, OS
   notification delivery, and retention actions remain manual verification.
+
+## 2026-08-29 — Batch 4 reconnect closure
+
+- Added one cancellable Guest reconnect worker using the existing invitation,
+  certificate fingerprint, identity, and authenticated `QuicClient::connect`
+  path. Backoff is bounded and terminal authentication/TLS/protocol failures
+  stop retries.
+- Reconnect replaces only the transport, preserves the verified sparse cache,
+  range source, and transfer demand, then stays in canonical `RECONNECTING`
+  / strict-pause state until the Host runs recovery. No Guest autoplay is
+  introduced.
+- Guest heartbeat monitoring is production-wired and replaced rather than
+  duplicated across transport changes. Leave Party cancels heartbeat,
+  reconnect, preload, transfer-stall, range, player, and receive workers.
+- Playback headroom now falls back to contiguous verified cache bytes around
+  the playhead when libmpv cannot report its own buffer value; whole-file
+  transfer percentage remains separate.
+- Scheduled preload computes an earlier safe deadline from observed goodput
+  (with a deterministic conservative fallback). Offline preload remains
+  `WaitingForPeer`; its existing native notice is rate-limited to one per
+  schedule per fifteen minutes.
+
+⚠ EXTERNAL VERIFICATION PENDING: authenticated reconnect, range-server
+backpressure, real libmpv headroom, scheduled offline notification delivery,
+and macOS ↔ Windows recovery must be checked with physical devices.
+
+## 2026-08-30 — Batch 4 closure test pass
+
+No production code changed in this pass; focused tests were added to lock the
+Batch-4 closure behaviors that the working tree already implemented:
+
+- Reconnect worker guards (host role / missing invite / exactly one worker)
+  and terminal-vs-retryable failure classification.
+- `apply_disconnect` preserves the verified guest sparse cache and pauses
+  strict sync; `leave_party` aborts reconnect, heartbeat, preload, and
+  transfer-stall watch workers (proven via abort-observed Drop guards).
+- Guest heartbeat is replaced (aborted) rather than duplicated on transport
+  change.
+- Playback headroom: contiguous verified bytes ahead of the playhead can be
+  healthy before full-file completion and low despite high whole-file
+  progress.
+- Range-server connection bound: `MAX_RANGE_CONNECTIONS` is 8 and excess
+  work is blocked by the semaphore until a permit is freed (pure
+  semaphore-state test; no sandbox socket binding required).
+- Goodput-driven preload deadline and offline-preload `WaitingForPeer`
+  behavior were re-confirmed by existing focused tests.
+
+Verification:
+
+- `cargo check` ✅ with a clean temporary target directory.
+- `cargo test --lib` ✅ 232 passed, 2 ignored.
+- Focused filters: reconnect_*, heartbeat_*, contiguous_bytes*,
+  range_server_connection_limit*, apply_disconnect*,
+  preload_deadline*, demand_*, and `--test m3_closure` / `--test m4_closure`
+  all ✅.
+- `--test m2_integration`: 21 passed, 4 failed — the same four
+  (`test_a_ready_reaches_host`, `test_d_seek_sets_canonical_position_on_both`,
+  `test_l_ready_does_not_bypass_play_protocol`,
+  `test_t_seek_waits_for_guest_and_resumes_together`) fail identically on the
+  clean pre-pass HEAD; they are pre-existing timing predicates, not caused by
+  this pass.
+- Real authenticated reconnect, two-device recovery, libmpv headroom, and OS
+  notification delivery remain manual/external verification.

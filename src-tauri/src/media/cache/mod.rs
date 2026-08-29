@@ -157,6 +157,30 @@ impl SparseCache {
         self.chunk_map.bytes_available(&self.manifest)
     }
 
+    /// Number of contiguous verified bytes beginning at `offset`. This is a
+    /// playback-oriented value: sparse coverage elsewhere in the file does
+    /// not count as headroom for the current playhead.
+    pub fn contiguous_bytes_from(&self, offset: u64) -> u64 {
+        if offset >= self.manifest.file_size {
+            return 0;
+        }
+        let mut index = offset / self.manifest.chunk_size;
+        if !self.chunk_map.is_available(index) {
+            return 0;
+        }
+        let mut end = (index + 1)
+            .saturating_mul(self.manifest.chunk_size)
+            .min(self.manifest.file_size);
+        index += 1;
+        while index < self.manifest.chunk_count && self.chunk_map.is_available(index) {
+            end = (index + 1)
+                .saturating_mul(self.manifest.chunk_size)
+                .min(self.manifest.file_size);
+            index += 1;
+        }
+        end.saturating_sub(offset)
+    }
+
     pub fn complete(&self) -> bool {
         self.chunk_map.complete()
     }
@@ -243,6 +267,33 @@ mod tests {
         let manifest = manifest();
         let cache = SparseCache::open(&root, manifest).expect("open");
         assert!(cache.root.starts_with(Path::new(&root)));
+        fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn contiguous_bytes_ignore_unrelated_sparse_progress() {
+        let root = std::env::temp_dir().join(Uuid::now_v7().to_string());
+        let manifest = manifest();
+        let mut cache = SparseCache::open(&root, manifest).expect("open");
+        cache.write_chunk(1, b"bbbb").expect("write");
+        cache.write_chunk(2, b"cccc").expect("write");
+        assert_eq!(cache.bytes_available(), 8);
+        assert_eq!(cache.contiguous_bytes_from(0), 0);
+        assert_eq!(cache.contiguous_bytes_from(4), 8);
+        fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn contiguous_bytes_report_healthy_headroom_before_full_download() {
+        let root = std::env::temp_dir().join(Uuid::now_v7().to_string());
+        let manifest = manifest();
+        let mut cache = SparseCache::open(&root, manifest).expect("open");
+        cache.write_chunk(0, b"aaaa").expect("write");
+        cache.write_chunk(1, b"bbbb").expect("write");
+        // The file is only partially downloaded (8/12 bytes), yet the playhead
+        // at byte 0 has a healthy contiguous run ahead of it.
+        assert_eq!(cache.bytes_available(), 8);
+        assert_eq!(cache.contiguous_bytes_from(0), 8);
         fs::remove_dir_all(&root).expect("cleanup");
     }
 }

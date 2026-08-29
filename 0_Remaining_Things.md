@@ -1409,7 +1409,8 @@ Verify:
 27. 🧪 macOS ↔ Windows
 28. 🧪 strict sync
 29. 🧪 buffering
-30. 🧪 disconnect/reconnect
+30. 🧪 disconnect/reconnect — code-level reconnect/backoff/cache preservation
+    completed; physical-device verification pending
 31. Fix only evidence-driven failures
 
 ## Phase 6 — Provider Sync UX
@@ -1422,9 +1423,9 @@ Verify:
 
 ## Phase 7 — Scheduling / preload
 
-37. 🧪 Local Perfect scheduled pre-transfer
-38. 🧪 online/offline notification flow
-39. 🧪 preload percentage/readiness
+37. 🧪 Local Perfect scheduled pre-transfer — code-level wiring completed
+38. 🧪 online/offline notification flow — retryable/rate-limited code path completed
+39. 🧪 preload percentage/readiness — cache-headroom fallback completed
 40. 🧪 retention flow proof
 41. 🔮 Provider Sync scheduled preflight
 

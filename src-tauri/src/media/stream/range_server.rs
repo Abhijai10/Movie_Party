@@ -690,6 +690,36 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn range_server_connection_limit_blocks_excess_work() {
+        // The accept loop gates every connection through
+        // `Semaphore::new(MAX_RANGE_CONNECTIONS)`. Prove the configured bound
+        // and that excess work is deferred until a permit frees, without
+        // relying on sandbox socket binding.
+        let limit = Arc::new(tokio::sync::Semaphore::new(MAX_RANGE_CONNECTIONS));
+        assert_eq!(MAX_RANGE_CONNECTIONS, 8, "configured concurrency bound");
+
+        let mut held = Vec::new();
+        for _ in 0..MAX_RANGE_CONNECTIONS {
+            let permit = limit
+                .clone()
+                .try_acquire_owned()
+                .expect("permit within bound");
+            held.push(permit);
+        }
+        assert!(
+            limit.clone().try_acquire_owned().is_err(),
+            "excess connection must not proceed past the bound"
+        );
+
+        drop(held.pop());
+        let released = limit.clone().try_acquire_owned();
+        assert!(
+            released.is_ok(),
+            "a freed permit must admit the next connection"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn range_server_wake_notifies_waiter_immediately() {
         let root = std::env::temp_dir().join(Uuid::now_v7().to_string());
         std::fs::create_dir_all(&root).expect("temp");

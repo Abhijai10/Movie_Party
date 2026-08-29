@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -28,8 +28,8 @@ use crate::{
     media::{
         manifest::{build_manifest, MediaManifest},
         player::{
-            presentation::PlayerPresentationStatus, LocalPlayer,
-            PlayerError, PlayerSnapshot as LibPlayerSnapshot,
+            presentation::PlayerPresentationStatus, LocalPlayer, PlayerError,
+            PlayerSnapshot as LibPlayerSnapshot,
         },
         stream::range_server::RangeServerHandle,
         transfer::{transfer_progress, TransferProgress},
@@ -318,10 +318,7 @@ impl PlayerSnapshot {
         Self::from_parts(player.snapshot(), player.presentation_status())
     }
 
-    fn from_parts(
-        snapshot: LibPlayerSnapshot,
-        presentation: PlayerPresentationStatus,
-    ) -> Self {
+    fn from_parts(snapshot: LibPlayerSnapshot, presentation: PlayerPresentationStatus) -> Self {
         let mut output = Self::from(&snapshot);
         output.presentation = presentation;
         output
@@ -493,6 +490,14 @@ struct AppRuntimeState {
     // ── M8: Automatic failure watchers ──────────────────────────────────
     /// Background task monitoring transfer progress for stalls.
     transfer_stall_watcher_task: Option<tokio::task::JoinHandle<()>>,
+    /// Guest-only authenticated reconnect loop. Exactly one may own a party.
+    reconnect_task: Option<tokio::task::JoinHandle<()>>,
+    /// Guest heartbeat monitor; replaced whenever the QUIC transport changes.
+    heartbeat_task: Option<tokio::task::JoinHandle<()>>,
+    /// Scheduled preload preparation task, cancelled with the active party.
+    preload_task: Option<tokio::task::JoinHandle<()>>,
+    /// Last offline-preload notice per schedule, preventing scheduler spam.
+    preload_wait_notified_at: HashMap<String, Instant>,
     // ── M4: Persistent storage ──────────────────────────────────────────
     /// SQLite database for identity, schedules, cache metadata, chat.
     db: Option<Arc<crate::storage::sqlite::MovePartyDb>>,
@@ -520,6 +525,21 @@ impl std::fmt::Debug for AppRuntimeState {
 #[derive(Debug, Clone)]
 pub struct AppRuntime {
     inner: Arc<RuntimeInner>,
+}
+
+#[derive(Debug)]
+enum ReconnectFailure {
+    Retryable,
+    Terminal(String),
+}
+
+fn reconnect_failure(error: quic::QuicError) -> ReconnectFailure {
+    match error {
+        quic::QuicError::Auth(_)
+        | quic::QuicError::Tls(_)
+        | quic::QuicError::UnexpectedResponse => ReconnectFailure::Terminal(error.to_string()),
+        _ => ReconnectFailure::Retryable,
+    }
 }
 
 impl AppRuntime {
@@ -662,6 +682,10 @@ impl AppRuntime {
                     transfer_task: None,
                     old_transfer_task: None,
                     transfer_stall_watcher_task: None,
+                    reconnect_task: None,
+                    heartbeat_task: None,
+                    preload_task: None,
+                    preload_wait_notified_at: HashMap::new(),
                     db: None,
                     cache_root: None,
                     scheduler_task: None,
@@ -1031,6 +1055,18 @@ impl AppRuntime {
                 "MP-SCHEDULE-002 preload deadline must precede scheduled start".to_string(),
             );
         }
+        let planned_preload_utc_ms = {
+            let state = self.lock();
+            match (&state.media, &state.transfer) {
+                (Some(media), Some(transfer)) => adaptive_preload_deadline(
+                    planned_preload_utc_ms,
+                    media.file_size.saturating_sub(transfer.bytes_available),
+                    state.network.goodput_bps,
+                    scheduled_start_utc_ms,
+                ),
+                _ => planned_preload_utc_ms,
+            }
+        };
         let schedule_id = Uuid::now_v7().to_string();
         let now_ms = wall_now_ms();
         let schedule = crate::storage::sqlite::StoredSchedule {
@@ -1225,13 +1261,33 @@ impl AppRuntime {
                             // poll (due_schedules includes WaitingForPeer).
                             let _ =
                                 db.update_schedule_status(&schedule.schedule_id, "WaitingForPeer");
-                            let _ = inner.notifier.notify(
-                                "Move Party — Preload Waiting",
-                                &format!(
-                                    "Preload for '{}' is waiting for the guest to be online.",
-                                    schedule.media_id
-                                ),
-                            );
+                            let should_notify = {
+                                let mut state = inner.lock();
+                                let now = Instant::now();
+                                match state.preload_wait_notified_at.get(&schedule.schedule_id) {
+                                    Some(previous)
+                                        if now.duration_since(*previous)
+                                            < std::time::Duration::from_secs(15 * 60) =>
+                                    {
+                                        false
+                                    }
+                                    _ => {
+                                        state
+                                            .preload_wait_notified_at
+                                            .insert(schedule.schedule_id.clone(), now);
+                                        true
+                                    }
+                                }
+                            };
+                            if should_notify {
+                                let _ = inner.notifier.notify(
+                                    "Move Party — Preload Waiting",
+                                    &format!(
+                                        "Movie Party needs your device or partner online to prepare '{}'.",
+                                        schedule.media_id
+                                    ),
+                                );
+                            }
                         }
                         Err(error) => {
                             let _ =
@@ -1270,6 +1326,9 @@ impl AppRuntime {
     pub fn stop_scheduler_for_test(&self) {
         let mut state = self.lock();
         if let Some(task) = state.scheduler_task.take() {
+            task.abort();
+        }
+        if let Some(task) = state.preload_task.take() {
             task.abort();
         }
     }
@@ -1675,9 +1734,9 @@ impl AppRuntime {
         if !crate::network::tailscale::dev_loopback_enabled() {
             let readiness = crate::network::tailscale::local_readiness().await;
             if !readiness.is_usable() {
-                return Err(readiness
-                    .stable_error()
-                    .unwrap_or_else(|| "MP-NET-TS-004 Tailscale has no usable private IPv4 address".to_string()));
+                return Err(readiness.stable_error().unwrap_or_else(|| {
+                    "MP-NET-TS-004 Tailscale has no usable private IPv4 address".to_string()
+                }));
             }
         }
 
@@ -1731,20 +1790,13 @@ impl AppRuntime {
 
         // coordinator_local_id set once in create_local_party for Host; Guest uses AppRuntimeState only.
 
-        let inner_for_listener = Arc::clone(&self.inner);
-        let task = tokio::spawn(async move {
-            Self::peer_event_listener(inner_for_listener).await;
-        });
-
-        {
-            let mut state = self.lock();
-            state.peer_event_task = Some(task);
-        }
+        self.spawn_guest_peer_event_listener();
 
         // M2: live clock calibration (MASTER_PRD §18): 20 CLOCK_PING probes,
         // median offset, then refresh every 30s. The offset feeds the
         // host-monotonic deadline conversion for scheduled commits.
         self.spawn_clock_calibration();
+        self.spawn_guest_heartbeat();
 
         // M3: Auto-fetch media for the guest after authenticated join.
         // Only trigger when the host has local media (the ManifestRequest
@@ -1809,7 +1861,10 @@ impl AppRuntime {
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             }
         });
-        self.lock().calibration_task = Some(task);
+        let mut state = self.lock();
+        if let Some(old) = state.calibration_task.replace(task) {
+            old.abort();
+        }
     }
 
     // M1: called by QUIC server background task when guest authenticates
@@ -2177,11 +2232,49 @@ impl AppRuntime {
         Self::send_host_event(&mut self.lock(), event);
     }
 
+    fn spawn_guest_peer_event_listener(&self) {
+        let runtime = self.clone();
+        let task = tokio::spawn(async move {
+            runtime.peer_event_listener().await;
+        });
+        let mut state = self.lock();
+        if let Some(old) = state.peer_event_task.replace(task) {
+            old.abort();
+        }
+    }
+
+    fn spawn_guest_heartbeat(&self) {
+        let runtime = self.clone();
+        let task = tokio::spawn(async move {
+            let mut failures = 0_u8;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let client = runtime.lock().client.clone();
+                let Some(client) = client else { break };
+                match client.heartbeat().await {
+                    Ok(()) => failures = 0,
+                    Err(_) => {
+                        failures = failures.saturating_add(1);
+                        if failures >= 5 {
+                            let _ = Self::apply_disconnect(&runtime.inner);
+                            runtime.spawn_reconnect_worker();
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        let mut state = self.lock();
+        if let Some(old) = state.heartbeat_task.replace(task) {
+            old.abort();
+        }
+    }
+
     // M2: Guest background task — receives host-originated ServerEvent messages
-    async fn peer_event_listener(inner: Arc<RuntimeInner>) {
+    async fn peer_event_listener(&self) {
         loop {
             let (client_opt, should_continue) = {
-                let state = inner.lock();
+                let state = self.inner.lock();
                 if let Some(ref c) = state.client {
                     (Some(c.clone()), true)
                 } else {
@@ -2197,14 +2290,107 @@ impl AppRuntime {
 
             match client.listen_for_server_event().await {
                 Ok(envelope) => {
-                    Self::apply_peer_event(&inner, &envelope, envelope.event.clone());
+                    Self::apply_peer_event(&self.inner, &envelope, envelope.event.clone());
                 }
                 Err(_) => {
-                    let _ = Self::apply_disconnect(&inner);
+                    let _ = Self::apply_disconnect(&self.inner);
+                    self.spawn_reconnect_worker();
                     break;
                 }
             }
         }
+    }
+
+    fn spawn_reconnect_worker(&self) {
+        if Self::is_host_role(&self.lock()) || self.lock().invite.is_none() {
+            return;
+        }
+        if self
+            .lock()
+            .reconnect_task
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+        {
+            return;
+        }
+        let runtime = self.clone();
+        let task = tokio::spawn(async move {
+            // A short retry gets transient path changes quickly; later attempts
+            // back off and stop rather than silently retrying forever.
+            const BACKOFF_MS: [u64; 6] = [250, 750, 1_500, 3_000, 5_000, 8_000];
+            for delay_ms in BACKOFF_MS {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                match runtime.reconnect_guest_transport().await {
+                    Ok(()) => break,
+                    Err(ReconnectFailure::Terminal(message)) => {
+                        let mut state = runtime.lock();
+                        state.error = Some(message);
+                        state.network.path = "Reconnect rejected".to_string();
+                        break;
+                    }
+                    Err(ReconnectFailure::Retryable) => continue,
+                }
+            }
+            runtime.lock().reconnect_task = None;
+        });
+        self.lock().reconnect_task = Some(task);
+    }
+
+    async fn reconnect_guest_transport(&self) -> Result<(), ReconnectFailure> {
+        let (invite, identity, display_name) = {
+            let state = self.lock();
+            (
+                state.invite.clone().ok_or_else(|| {
+                    ReconnectFailure::Terminal(
+                        "MP-NET-001 reconnect session is unavailable".to_string(),
+                    )
+                })?,
+                self.inner.identity(),
+                state.local_participant.display_name.clone(),
+            )
+        };
+        let address = room::invite_socket_addr(&invite)
+            .map_err(|error| ReconnectFailure::Terminal(error.to_string()))?;
+        let credentials = room::invite_to_credentials(&invite);
+        let (client, auth_accept) = QuicClient::connect(
+            address,
+            invite.server_certificate_fingerprint.clone(),
+            credentials,
+            identity,
+            display_name,
+        )
+        .await
+        .map_err(reconnect_failure)?;
+        if auth_accept.host_device_id != invite.host_device_id {
+            return Err(ReconnectFailure::Terminal(
+                "MP-NET-001 authenticated host identity mismatch".to_string(),
+            ));
+        }
+        let canonical_room_state = client
+            .heartbeat_room_state()
+            .await
+            .map_err(reconnect_failure)?;
+        {
+            let mut state = self.lock();
+            state.client = Some(client);
+            if let Some(peer) = &mut state.peer_participant {
+                peer.connected = true;
+                peer.display_name = auth_accept.host_display_name;
+            }
+            state.network.connected = true;
+            state.network.path =
+                format!("Reconnected; waiting for host recovery ({canonical_room_state})");
+            // Transport recovery never grants the guest authority to continue.
+            state.room_state = RoomState::Reconnecting;
+            state.sync.strict_sync_paused = true;
+            state.error = None;
+            sync_room_snapshot(&mut state);
+        }
+        self.spawn_guest_peer_event_listener();
+        self.spawn_clock_calibration();
+        self.spawn_guest_heartbeat();
+        self.inner.emit(self.snapshot());
+        Ok(())
     }
 
     fn apply_disconnect(inner: &RuntimeInner) -> Result<(), ()> {
@@ -3278,17 +3464,36 @@ impl AppRuntime {
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     (player.snapshot(), player.presentation_status())
                 };
+                let (cache, manifest) = {
+                    let state = inner.lock();
+                    (state.guest_cache.clone(), state.media.clone())
+                };
+                let cache_headroom_ms = match (cache, manifest, snap.duration_ms) {
+                    (Some(cache), Some(manifest), Some(duration_ms)) if duration_ms > 0 => {
+                        let byte_offset = (snap.position_ms as u128 * manifest.file_size as u128
+                            / duration_ms as u128) as u64;
+                        let cache = cache.lock().await;
+                        let contiguous = cache.contiguous_bytes_from(byte_offset);
+                        ((contiguous as u128 * duration_ms as u128) / manifest.file_size as u128)
+                            as u64
+                    }
+                    _ => 0,
+                };
                 let position_changed = snap.position_ms != last_position;
                 let state_changed = format!("{:?}", snap.state) != last_state_name;
                 if position_changed || state_changed {
-                    let buffering_now = matches!(snap.state, crate::media::player::PlayerState::Buffering);
+                    let buffering_now =
+                        matches!(snap.state, crate::media::player::PlayerState::Buffering);
                     let mut buffer_transition = None;
                     let mut correction = None;
                     let mut state = inner.lock();
                     state.player_snapshot = PlayerSnapshot::from_parts(snap.clone(), presentation);
                     last_position = snap.position_ms;
                     last_state_name = format!("{:?}", snap.state);
-                    let headroom_ms = snap.buffered_ahead_ms.unwrap_or(0);
+                    // libmpv's buffering value is authoritative when present.
+                    // The sparse-cache calculation is the conservative fallback
+                    // when the backend cannot expose it.
+                    let headroom_ms = snap.buffered_ahead_ms.unwrap_or(cache_headroom_ms);
                     state.local_participant.buffer_ahead_ms = headroom_ms;
                     state.buffer.guest_buffer_ahead_ms = headroom_ms;
                     state.buffer.percent = Self::transfer_percent(&state);
@@ -3299,7 +3504,10 @@ impl AppRuntime {
                     } else if !state.sync.strict_sync_paused
                         && state.room_state == RoomState::Playing
                     {
-                        correction = Some((snap.position_ms as i64 - state.sync.position_ms as i64, snap.position_ms));
+                        correction = Some((
+                            snap.position_ms as i64 - state.sync.position_ms as i64,
+                            snap.position_ms,
+                        ));
                     }
                     if buffering_now != was_buffering {
                         buffer_transition = Some((snap.position_ms, headroom_ms, buffering_now));
@@ -3382,7 +3590,10 @@ impl AppRuntime {
                 }
             }
         });
-        self.lock().transfer_stall_watcher_task = Some(task);
+        let mut state = self.lock();
+        if let Some(old) = state.transfer_stall_watcher_task.replace(task) {
+            old.abort();
+        }
     }
 
     pub fn set_ready(&self) -> AppSnapshot {
@@ -3583,6 +3794,15 @@ impl AppRuntime {
             state.old_transfer_task = Some(task);
         }
         if let Some(task) = state.transfer_stall_watcher_task.take() {
+            task.abort();
+        }
+        if let Some(task) = state.reconnect_task.take() {
+            task.abort();
+        }
+        if let Some(task) = state.heartbeat_task.take() {
+            task.abort();
+        }
+        if let Some(task) = state.preload_task.take() {
             task.abort();
         }
         if let Some(client) = state.client.take() {
@@ -3956,9 +4176,7 @@ impl AppRuntime {
                 .await
                 .map_err(|e| e.to_string())?
         };
-        manifest
-            .validate_for_guest()
-            .map_err(|e| e.to_string())?;
+        manifest.validate_for_guest().map_err(|e| e.to_string())?;
 
         // 2. Create/open sparse cache
         let cache_root = {
@@ -4067,12 +4285,17 @@ impl AppRuntime {
                 }
                 state.player = Some(Arc::new(std::sync::Mutex::new(player)));
             }
-            let playable = initial_bytes_available > 0 && state.player_snapshot.error_message.is_none();
+            let playable =
+                initial_bytes_available > 0 && state.player_snapshot.error_message.is_none();
             state.local_participant.media_ready = playable;
             state.buffer.percent = Self::transfer_percent(&state);
-            state.buffer.guest_buffer_ahead_ms = state.player_snapshot.buffered_ahead_ms.unwrap_or(0);
+            state.buffer.guest_buffer_ahead_ms =
+                state.player_snapshot.buffered_ahead_ms.unwrap_or(0);
             state.local_participant.buffer_ahead_ms = state.buffer.guest_buffer_ahead_ms;
-            if !Self::is_host_role(&state) && playable && state.buffer.guest_buffer_ahead_ms >= 5_000 {
+            if !Self::is_host_role(&state)
+                && playable
+                && state.buffer.guest_buffer_ahead_ms >= 5_000
+            {
                 state
                     .sync_coordinator
                     .lock()
@@ -4140,8 +4363,10 @@ impl AppRuntime {
                                 Ok(bytes_available) => {
                                     {
                                         let mut state = inner.lock();
-                                        let elapsed_ms = started.elapsed().as_millis().max(1) as u64;
-                                        let goodput_bps = packet.payload.len() as u64 * 8 * 1_000 / elapsed_ms;
+                                        let elapsed_ms =
+                                            started.elapsed().as_millis().max(1) as u64;
+                                        let goodput_bps =
+                                            packet.payload.len() as u64 * 8 * 1_000 / elapsed_ms;
                                         state.network.goodput_bps = goodput_bps;
                                         state.transfer = Some(transfer_progress(
                                             &manifest_worker,
@@ -4153,8 +4378,12 @@ impl AppRuntime {
                                         inner.emit(snapshot_from_state(&state));
                                     }
                                     chunk_wake_worker.notify();
-                                    if preload && request.index.saturating_add(1) < manifest_worker.chunk_count {
-                                        demand_worker.request(request.index + 1, ChunkPriority::Background);
+                                    if preload
+                                        && request.index.saturating_add(1)
+                                            < manifest_worker.chunk_count
+                                    {
+                                        demand_worker
+                                            .request(request.index + 1, ChunkPriority::Background);
                                     }
                                 }
                                 Err(_) => {
@@ -4170,7 +4399,13 @@ impl AppRuntime {
                         }
                         Err(_) => {
                             demand_worker.finish_fetch(request.index);
-                            break;
+                            // Preserve the verified sparse cache and retry the
+                            // same demand after transport recovery. The
+                            // reconnect worker replaces `state.client`; this
+                            // worker never restarts the whole movie download.
+                            demand_worker.request(request.index, ChunkPriority::Critical);
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            continue;
                         }
                     }
                 }
@@ -4179,6 +4414,7 @@ impl AppRuntime {
         {
             self.lock().transfer_task = Some(transfer_task);
         }
+        self.spawn_transfer_stall_watcher();
 
         // Scheduled preload keeps progressing sequentially through missing
         // media after the verified opening chunk. Range demand remains
@@ -4259,6 +4495,26 @@ fn wall_now_ms() -> i64 {
         .as_millis() as i64
 }
 
+const FALLBACK_PRELOAD_GOODPUT_BPS: u64 = 2_000_000;
+
+/// Preserve an explicitly earlier user deadline while moving an unsafe later
+/// one earlier from measured (or conservative fallback) goodput.
+fn adaptive_preload_deadline(
+    requested_utc_ms: i64,
+    remaining_bytes: u64,
+    observed_goodput_bps: u64,
+    scheduled_start_utc_ms: i64,
+) -> i64 {
+    let goodput_bps = observed_goodput_bps.max(FALLBACK_PRELOAD_GOODPUT_BPS);
+    let calculated = crate::scheduling::calculate_preload_start(crate::scheduling::PreloadInputs {
+        remaining_bytes,
+        conservative_goodput_bps: goodput_bps,
+        scheduled_start_utc_ms,
+    })
+    .unwrap_or(requested_utc_ms);
+    requested_utc_ms.min(calculated)
+}
+
 /// Production preload executor: drives the actual Local Perfect preload path
 /// (`guest_fetch_media`) when a QUIC peer is online; otherwise reports that
 /// prerequisites are missing so the scheduler persists a waiting state and
@@ -4286,13 +4542,17 @@ impl crate::scheduling::preload::PreloadExecutor for AppRuntimePreloadExecutor {
         }
         let runtime = self.runtime.clone();
         let schedule = schedule.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             // Real preload preparation for the scheduled session: fetch the
             // manifest, open the sparse cache, start the demand-driven range
             // server and transfer worker so bytes are ready by show time.
             let _ = runtime.guest_prepare_media(true).await;
             let _ = schedule;
         });
+        let mut state = self.runtime.lock();
+        if let Some(old) = state.preload_task.replace(task) {
+            old.abort();
+        }
         Ok(crate::scheduling::preload::PreloadOutcome::Started)
     }
 }
@@ -4422,9 +4682,16 @@ fn apply_recovery_to_state(state: &mut AppRuntimeState, event: FailureEvent, pla
 
 #[cfg(test)]
 mod tests {
-    use super::{AppRuntime, AppSnapshot};
+    use super::{
+        adaptive_preload_deadline, reconnect_failure, AppRuntime, AppSnapshot, ReconnectFailure,
+    };
     use crate::call::{CallSignal, CallSignalType};
+    use crate::network::quic::QuicError;
     use crate::resilience::{FailureEvent, RecoveryAction};
+    use crate::room::MovePartyInvite;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Mutex;
 
     #[test]
     fn backend_snapshot_has_no_demo_peer_or_movie_by_default() {
@@ -4434,6 +4701,259 @@ mod tests {
         assert!(snapshot.media.is_none());
         assert_eq!(snapshot.participants.len(), 1);
         assert!(snapshot.chat.is_empty());
+    }
+
+    #[test]
+    fn observed_goodput_moves_an_unsafe_preload_deadline_earlier() {
+        let requested = 9_900_000;
+        let deadline = adaptive_preload_deadline(requested, 1_000_000_000, 8_000_000, 10_000_000);
+        assert!(deadline < requested);
+    }
+
+    #[test]
+    fn preload_deadline_keeps_an_explicitly_earlier_choice() {
+        let deadline = adaptive_preload_deadline(100, 1_000, 8_000_000, 10_000_000);
+        assert_eq!(deadline, 100);
+    }
+
+    #[test]
+    fn reconnect_failure_maps_auth_tls_protocol_errors_to_terminal() {
+        assert!(matches!(
+            reconnect_failure(QuicError::Auth("bad".into())),
+            ReconnectFailure::Terminal(_)
+        ));
+        assert!(matches!(
+            reconnect_failure(QuicError::Tls("bad".into())),
+            ReconnectFailure::Terminal(_)
+        ));
+        assert!(matches!(
+            reconnect_failure(QuicError::UnexpectedResponse),
+            ReconnectFailure::Terminal(_)
+        ));
+    }
+
+    #[test]
+    fn reconnect_failure_keeps_transport_errors_retryable() {
+        assert!(matches!(
+            reconnect_failure(QuicError::ClosedStream),
+            ReconnectFailure::Retryable
+        ));
+    }
+
+    #[tokio::test]
+    async fn reconnect_worker_not_spawned_for_host_role_or_missing_invite() {
+        let runtime = AppRuntime::new();
+        runtime.spawn_reconnect_worker();
+        assert!(
+            runtime.lock().reconnect_task.is_none(),
+            "host role must not spawn a reconnect worker"
+        );
+        {
+            let mut state = runtime.lock();
+            state.local_participant.role = "Guest".to_string();
+            state.invite = None;
+        }
+        runtime.spawn_reconnect_worker();
+        assert!(
+            runtime.lock().reconnect_task.is_none(),
+            "guest without invite must not spawn"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnect_worker_spawns_at_most_one_worker() {
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            state.local_participant.role = "Guest".to_string();
+            state.invite = Some(MovePartyInvite {
+                v: 1,
+                protocol_major: 1,
+                protocol_minor: 0,
+                room_id: "AAAAAAAAAAAAAAAAAAAAAA".to_string(),
+                join_secret: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
+                host_device_id: "host-dev".to_string(),
+                host_ip: "127.0.0.1".to_string(),
+                host_port: 1,
+                server_certificate_fingerprint: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    .to_string(),
+                expires_at_ms: i64::MAX,
+            });
+        }
+        runtime.spawn_reconnect_worker();
+        assert!(runtime.lock().reconnect_task.is_some());
+        assert!(!runtime
+            .lock()
+            .reconnect_task
+            .as_ref()
+            .unwrap()
+            .is_finished());
+        // Second call while the first is still running: the guard returns
+        // early and does not replace the existing handle.
+        runtime.spawn_reconnect_worker();
+        {
+            let state = runtime.lock();
+            let alive = state
+                .reconnect_task
+                .as_ref()
+                .map(|t| !t.is_finished())
+                .unwrap_or(false);
+            assert!(alive, "original worker must still be running after guard");
+        }
+        runtime.leave_party();
+    }
+
+    #[tokio::test]
+    async fn apply_disconnect_preserves_guest_cache_and_pauses_playback() {
+        let runtime = AppRuntime::new();
+        let dir = std::env::temp_dir().join(format!("m4c_cache_{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).expect("cache dir");
+        let manifest = crate::media::manifest::MediaManifest {
+            media_id: "test".to_string(),
+            filename: "test.bin".to_string(),
+            file_size: 12,
+            container: None,
+            full_hash: "hash".to_string(),
+            quick_fingerprint: crate::media::manifest::QuickFingerprint {
+                file_size: 12,
+                first_hash: "f".to_string(),
+                last_hash: "l".to_string(),
+            },
+            chunk_size: 4,
+            chunk_count: 3,
+        };
+        let cache = Arc::new(Mutex::new(
+            crate::media::cache::SparseCache::open(&dir, manifest).expect("open"),
+        ));
+        {
+            let mut state = runtime.lock();
+            state.guest_cache = Some(cache);
+            state.local_participant.role = "Guest".to_string();
+            state.invite = Some(MovePartyInvite {
+                v: 1,
+                protocol_major: 1,
+                protocol_minor: 0,
+                room_id: "AAAAAAAAAAAAAAAAAAAAAA".to_string(),
+                join_secret: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
+                host_device_id: "host".to_string(),
+                host_ip: "127.0.0.1".to_string(),
+                host_port: 1,
+                server_certificate_fingerprint: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    .to_string(),
+                expires_at_ms: i64::MAX,
+            });
+        }
+        let _ = AppRuntime::apply_disconnect(&runtime.inner);
+        let state = runtime.lock();
+        assert!(
+            state.guest_cache.is_some(),
+            "sparse cache must survive apply_disconnect"
+        );
+        assert!(
+            state.sync.strict_sync_paused,
+            "disconnect must pause strict sync"
+        );
+        assert!(
+            !state.network.connected,
+            "disconnect must mark network down"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn leave_party_aborts_reconnect_heartbeat_preload_and_watch_workers() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let runtime = AppRuntime::new();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let spawn_long = |cancelled: Arc<AtomicBool>| {
+            tokio::spawn(async move {
+                struct Guard(Arc<AtomicBool>);
+                impl Drop for Guard {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::SeqCst);
+                    }
+                }
+                let _guard = Guard(cancelled);
+                loop {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
+            })
+        };
+        {
+            let mut state = runtime.lock();
+            state.reconnect_task = Some(spawn_long(cancelled.clone()));
+            state.heartbeat_task = Some(spawn_long(cancelled.clone()));
+            state.preload_task = Some(spawn_long(cancelled.clone()));
+            state.transfer_stall_watcher_task = Some(spawn_long(cancelled.clone()));
+        }
+        runtime.leave_party();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let state = runtime.lock();
+        assert!(state.reconnect_task.is_none());
+        assert!(state.heartbeat_task.is_none());
+        assert!(state.preload_task.is_none());
+        assert!(state.transfer_stall_watcher_task.is_none());
+        assert!(
+            cancelled.load(Ordering::SeqCst),
+            "leave_party must abort all background workers"
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_worker_is_replaced_not_duplicated() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let runtime = AppRuntime::new();
+        let old_aborted = Arc::new(AtomicBool::new(false));
+        let old_started = Arc::new(AtomicBool::new(false));
+        let old = tokio::spawn({
+            let flag = old_aborted.clone();
+            let started = old_started.clone();
+            async move {
+                struct Guard(Arc<AtomicBool>);
+                impl Drop for Guard {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::SeqCst);
+                    }
+                }
+                let _guard = Guard(flag);
+                started.store(true, Ordering::SeqCst);
+                loop {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
+            }
+        });
+        {
+            let mut state = runtime.lock();
+            state.heartbeat_task = Some(old);
+        }
+        // Ensure the old worker actually started before it is replaced;
+        // aborting a never-polled task never runs its body or Drop.
+        for _ in 0..50 {
+            if old_started.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(old_started.load(Ordering::SeqCst), "old worker must start");
+        // Second spawn replaces (aborts) the first.
+        runtime.spawn_guest_heartbeat();
+        let mut aborted = false;
+        for _ in 0..50 {
+            if old_aborted.load(Ordering::SeqCst) {
+                aborted = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            aborted,
+            "old heartbeat worker must be aborted on replacement"
+        );
+        assert!(
+            runtime.lock().heartbeat_task.is_some(),
+            "new heartbeat worker must be present"
+        );
+        runtime.leave_party();
     }
 
     #[test]
