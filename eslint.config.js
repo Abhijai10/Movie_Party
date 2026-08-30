@@ -10,6 +10,8 @@ export default tseslint.config(
       "src-tauri/target",
       "src-tauri/gen",
       "eslint.config.js",
+      "**/._*",
+      "**/.DS_Store",
     ],
   },
   ...tseslint.configs.strictTypeChecked,

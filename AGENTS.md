@@ -1,8 +1,8 @@
-# Move Party — AGENTS.md
+# Movie Party — AGENTS.md
 
 ## 0. PURPOSE
 
-This file defines mandatory operating rules for any AI coding agent or human developer working on Move Party.
+This file defines mandatory operating rules for any AI coding agent or human developer working on Movie Party.
 
 This document is subordinate only to:
 
@@ -17,7 +17,7 @@ If an approved ADR explicitly changes an earlier architectural decision, the ADR
 
 # 1. PRIMARY RULE
 
-DO NOT REDESIGN MOVE PARTY.
+DO NOT REDESIGN Movie Party.
 
 The architecture has already been chosen.
 
@@ -345,7 +345,7 @@ C:\
 
 # 12. PROVIDER CREDENTIAL RULE
 
-Move Party must NEVER:
+Movie Party must NEVER:
 
 - ask for Netflix password;
 - ask for Prime password;
@@ -569,7 +569,7 @@ Major subsystems should define explicit error enums.
 
 # 23. ERROR CODES
 
-User-visible failures must map to stable Move Party codes.
+User-visible failures must map to stable Movie Party codes.
 
 Pattern:
 

@@ -41,6 +41,23 @@ impl DeviceIdentity {
         }
     }
 
+    /// Restore an identity from its persisted 32-byte ed25519 seed and the
+    /// recorded device id. Used on startup to re-create the exact same
+    /// identity (same device id + same signing key) across restarts.
+    pub fn from_seed(device_id: impl Into<String>, seed: &[u8]) -> Option<Self> {
+        let seed: [u8; 32] = seed.try_into().ok()?;
+        Some(Self {
+            device_id: device_id.into(),
+            signing_key: SigningKey::from_bytes(&seed),
+        })
+    }
+
+    /// The 32-byte ed25519 seed backing this identity. Persisted so the
+    /// identity can be restored after restart.
+    pub fn seed(&self) -> [u8; 32] {
+        self.signing_key.to_bytes()
+    }
+
     pub fn public_key_base64(&self) -> String {
         URL_SAFE_NO_PAD.encode(self.signing_key.verifying_key().as_bytes())
     }

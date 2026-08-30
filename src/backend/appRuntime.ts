@@ -2,6 +2,24 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { CallMode } from "../call/webrtc";
 
+export type BackendFailureKind = "backend failure" | "network failure" | "invalid state";
+
+export class BackendCommandError extends Error {
+  readonly command: string;
+  readonly code: string;
+  readonly kind: BackendFailureKind;
+
+  constructor(command: string, detail: string) {
+    const sanitized = sanitizeErrorDetail(detail);
+    const code = extractErrorCode(sanitized);
+    super(`${command} failed: ${sanitized}`);
+    this.name = "BackendCommandError";
+    this.command = command;
+    this.code = code;
+    this.kind = classifyFailure(code);
+  }
+}
+
 export type ParticipantSnapshot = {
   id: string;
   displayName: string;
@@ -29,6 +47,43 @@ export type TransferProgress = {
   bytesTotal: number;
   bufferAheadMs: number;
   goodputBps: number;
+};
+
+export type ProviderMode = "PROVIDER_SYNC" | "PROVIDER_SHARED";
+
+export type ProviderReadiness =
+  | "NOT_STARTED"
+  | "LAUNCHING"
+  | "LOGIN_REQUIRED"
+  | "READY"
+  | "NAVIGATING"
+  | "PLAYBACK_READY"
+  | "UNAVAILABLE"
+  | "ERROR";
+
+export type ProviderSupportLevel = "SUPPORTED" | "PARTIAL" | "UNAVAILABLE";
+
+export type ProviderTitleResolution = "DIRECT_URL" | "PROVIDER_SEARCH";
+
+export type TailscaleState = "NOT_INSTALLED" | "SIGNED_OUT" | "CONNECTED" | "UNAVAILABLE";
+
+export type TailscaleReadiness = {
+  state: TailscaleState;
+  code: string | null;
+  ip: string | null;
+  deviceName: string | null;
+  message: string;
+};
+
+export type ProviderCapability = {
+  id: string;
+  displayName: string;
+  supportLevel: ProviderSupportLevel;
+  titleResolution: ProviderTitleResolution;
+  syncAvailable: boolean;
+  sharedAvailable: boolean;
+  sharedReason: string;
+  verification: "EXTERNAL_VERIFICATION_PENDING" | "VERIFIED";
 };
 
 export type AppSnapshot = {
@@ -64,6 +119,7 @@ export type AppSnapshot = {
   };
   call: {
     mode: CallMode;
+    status: "connecting" | "connected" | "degraded" | "reconnecting" | "unavailable" | "ended";
     connected: boolean;
     camera: {
       enabled: boolean;
@@ -86,6 +142,7 @@ export type AppSnapshot = {
     providerId: string | null;
     url: string | null;
     state: string;
+    readiness: ProviderReadiness;
   };
   chat: Array<{
     id: string;
@@ -116,6 +173,15 @@ export type AppSnapshot = {
     playbackRate: number;
     bufferedAheadMs: number | null;
     errorMessage: string | null;
+    presentation: {
+      mode: "EMBEDDED_NATIVE" | "EXTERNAL_NATIVE_WINDOW" | "UNAVAILABLE";
+      platform: string;
+      bridge: string;
+      resizeManaged: boolean;
+      ipcManaged: boolean;
+      lifecycleManaged: boolean;
+      message: string;
+    };
   };
 };
 
@@ -140,8 +206,46 @@ export async function getAppSnapshot(): Promise<AppSnapshot | null> {
   return invokeSnapshot("get_app_snapshot");
 }
 
+export async function getTailscaleReadiness(): Promise<TailscaleReadiness> {
+  try {
+    return await invoke<TailscaleReadiness>("get_tailscale_readiness");
+  } catch {
+    return {
+      state: "UNAVAILABLE",
+      code: "MP-NET-TS-003",
+      ip: null,
+      deviceName: null,
+      message: "Tailscale status could not be checked. Make sure its service is running.",
+    };
+  }
+}
+
+export async function openTailscaleSetup(
+  action: "INSTALL" | "SIGN_IN" | "PARTNER_HELP",
+): Promise<boolean> {
+  try {
+    await invoke("open_tailscale_setup", { action });
+    return true;
+  } catch (error) {
+    console.error("open_tailscale_setup failed", error);
+    return false;
+  }
+}
+
+export async function showHome(): Promise<AppSnapshot | null> {
+  return invokeSnapshot("show_home");
+}
+
+export async function showJoinParty(): Promise<AppSnapshot | null> {
+  return invokeSnapshot("show_join_party");
+}
+
+export async function requestEndParty(): Promise<AppSnapshot | null> {
+  return invokeSnapshot("request_end_party");
+}
+
 export async function createLocalParty(mediaPath: string | null): Promise<AppSnapshot | null> {
-  return invokeSnapshot("create_local_party", {
+  return invokeSnapshotOrThrow("create_local_party", {
     mediaPath: mediaPath && mediaPath.trim().length > 0 ? mediaPath : null,
   });
 }
@@ -154,12 +258,68 @@ export async function pickMediaFile(): Promise<string | null> {
   }
 }
 
-export async function launchProvider(providerId: string, url: string): Promise<AppSnapshot | null> {
-  return invokeSnapshot("launch_provider", { providerId, url });
+export async function getProviderCapabilities(): Promise<ProviderCapability[]> {
+  try {
+    return await invoke<ProviderCapability[]>("get_provider_capabilities");
+  } catch (error) {
+    console.error("get_provider_capabilities failed", error);
+    return [];
+  }
+}
+
+export async function launchProvider(
+  providerId: string,
+  url: string,
+  mode: ProviderMode,
+): Promise<AppSnapshot | null> {
+  return invokeSnapshotOrThrow("launch_provider", { providerId, url, mode });
+}
+
+export async function openProviderBrowser(
+  providerId: string,
+): Promise<AppSnapshot | null> {
+  return invokeSnapshotOrThrow("open_provider_browser", { providerId });
+}
+
+export async function checkProviderStatus(
+  providerId: string,
+): Promise<AppSnapshot | null> {
+  return invokeSnapshotOrThrow("check_provider_status", { providerId });
+}
+
+export async function navigateProviderTitle(
+  providerId: string,
+  title: string,
+): Promise<AppSnapshot | null> {
+  return invokeSnapshotOrThrow("navigate_provider_title", {
+    providerId,
+    title,
+  });
+}
+
+export async function launchGenericLink(url: string): Promise<AppSnapshot | null> {
+  return invokeSnapshotOrThrow("launch_generic_link", { url });
 }
 
 export async function joinParty(inviteCode: string): Promise<AppSnapshot | null> {
-  return invokeSnapshot("join_party", { inviteCode });
+  return invokeSnapshotOrThrow("join_party", { inviteCode });
+}
+
+export async function takePendingDeepLinks(): Promise<string[]> {
+  try {
+    return await invoke<string[]>("take_pending_deep_links");
+  } catch (error) {
+    console.error("take_pending_deep_links failed", error);
+    return [];
+  }
+}
+
+export async function listenToDeepLinks(
+  onDeepLink: (url: string) => void,
+): Promise<UnlistenFn> {
+  return listen<string>("deep_link_opened", (event) => {
+    onDeepLink(event.payload);
+  });
 }
 
 export async function markReady(): Promise<AppSnapshot | null> {
@@ -168,6 +328,33 @@ export async function markReady(): Promise<AppSnapshot | null> {
 
 export async function enterCinema(): Promise<AppSnapshot | null> {
   return invokeSnapshot("enter_cinema");
+}
+
+export type NativeVideoBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export async function attachNativeVideoSurface(
+  bounds: NativeVideoBounds,
+): Promise<AppSnapshot | null> {
+  return invokeSnapshot("attach_native_video_surface", { bounds });
+}
+
+export async function resizeNativeVideoSurface(
+  bounds: NativeVideoBounds,
+): Promise<AppSnapshot | null> {
+  return invokeSnapshot("resize_native_video_surface", { bounds });
+}
+
+export async function detachNativeVideoSurface(): Promise<void> {
+  try {
+    await invoke("detach_native_video_surface");
+  } catch (error) {
+    console.error("detach_native_video_surface failed", error);
+  }
 }
 
 export async function pausePlayback(): Promise<AppSnapshot | null> {
@@ -247,9 +434,74 @@ async function invokeSnapshot(
 ): Promise<AppSnapshot | null> {
   try {
     return await invoke<AppSnapshot>(command, args);
-  } catch {
+  } catch (error) {
+    const commandError = toBackendCommandError(command, error);
+    console.error(commandError.message, commandError);
     return null;
   }
+}
+
+async function invokeSnapshotOrThrow(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<AppSnapshot | null> {
+  try {
+    return await invoke<AppSnapshot>(command, args);
+  } catch (error) {
+    const commandError = toBackendCommandError(command, error);
+    console.error(commandError.message, commandError);
+    throw commandError;
+  }
+}
+
+function toBackendCommandError(command: string, error: unknown): BackendCommandError {
+  const detail =
+    typeof error === "string"
+      ? error
+      : error instanceof Error
+        ? error.message
+        : safeStringify(error);
+  return new BackendCommandError(command, detail || "backend exception");
+}
+
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function sanitizeErrorDetail(detail: string): string {
+  return detail
+    .replace(/([A-Za-z]:\\|\/Users\/|\/Volumes\/|\/private\/|\/var\/|\/tmp\/)[^\s"'`]+/g, "[path]")
+    .trim();
+}
+
+function extractErrorCode(detail: string): string {
+  return detail.match(/\bMP-[A-Z]+-\d{3}\b/)?.[0] ?? "MP-BACKEND-001";
+}
+
+function classifyFailure(code: string): BackendFailureKind {
+  if (code.startsWith("MP-NET-")) {
+    return "network failure";
+  }
+  if (code.startsWith("MP-SYNC-") || code.startsWith("MP-ROOM-") || code.startsWith("MP-CTRL-")) {
+    return "invalid state";
+  }
+  return "backend failure";
+}
+
+export function commandErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof BackendCommandError) {
+    return `${error.kind}: ${error.message}`;
+  }
+
+  if (error instanceof Error && error.message.trim().length > 0) {
+    return sanitizeErrorDetail(error.message);
+  }
+
+  return fallback;
 }
 
 export async function initListener(): Promise<void> {

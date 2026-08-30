@@ -1,5 +1,8 @@
 use std::path::{Path, PathBuf};
 
+pub mod presentation;
+pub mod native_surface;
+
 pub const LOCAL_PLAYER_BACKEND: &str = "libmpv";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +60,8 @@ pub enum PlayerError {
     PlaybackError { message: String },
     #[error("MP-MEDIA-007 failed to load media: {reason}")]
     LoadFailed { reason: String },
+    #[error("MP-MEDIA-008 native video surface is unavailable: {reason}")]
+    NativeSurfaceUnavailable { reason: String },
 }
 
 /// Player abstraction layer. The sync coordinator communicates ONLY through
@@ -99,6 +104,18 @@ pub trait LocalPlayer {
     /// Release all resources held by the player (mpv context, render context, etc.).
     /// After `close()` the player may be reused by calling `open()` again.
     fn close(&mut self);
+
+    /// Attach the platform-native video host used for local playback.
+    /// The default keeps non-native test players honest about unsupported presentation.
+    fn attach_native_surface(&mut self, _surface_handle: usize) -> Result<(), PlayerError> {
+        Err(PlayerError::NativeSurfaceUnavailable {
+            reason: "this player backend cannot embed native video".to_string(),
+        })
+    }
+
+    fn presentation_status(&self) -> presentation::PlayerPresentationStatus {
+        presentation::PlayerPresentationStatus::native_render_host_required()
+    }
 }
 
 // ── LibMpv availability detection ────────────────────────────────────────────
@@ -135,6 +152,13 @@ fn candidate_libmpv_paths() -> Vec<PathBuf> {
     {
         paths.push(PathBuf::from("mpv-2.dll"));
         paths.push(PathBuf::from(r"C:\Program Files\mpv\mpv-2.dll"));
+        if let Some(parent) = std::env::current_exe()
+            .ok()
+            .as_ref()
+            .and_then(|p| p.parent())
+        {
+            paths.push(parent.join("mpv_runtime").join("mpv-2.dll"));
+        }
     }
 
     paths
@@ -186,7 +210,7 @@ impl LocalPlayer for LibMpvPlayer {
             return Err(PlayerError::LibMpvUnavailable);
         }
 
-        if !path.exists() {
+        if !is_streaming_media_source(path) && !path.exists() {
             return Err(PlayerError::MissingMedia {
                 path: path.display().to_string(),
             });
@@ -249,6 +273,22 @@ impl LocalPlayer for LibMpvPlayer {
         self.media_path = None;
         self.snapshot = PlayerSnapshot::default();
     }
+
+    fn presentation_status(&self) -> presentation::PlayerPresentationStatus {
+        if self.available {
+            presentation::PlayerPresentationStatus::native_render_host_required()
+        } else {
+            presentation::PlayerPresentationStatus::unavailable("libmpv is unavailable in this environment.")
+        }
+    }
+}
+
+pub fn is_streaming_media_source(path: &Path) -> bool {
+    let source = path.as_os_str().to_string_lossy();
+    source.starts_with("http://127.0.0.1:")
+        || source.starts_with("http://localhost:")
+        || source.starts_with("https://127.0.0.1:")
+        || source.starts_with("https://localhost:")
 }
 
 // ── Real mpv backend (feature-gated) ─────────────────────────────────────────
@@ -290,6 +330,17 @@ mod tests {
         let result = player.open(std::path::Path::new("/nonexistent/file.mp4"));
 
         assert!(matches!(result, Err(PlayerError::MissingMedia { .. })));
+    }
+
+    #[test]
+    fn loopback_http_media_source_is_accepted_for_partial_cache_playback() {
+        let mut player = LibMpvPlayer::with_availability(true);
+        let result = player.open(std::path::Path::new(
+            "http://127.0.0.1:49152/media/local?token=secret",
+        ));
+
+        assert!(result.is_ok());
+        assert_eq!(player.snapshot().state, PlayerState::Ready);
     }
 
     #[test]

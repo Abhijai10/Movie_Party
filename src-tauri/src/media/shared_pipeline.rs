@@ -221,7 +221,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "captures the real desktop and uses h264_videotoolbox"]
     async fn macos_shared_pipeline_captures_encodes_transports_and_decodes() {
-        let root = std::env::temp_dir().join(format!("move-party-shared-{}", Uuid::now_v7()));
+        let root = std::env::temp_dir().join(format!("movie-party-shared-{}", Uuid::now_v7()));
         let proof = match run_macos_shared_pipeline_proof(&root).await {
             Ok(proof) => proof,
             Err(error) => {

@@ -10,7 +10,7 @@ use std::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetentionDecision {
     Remove,
-    KeepInMoveParty,
+    KeepInMovieParty,
     SaveAs,
 }
 
@@ -67,7 +67,7 @@ pub fn apply_retention_decision(
             }
             Ok(None)
         }
-        RetentionDecision::KeepInMoveParty => Ok(Some(media_cache_dir.to_path_buf())),
+        RetentionDecision::KeepInMovieParty => Ok(Some(media_cache_dir.to_path_buf())),
         RetentionDecision::SaveAs => {
             let destination = save_as_path.ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing Save As path")
@@ -82,7 +82,7 @@ pub fn decision_for_policy(policy: RetentionPolicy) -> Option<RetentionDecision>
     match policy {
         RetentionPolicy::AskEveryTime => None,
         RetentionPolicy::AlwaysRemove => Some(RetentionDecision::Remove),
-        RetentionPolicy::AlwaysKeep => Some(RetentionDecision::KeepInMoveParty),
+        RetentionPolicy::AlwaysKeep => Some(RetentionDecision::KeepInMovieParty),
     }
 }
 
@@ -152,7 +152,7 @@ mod tests {
         assert_eq!(decision_for_policy(RetentionPolicy::AskEveryTime), None);
         assert_eq!(
             decision_for_policy(RetentionPolicy::AlwaysKeep),
-            Some(RetentionDecision::KeepInMoveParty),
+            Some(RetentionDecision::KeepInMovieParty),
         );
     }
 }

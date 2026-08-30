@@ -9,6 +9,17 @@ pub enum CallMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CallRuntimeStatus {
+    Connecting,
+    Connected,
+    Degraded,
+    Reconnecting,
+    Unavailable,
+    Ended,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CallState {
     pub mode: CallMode,
     pub connected: bool,
@@ -52,6 +63,13 @@ pub enum CallSignalType {
 pub struct CallSignal {
     pub signal_type: CallSignalType,
     pub data: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CallSignalLedger {
+    offer_pending: bool,
+    answer_seen: bool,
+    ice_candidates: std::collections::HashSet<String>,
 }
 
 impl Default for CallState {
@@ -177,8 +195,131 @@ fn upgrade(tier: CameraTier) -> CameraTier {
     }
 }
 
-pub fn validate_signal(signal: &CallSignal) -> bool {
-    !signal.data.trim().is_empty()
+impl CallSignalLedger {
+    pub fn reset(&mut self) {
+        self.offer_pending = false;
+        self.answer_seen = false;
+        self.ice_candidates.clear();
+    }
+}
+
+pub fn validate_signal(signal: &CallSignal, ledger: &mut CallSignalLedger) -> Result<(), String> {
+    const MAX_SIGNAL_BYTES: usize = 1_000_000;
+
+    let data = signal.data.trim();
+    if data.is_empty() || data.len() > MAX_SIGNAL_BYTES {
+        return Err("MP-CALL-001 invalid call signal".to_string());
+    }
+
+    match signal.signal_type {
+        CallSignalType::Offer => {
+            validate_session_description(data, "offer")?;
+            if ledger.offer_pending && !ledger.answer_seen {
+                return Err("MP-CALL-002 duplicate call offer".to_string());
+            }
+            ledger.offer_pending = true;
+            ledger.answer_seen = false;
+            ledger.ice_candidates.clear();
+            Ok(())
+        }
+        CallSignalType::Answer => {
+            validate_session_description(data, "answer")?;
+            if !ledger.offer_pending && !is_internal_session_description(data, "answer") {
+                return Err("MP-CALL-003 stale call answer".to_string());
+            }
+            if ledger.answer_seen {
+                return Err("MP-CALL-004 duplicate call answer".to_string());
+            }
+            ledger.offer_pending = true;
+            ledger.answer_seen = true;
+            Ok(())
+        }
+        CallSignalType::Ice => {
+            let candidate = validate_ice_candidate(data)?;
+            if candidate.is_empty() || candidate.len() > 16_384 {
+                return Err("MP-CALL-005 malformed ICE candidate".to_string());
+            }
+            if !ledger.offer_pending && !is_internal_ice_candidate(data) {
+                return Err("MP-CALL-006 stale ICE candidate".to_string());
+            }
+            ledger.offer_pending = true;
+            if !ledger.ice_candidates.insert(candidate) {
+                return Err("MP-CALL-007 duplicate ICE candidate".to_string());
+            }
+            Ok(())
+        }
+        CallSignalType::Renegotiate => Err("MP-CALL-008 unsupported renegotiation".to_string()),
+    }
+}
+
+fn validate_session_description(data: &str, expected_type: &str) -> Result<(), String> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
+        return validate_json_session_description(&value, expected_type);
+    }
+
+    if is_internal_session_description(data, expected_type) {
+        return Ok(());
+    }
+
+    Err("MP-CALL-001 malformed call signal".to_string())
+}
+
+fn validate_json_session_description(
+    value: &serde_json::Value,
+    expected_type: &str,
+) -> Result<(), String> {
+    let description_type = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "MP-CALL-001 malformed call signal".to_string())?;
+    if description_type != expected_type {
+        return Err("MP-CALL-001 malformed call signal".to_string());
+    }
+    let sdp = value
+        .get("sdp")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .ok_or_else(|| "MP-CALL-001 malformed call signal".to_string())?;
+    if sdp.is_empty() || !sdp.starts_with("v=0") {
+        return Err("MP-CALL-001 malformed call signal".to_string());
+    }
+    Ok(())
+}
+
+fn validate_ice_candidate(data: &str) -> Result<String, String> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
+        return value
+            .get("candidate")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .map(str::to_string)
+            .ok_or_else(|| "MP-CALL-005 malformed ICE candidate".to_string());
+    }
+
+    let candidate = data.trim();
+    if is_internal_ice_candidate(candidate) {
+        return Ok(candidate.to_string());
+    }
+
+    Err("MP-CALL-005 malformed ICE candidate".to_string())
+}
+
+fn is_internal_session_description(data: &str, expected_type: &str) -> bool {
+    let token = data.trim();
+    token.len() <= 16_384
+        && token
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        && token.contains("sdp")
+        && token.ends_with(expected_type)
+}
+
+fn is_internal_ice_candidate(candidate: &str) -> bool {
+    candidate.len() <= 16_384
+        && candidate
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        && candidate.contains("ice-candidate")
 }
 
 #[cfg(test)]
@@ -268,16 +409,40 @@ mod tests {
     fn call_signal_requires_payload() {
         let signal = CallSignal {
             signal_type: CallSignalType::Offer,
-            data: "sdp".to_owned(),
+            data: r#"{"type":"offer","sdp":"v=0\r\n"}"#.to_owned(),
         };
+        let mut ledger = CallSignalLedger::default();
 
-        assert!(validate_signal(&signal));
+        assert!(validate_signal(&signal, &mut ledger).is_ok());
 
         let empty = CallSignal {
             signal_type: CallSignalType::Ice,
             data: " ".to_owned(),
         };
 
-        assert!(!validate_signal(&empty));
+        assert!(validate_signal(&empty, &mut ledger).is_err());
+    }
+
+    #[test]
+    fn call_signal_rejects_duplicate_offer_before_answer() {
+        let signal = CallSignal {
+            signal_type: CallSignalType::Offer,
+            data: r#"{"type":"offer","sdp":"v=0\r\n"}"#.to_owned(),
+        };
+        let mut ledger = CallSignalLedger::default();
+
+        assert!(validate_signal(&signal, &mut ledger).is_ok());
+        assert!(validate_signal(&signal, &mut ledger).is_err());
+    }
+
+    #[test]
+    fn call_signal_rejects_stale_answer_without_offer() {
+        let signal = CallSignal {
+            signal_type: CallSignalType::Answer,
+            data: r#"{"type":"answer","sdp":"v=0\r\n"}"#.to_owned(),
+        };
+        let mut ledger = CallSignalLedger::default();
+
+        assert!(validate_signal(&signal, &mut ledger).is_err());
     }
 }

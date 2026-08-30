@@ -51,7 +51,7 @@ struct ScreenCaptureKitProbe {
         try stream.addStreamOutput(
             output,
             type: .screen,
-            sampleHandlerQueue: DispatchQueue(label: "move-party.sck-probe")
+            sampleHandlerQueue: DispatchQueue(label: "movie-party.sck-probe")
         )
         try await stream.startCapture()
         try await Task.sleep(nanoseconds: 3_000_000_000)

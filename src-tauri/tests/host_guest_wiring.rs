@@ -1,5 +1,5 @@
 use base64::Engine;
-use move_party_lib::app_runtime::{AppRuntime, AppSnapshot, SnapshotSink};
+use movie_party_lib::app_runtime::{AppRuntime, AppSnapshot, SnapshotSink};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,7 +23,7 @@ fn make_tampered_invite(invite_url: &str) -> String {
         .decode(descriptor_b64)
         .expect("valid base64url descriptor");
 
-    let mut invite: move_party_lib::room::MovePartyInvite =
+    let mut invite: movie_party_lib::room::MoviePartyInvite =
         serde_json::from_slice(&json).expect("valid invite JSON");
 
     // Replace with a well-formed 32-byte base64url value that is definitively wrong
@@ -41,7 +41,7 @@ fn make_tampered_invite(invite_url: &str) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_host_guest_wiring() {
     // Enable deterministic development loopback for M1 tests
-    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+    std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
 
     let host_sink = Arc::new(RecordingSink::default());
     let host = AppRuntime::new_with_emitter(Some(host_sink.clone()));
@@ -58,7 +58,7 @@ async fn test_host_guest_wiring() {
 
     let invite_code = host_snapshot.room.invite_code.expect("invite code");
     println!("INVITE CODE: {}", invite_code);
-    assert!(invite_code.starts_with("moveparty://join/"));
+    assert!(invite_code.starts_with("movieparty://join/"));
 
     let guest_sink = Arc::new(RecordingSink::default());
     let guest = AppRuntime::new_with_emitter(Some(guest_sink.clone()));
@@ -145,10 +145,10 @@ async fn guest_rejects_tampered_invite_certificate_fingerprint() {
         }
     }
 
-    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+    std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
     let _env_guard = ScopedEnv {
-        key: "MOVE_PARTY_DEV_LOOPBACK",
-        prev: std::env::var_os("MOVE_PARTY_DEV_LOOPBACK"),
+        key: "MOVIE_PARTY_DEV_LOOPBACK",
+        prev: std::env::var_os("MOVIE_PARTY_DEV_LOOPBACK"),
     };
 
     let host = AppRuntime::new();
@@ -159,7 +159,7 @@ async fn guest_rejects_tampered_invite_certificate_fingerprint() {
     let invite_code = host_snapshot.room.invite_code.expect("invite code");
 
     let tampered_invite = make_tampered_invite(&invite_code);
-    assert!(tampered_invite.starts_with("moveparty://join/"));
+    assert!(tampered_invite.starts_with("movieparty://join/"));
     assert_ne!(
         tampered_invite, invite_code,
         "tampered invite must differ from original"

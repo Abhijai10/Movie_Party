@@ -1,11 +1,14 @@
 export type CallMode = "VIDEO_VOICE" | "VOICE_ONLY" | "OFF";
 
-export type MovePartyCallSignalType = "OFFER" | "ANSWER" | "ICE";
+export type MoviePartyCallSignalType = "OFFER" | "ANSWER" | "ICE";
 
-export type MovePartyCallSignal = {
-  signalType: MovePartyCallSignalType;
+export type MoviePartyCallSignal = {
+  signalType: MoviePartyCallSignalType;
   data: string;
 };
+
+export type CallConnectionStatus =
+  "connecting" | "connected" | "degraded" | "reconnecting" | "unavailable" | "ended";
 
 export type CallMediaIntent = {
   audio: boolean;
@@ -14,10 +17,12 @@ export type CallMediaIntent = {
 
 export type LocalCallLoopbackResult = {
   connected: boolean;
+  status: CallConnectionStatus;
   localTrackKinds: string[];
   remoteTrackKinds: string[];
-  signals: MovePartyCallSignal[];
-  usedSyntheticMedia: boolean;
+  signals: MoviePartyCallSignal[];
+  usedRealMedia: boolean;
+  errorCode: string | null;
 };
 
 export function buildCallMediaIntent(mode: CallMode, cameraEnabled: boolean): CallMediaIntent {
@@ -41,7 +46,7 @@ export function buildCallMediaIntent(mode: CallMode, cameraEnabled: boolean): Ca
   };
 }
 
-export function createMovePartyPeerConnection(): RTCPeerConnection | null {
+export function createMoviePartyPeerConnection(): RTCPeerConnection | null {
   if (typeof RTCPeerConnection === "undefined") {
     return null;
   }
@@ -83,99 +88,153 @@ export async function runLocalPeerConnectionLoopback(
   mode: CallMode,
   cameraEnabled: boolean,
   microphoneEnabled: boolean,
-  onSignal?: (signal: MovePartyCallSignal) => Promise<void> | void,
+  onSignal?: (signal: MoviePartyCallSignal) => Promise<void> | void,
+  abortSignal?: AbortSignal,
 ): Promise<LocalCallLoopbackResult> {
-  const host = createMovePartyPeerConnection();
-  const guest = createMovePartyPeerConnection();
+  const host = createMoviePartyPeerConnection();
+  const guest = createMoviePartyPeerConnection();
 
   if (!host || !guest) {
     return {
       connected: false,
+      status: "unavailable",
       localTrackKinds: [],
       remoteTrackKinds: [],
       signals: [],
-      usedSyntheticMedia: false,
+      usedRealMedia: false,
+      errorCode: "MP-CALL-010",
     };
   }
 
-  const signals: MovePartyCallSignal[] = [];
+  const signals: MoviePartyCallSignal[] = [];
   const remoteTrackKinds: string[] = [];
-  const { stream, usedSyntheticMedia } = createSyntheticCallStream(
-    mode,
-    cameraEnabled,
-    microphoneEnabled,
-  );
-  const localTrackKinds = stream.getTracks().map((track) => track.kind);
+  let stream = new MediaStream();
+  let usedRealMedia = false;
 
-  const publishSignal = async (signal: MovePartyCallSignal) => {
+  const publishSignal = async (signal: MoviePartyCallSignal) => {
+    if (abortSignal?.aborted) {
+      return;
+    }
     signals.push(signal);
     await onSignal?.(signal);
   };
 
-  host.onicecandidate = (event) => {
-    const candidate = event.candidate;
-    if (candidate) {
-      void publishSignal({
-        signalType: "ICE",
-        data: JSON.stringify(candidate.toJSON()),
-      }).then(() => guest.addIceCandidate(candidate));
+  try {
+    if (abortSignal?.aborted || mode === "OFF") {
+      return {
+        connected: false,
+        status: "ended",
+        localTrackKinds: [],
+        remoteTrackKinds: [],
+        signals,
+        usedRealMedia: false,
+        errorCode: null,
+      };
     }
-  };
-  guest.onicecandidate = (event) => {
-    const candidate = event.candidate;
-    if (candidate) {
-      void publishSignal({
-        signalType: "ICE",
-        data: JSON.stringify(candidate.toJSON()),
-      }).then(() => host.addIceCandidate(candidate));
-    }
-  };
-  guest.ontrack = (event) => {
-    remoteTrackKinds.push(event.track.kind);
-  };
 
-  for (const track of stream.getTracks()) {
-    host.addTrack(track, stream);
+    const media = await acquireRealCallMedia(mode, cameraEnabled, microphoneEnabled);
+    stream = media.stream;
+    usedRealMedia = media.usedRealMedia;
+    const localTrackKinds = stream.getTracks().map((track) => track.kind);
+    if (!usedRealMedia) {
+      return {
+        connected: false,
+        status: media.errorCode === "MP-CALL-012" ? "degraded" : "unavailable",
+        localTrackKinds,
+        remoteTrackKinds,
+        signals,
+        usedRealMedia,
+        errorCode: media.errorCode,
+      };
+    }
+
+    host.onicecandidate = (event) => {
+      const candidate = event.candidate;
+      if (candidate && !abortSignal?.aborted) {
+        void publishSignal({
+          signalType: "ICE",
+          data: JSON.stringify(candidate.toJSON()),
+        })
+          .then(() => guest.addIceCandidate(candidate))
+          .catch(() => undefined);
+      }
+    };
+    guest.onicecandidate = (event) => {
+      const candidate = event.candidate;
+      if (candidate && !abortSignal?.aborted) {
+        void publishSignal({
+          signalType: "ICE",
+          data: JSON.stringify(candidate.toJSON()),
+        })
+          .then(() => host.addIceCandidate(candidate))
+          .catch(() => undefined);
+      }
+    };
+    guest.ontrack = (event) => {
+      remoteTrackKinds.push(event.track.kind);
+    };
+
+    for (const track of stream.getTracks()) {
+      host.addTrack(track, stream);
+    }
+
+    const offer = await host.createOffer();
+    await host.setLocalDescription(offer);
+    await publishSignal({
+      signalType: "OFFER",
+      data: JSON.stringify(offer),
+    });
+    await guest.setRemoteDescription(offer);
+
+    const answer = await guest.createAnswer();
+    await guest.setLocalDescription(answer);
+    await publishSignal({
+      signalType: "ANSWER",
+      data: JSON.stringify(answer),
+    });
+    await host.setRemoteDescription(answer);
+
+    await waitForConnected(host, guest, abortSignal);
+    await waitForIceGatheringComplete(host, guest, abortSignal);
+
+    const connected =
+      host.connectionState === "connected" ||
+      guest.connectionState === "connected" ||
+      remoteTrackKinds.length > 0;
+
+    return {
+      connected,
+      status: connected ? "connected" : "connecting",
+      localTrackKinds,
+      remoteTrackKinds,
+      signals,
+      usedRealMedia,
+      errorCode: connected ? null : "MP-CALL-014",
+    };
+  } catch {
+    return {
+      connected: false,
+      status: abortSignal?.aborted ? "ended" : "unavailable",
+      localTrackKinds: stream.getTracks().map((track) => track.kind),
+      remoteTrackKinds,
+      signals,
+      usedRealMedia,
+      errorCode: abortSignal?.aborted ? null : "MP-CALL-015",
+    };
+  } finally {
+    closeLoopback(host, guest, stream);
   }
-
-  const offer = await host.createOffer();
-  await host.setLocalDescription(offer);
-  await publishSignal({
-    signalType: "OFFER",
-    data: JSON.stringify(offer),
-  });
-  await guest.setRemoteDescription(offer);
-
-  const answer = await guest.createAnswer();
-  await guest.setLocalDescription(answer);
-  await publishSignal({
-    signalType: "ANSWER",
-    data: JSON.stringify(answer),
-  });
-  await host.setRemoteDescription(answer);
-
-  await waitForConnected(host, guest);
-  await waitForIceGatheringComplete(host, guest);
-
-  const connected =
-    host.connectionState === "connected" ||
-    guest.connectionState === "connected" ||
-    remoteTrackKinds.length > 0;
-
-  closeLoopback(host, guest, stream);
-
-  return {
-    connected,
-    localTrackKinds,
-    remoteTrackKinds,
-    signals,
-    usedSyntheticMedia,
-  };
 }
 
 export function applyPrivacyModeToStream(stream: MediaStream): void {
   for (const track of stream.getTracks()) {
     track.enabled = false;
+  }
+}
+
+export function stopCallStream(stream: MediaStream): void {
+  for (const track of stream.getTracks()) {
+    track.stop();
   }
 }
 
@@ -205,7 +264,7 @@ function createSyntheticVideoTrack(): MediaStreamTrack | null {
   context.fillRect(0, 0, canvas.width, canvas.height);
   context.fillStyle = "#f8fafc";
   context.font = "24px sans-serif";
-  context.fillText("Move Party call test", 32, 64);
+  context.fillText("Movie Party call test", 32, 64);
   return canvas.captureStream(15).getVideoTracks()[0] ?? null;
 }
 
@@ -213,16 +272,13 @@ export async function acquireRealCallMedia(
   mode: CallMode,
   cameraEnabled: boolean,
   microphoneEnabled: boolean,
-): Promise<{ stream: MediaStream; usedRealMedia: boolean }> {
+): Promise<{ stream: MediaStream; usedRealMedia: boolean; errorCode: string | null }> {
   if (mode === "OFF") {
-    return { stream: new MediaStream(), usedRealMedia: false };
+    return { stream: new MediaStream(), usedRealMedia: false, errorCode: null };
   }
 
   const constraints: MediaStreamConstraints = {
-    audio:
-      microphoneEnabled
-        ? { echoCancellation: true, noiseSuppression: true }
-        : false,
+    audio: { echoCancellation: true, noiseSuppression: true },
     video:
       mode === "VIDEO_VOICE" && cameraEnabled
         ? {
@@ -236,26 +292,55 @@ export async function acquireRealCallMedia(
   try {
     const devices = typeof navigator !== "undefined" ? navigator.mediaDevices : undefined;
     if (!devices?.getUserMedia) {
-      return { stream: new MediaStream(), usedRealMedia: false };
+      return { stream: new MediaStream(), usedRealMedia: false, errorCode: "MP-CALL-010" };
     }
     const stream = await devices.getUserMedia(constraints);
-    return { stream, usedRealMedia: true };
-  } catch {
-    return { stream: new MediaStream(), usedRealMedia: false };
+    for (const track of stream.getAudioTracks()) {
+      track.enabled = microphoneEnabled;
+    }
+    return { stream, usedRealMedia: true, errorCode: null };
+  } catch (error) {
+    const name = error instanceof DOMException ? error.name : "";
+    const errorCode =
+      name === "NotAllowedError" || name === "SecurityError" ? "MP-CALL-011" : "MP-CALL-012";
+    return { stream: new MediaStream(), usedRealMedia: false, errorCode };
   }
 }
 
-async function waitForConnected(host: RTCPeerConnection, guest: RTCPeerConnection): Promise<void> {
+async function waitForConnected(
+  host: RTCPeerConnection,
+  guest: RTCPeerConnection,
+  abortSignal?: AbortSignal,
+): Promise<void> {
   if (host.connectionState === "connected" || guest.connectionState === "connected") {
     return;
   }
 
   await new Promise<void>((resolve) => {
-    const timeout = window.setTimeout(resolve, 2_000);
-    const check = () => {
-      if (host.connectionState === "connected" || guest.connectionState === "connected") {
-        window.clearTimeout(timeout);
-        resolve();
+    let settled = false;
+    // eslint-disable-next-line prefer-const -- esbuild rejects uninitialized const
+    let check: () => void;
+    const cleanup = () => {
+      host.removeEventListener("connectionstatechange", check);
+      guest.removeEventListener("connectionstatechange", check);
+    };
+    const done = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      window.clearTimeout(timeout);
+      cleanup();
+      resolve();
+    };
+    const timeout = window.setTimeout(done, 2_000);
+    check = () => {
+      if (
+        abortSignal?.aborted ||
+        host.connectionState === "connected" ||
+        guest.connectionState === "connected"
+      ) {
+        done();
       }
     };
     host.addEventListener("connectionstatechange", check, { once: false });
@@ -266,21 +351,42 @@ async function waitForConnected(host: RTCPeerConnection, guest: RTCPeerConnectio
 async function waitForIceGatheringComplete(
   host: RTCPeerConnection,
   guest: RTCPeerConnection,
+  abortSignal?: AbortSignal,
 ): Promise<void> {
-  await Promise.all([waitForIceComplete(host), waitForIceComplete(guest)]);
+  await Promise.all([
+    waitForIceComplete(host, abortSignal),
+    waitForIceComplete(guest, abortSignal),
+  ]);
 }
 
-async function waitForIceComplete(connection: RTCPeerConnection): Promise<void> {
+async function waitForIceComplete(
+  connection: RTCPeerConnection,
+  abortSignal?: AbortSignal,
+): Promise<void> {
   if (connection.iceGatheringState === "complete") {
     return;
   }
 
   await new Promise<void>((resolve) => {
-    const timeout = window.setTimeout(resolve, 1_000);
-    const check = () => {
-      if (connection.iceGatheringState === "complete") {
-        window.clearTimeout(timeout);
-        resolve();
+    let settled = false;
+    // eslint-disable-next-line prefer-const -- esbuild rejects uninitialized const
+    let check: () => void;
+    const cleanup = () => {
+      connection.removeEventListener("icegatheringstatechange", check);
+    };
+    const done = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      window.clearTimeout(timeout);
+      cleanup();
+      resolve();
+    };
+    const timeout = window.setTimeout(done, 1_000);
+    check = () => {
+      if (abortSignal?.aborted || connection.iceGatheringState === "complete") {
+        done();
       }
     };
     connection.addEventListener("icegatheringstatechange", check, { once: false });
@@ -292,9 +398,10 @@ function closeLoopback(
   guest: RTCPeerConnection,
   stream: MediaStream,
 ): void {
-  for (const track of stream.getTracks()) {
-    track.stop();
-  }
+  host.onicecandidate = null;
+  guest.onicecandidate = null;
+  guest.ontrack = null;
+  stopCallStream(stream);
   host.close();
   guest.close();
 }

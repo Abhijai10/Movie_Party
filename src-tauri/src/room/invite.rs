@@ -4,13 +4,13 @@ use std::net::{IpAddr, SocketAddr};
 
 use crate::network::quic::{is_base64url_128bit, is_base64url_256bit, RoomCredentials};
 
-pub const INVITE_SCHEME: &str = "moveparty";
+pub const INVITE_SCHEME: &str = "movieparty";
 pub const INVITE_HOST_PATH: &str = "join";
 pub const INVITE_VERSION_V1: u8 = 1;
 pub const INVITE_TTL_MS: i64 = 24 * 60 * 60 * 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MovePartyInvite {
+pub struct MoviePartyInvite {
     pub v: u8,
     pub protocol_major: u16,
     pub protocol_minor: u16,
@@ -25,7 +25,7 @@ pub struct MovePartyInvite {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum InviteError {
-    #[error("MP-ROOM-001 invite must start with moveparty://join/")]
+    #[error("MP-ROOM-001 invite must start with movieparty://join/")]
     InvalidScheme,
     #[error("MP-ROOM-001 invite path/room id is missing")]
     InvalidRoomId,
@@ -53,7 +53,7 @@ pub enum InviteError {
     RoomIdMismatch,
 }
 
-pub fn encode_invite(invite: &MovePartyInvite) -> Result<String, InviteError> {
+pub fn encode_invite(invite: &MoviePartyInvite) -> Result<String, InviteError> {
     validate_invite_shape(invite)?;
     let json =
         serde_json::to_string(invite).map_err(|err| InviteError::InvalidJson(err.to_string()))?;
@@ -64,7 +64,7 @@ pub fn encode_invite(invite: &MovePartyInvite) -> Result<String, InviteError> {
     ))
 }
 
-pub fn parse_invite(url: &str) -> Result<MovePartyInvite, InviteError> {
+pub fn parse_invite(url: &str) -> Result<MoviePartyInvite, InviteError> {
     let prefix = format!("{}://{}/", INVITE_SCHEME, INVITE_HOST_PATH);
     if !url.starts_with(&prefix) {
         return Err(InviteError::InvalidScheme);
@@ -83,7 +83,7 @@ pub fn parse_invite(url: &str) -> Result<MovePartyInvite, InviteError> {
         .decode(descriptor_b64)
         .map_err(|err| InviteError::InvalidEncoding(err.to_string()))?;
 
-    let invite: MovePartyInvite =
+    let invite: MoviePartyInvite =
         serde_json::from_slice(&json).map_err(|err| InviteError::InvalidJson(err.to_string()))?;
 
     if invite.v != INVITE_VERSION_V1 {
@@ -121,20 +121,20 @@ pub fn parse_invite(url: &str) -> Result<MovePartyInvite, InviteError> {
     Ok(invite)
 }
 
-pub fn invite_to_credentials(invite: &MovePartyInvite) -> RoomCredentials {
+pub fn invite_to_credentials(invite: &MoviePartyInvite) -> RoomCredentials {
     RoomCredentials {
         room_id: invite.room_id.clone(),
         join_secret: invite.join_secret.clone(),
     }
 }
 
-pub fn invite_socket_addr(invite: &MovePartyInvite) -> Result<SocketAddr, InviteError> {
+pub fn invite_socket_addr(invite: &MoviePartyInvite) -> Result<SocketAddr, InviteError> {
     let addr = format!("{}:{}", invite.host_ip, invite.host_port);
     addr.parse::<SocketAddr>()
         .map_err(|_| InviteError::InvalidHostAddress(addr))
 }
 
-fn validate_invite_shape(invite: &MovePartyInvite) -> Result<(), InviteError> {
+fn validate_invite_shape(invite: &MoviePartyInvite) -> Result<(), InviteError> {
     if !is_base64url_128bit(&invite.room_id) {
         return Err(InviteError::InvalidRoomIdShape);
     }
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn round_trip_encode_and_parse_invite() {
-        let invite = MovePartyInvite {
+        let invite = MoviePartyInvite {
             v: INVITE_VERSION_V1,
             protocol_major: crate::PROTOCOL_MAJOR,
             protocol_minor: crate::PROTOCOL_MINOR,
@@ -176,7 +176,7 @@ mod tests {
         };
 
         let encoded = encode_invite(&invite).expect("encode");
-        assert!(encoded.starts_with("moveparty://join/"));
+        assert!(encoded.starts_with("movieparty://join/"));
 
         let round_tripped = parse_invite(&encoded).expect("parse");
         assert_eq!(round_tripped.room_id, invite.room_id);
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn rejects_malformed_room_id() {
-        let invite = MovePartyInvite {
+        let invite = MoviePartyInvite {
             v: INVITE_VERSION_V1,
             protocol_major: 1,
             protocol_minor: 0,
@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn invite_to_credentials_preserves_secret() {
-        let invite = MovePartyInvite {
+        let invite = MoviePartyInvite {
             v: INVITE_VERSION_V1,
             protocol_major: 1,
             protocol_minor: 0,
@@ -243,7 +243,7 @@ mod tests {
             .unwrap()
             .as_millis() as i64;
 
-        let mut invite = MovePartyInvite {
+        let mut invite = MoviePartyInvite {
             v: INVITE_VERSION_V1,
             protocol_major: crate::PROTOCOL_MAJOR,
             protocol_minor: crate::PROTOCOL_MINOR,
@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn test_protocol_compatibility() {
-        let mut invite = MovePartyInvite {
+        let mut invite = MoviePartyInvite {
             v: INVITE_VERSION_V1,
             protocol_major: crate::PROTOCOL_MAJOR,
             protocol_minor: crate::PROTOCOL_MINOR,

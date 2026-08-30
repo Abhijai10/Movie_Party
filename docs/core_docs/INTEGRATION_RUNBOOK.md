@@ -1,4 +1,4 @@
-# Move Party V1 — Final Integration Runbook
+# Movie Party V1 — Final Integration Runbook
 
 ## Purpose
 
@@ -8,7 +8,7 @@ policies, tests, and UI components.
 This run is NOT for implementing more isolated abstractions.
 
 This run exists to connect the existing implementation into real executable
-end-to-end Move Party functionality.
+end-to-end Movie Party functionality.
 
 Do not redo completed roadmap work.
 
@@ -115,7 +115,7 @@ Convert existing call models/helpers into an actual peer-media path.
 Required:
 
 - real RTCPeerConnection or selected production implementation;
-- signalling through Move Party;
+- signalling through Movie Party;
 - offer;
 - answer;
 - ICE;
@@ -145,7 +145,7 @@ Existing provider command/model code must be connected to real Chrome/CDP.
 
 Required real local path:
 
-Move Party
+Movie Party
 → locate installed Chrome
 → launch dedicated non-default provider profile
 → connect to real localhost CDP
@@ -203,8 +203,8 @@ real capturable window
 → QUIC media transport
 → receive/presentation buffer
 → real decode
-→ Host Move Party presentation
-→ Guest Move Party presentation.
+→ Host Movie Party presentation
+→ Guest Movie Party presentation.
 
 On macOS use actual ScreenCaptureKit + VideoToolbox.
 

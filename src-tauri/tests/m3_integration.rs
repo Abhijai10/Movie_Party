@@ -4,10 +4,10 @@
 // without requiring libmpv installed.
 // ──────────────────────────────────────────────────────────────────────────────
 
-use move_party_lib::media::player::{
+use movie_party_lib::media::player::{
     detect_libmpv, LibMpvPlayer, LocalPlayer, PlayerError, PlayerState,
 };
-use move_party_lib::sync::{
+use movie_party_lib::sync::{
     consensus::ParticipantReadiness,
     local::{LocalSyncCoordinator, PauseCause, PeerRole},
     state_machine::RoomState,
@@ -478,7 +478,7 @@ fn test_16_player_error_does_not_corrupt_coordinator() {
 
 // ── Test helpers for AppRuntime E2E tests ──────────────────────────────────
 
-use move_party_lib::app_runtime::AppRuntime;
+use movie_party_lib::app_runtime::AppRuntime;
 use std::sync::OnceLock;
 
 static M3_ENV_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -494,7 +494,7 @@ fn m3_env_lock() -> &'static tokio::sync::Mutex<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_17_appruntime_player_dispatch() {
     let _guard = m3_env_lock().lock().await;
-    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+    std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
 
     // Create a temporary media file
     let path = std::env::temp_dir().join(format!("m3_e2e_{}.mp4", uuid::Uuid::now_v7()));
@@ -512,11 +512,22 @@ async fn test_17_appruntime_player_dispatch() {
 
     // Player snapshot should reflect initial state
     let player_state = &snap.player.state;
-    assert!(
-        player_state == "READY" || player_state == "STOPPED",
-        "expected READY or STOPPED, got: {}",
-        player_state
-    );
+    if player_state == "PLAYER_ERROR" {
+        assert!(
+            snap.player
+                .error_message
+                .as_deref()
+                .is_some_and(|error| error.contains("MP-MEDIA-001 libmpv is unavailable")),
+            "PLAYER_ERROR must carry the stable libmpv diagnostic; got: {:?}",
+            snap.player.error_message
+        );
+    } else {
+        assert!(
+            player_state == "READY" || player_state == "STOPPED",
+            "expected READY, STOPPED, or diagnostic PLAYER_ERROR, got: {}",
+            player_state
+        );
+    }
 
     // Pause should not error even if player is not playing
     runtime.pause_playback();
@@ -539,7 +550,7 @@ async fn test_17_appruntime_player_dispatch() {
     assert_eq!(after_leave.screen, "PARTY_ENDED");
 
     let _ = std::fs::remove_file(&path);
-    std::env::remove_var("MOVE_PARTY_DEV_LOOPBACK");
+    std::env::remove_var("MOVIE_PARTY_DEV_LOOPBACK");
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -549,7 +560,7 @@ async fn test_17_appruntime_player_dispatch() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_18_player_buffering_feeds_strict_sync() {
     let _guard = m3_env_lock().lock().await;
-    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+    std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
 
     let path = std::env::temp_dir().join(format!("m3_buf_{}.mp4", uuid::Uuid::now_v7()));
     std::fs::write(&path, b"test-media-content").expect("write fixture");
@@ -584,5 +595,5 @@ async fn test_18_player_buffering_feeds_strict_sync() {
 
     runtime.leave_party();
     let _ = std::fs::remove_file(&path);
-    std::env::remove_var("MOVE_PARTY_DEV_LOOPBACK");
+    std::env::remove_var("MOVIE_PARTY_DEV_LOOPBACK");
 }

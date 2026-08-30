@@ -1,4 +1,4 @@
-//! Real SQLite persistence for Move Party.
+//! Real SQLite persistence for Movie Party.
 //!
 //! Provides actual database storage for device identity, trusted peers,
 //! room history, schedules, cache metadata, and chat messages.
@@ -12,7 +12,7 @@ use rusqlite::{params, Connection};
 
 use super::StorageError;
 
-const CURRENT_SCHEMA_VERSION: i32 = 1;
+const CURRENT_SCHEMA_VERSION: i32 = 2;
 
 /// Helper to lock a Mutex, converting PoisonError to StorageError.
 fn lock_mutex<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, StorageError> {
@@ -21,14 +21,17 @@ fn lock_mutex<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, Stora
         .map_err(|e| StorageError::Sqlite(format!("lock poisoned: {e}")))
 }
 
-/// Move Party database backed by real SQLite.
-pub struct MovePartyDb {
+/// Movie Party database backed by real SQLite.
+pub struct MoviePartyDb {
     conn: Mutex<Connection>,
     #[allow(dead_code)]
     path: PathBuf,
 }
 
-/// Stored device identity that persists across restarts.
+/// Stored device identity metadata. The private signing material is NEVER
+/// stored here — it lives in [`crate::secure::SecureKeyStore`]. This table
+/// only holds the public identity and a reference to the OS-protected
+/// secret entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredIdentity {
     pub device_id: String,
@@ -36,10 +39,12 @@ pub struct StoredIdentity {
     pub public_key: String,
     pub platform: String,
     pub created_at_ms: i64,
+    /// Label of the OS-protected secret entry holding the signing seed.
+    pub key_label: String,
 }
 
 /// A stored schedule record.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredSchedule {
     pub schedule_id: String,
     pub room_id: String,
@@ -73,7 +78,7 @@ pub struct StoredChatMessage {
     pub created_host_time_us: i64,
 }
 
-impl MovePartyDb {
+impl MoviePartyDb {
     /// Open or create the database at the given path.
     /// Runs migrations automatically and idempotently.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
@@ -135,6 +140,11 @@ impl MovePartyDb {
                 .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         }
 
+        if current < 2 && !device_identity_has_key_label(&conn)? {
+            conn.execute_batch(MIGRATION_002)
+                .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        }
+
         conn.execute_batch(&format!("PRAGMA user_version={CURRENT_SCHEMA_VERSION};"))
             .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         Ok(())
@@ -142,45 +152,57 @@ impl MovePartyDb {
 
     // ── Device Identity ────────────────────────────────────────────────────
 
-    /// Store or update the device identity.
+    /// Store or update the device identity metadata.
     pub fn upsert_identity(&self, identity: &StoredIdentity) -> Result<(), StorageError> {
         let conn = lock_mutex(&self.conn)?;
         conn.execute(
-            "INSERT OR REPLACE INTO device_identity (device_id, display_name, public_key, platform, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR REPLACE INTO device_identity (device_id, display_name, public_key, platform, created_at_ms, key_label)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 identity.device_id,
                 identity.display_name,
                 identity.public_key,
                 identity.platform,
                 identity.created_at_ms,
+                identity.key_label,
             ],
         )
         .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         Ok(())
     }
 
-    /// Retrieve the stored device identity, if any.
+    /// Retrieve the stored device identity metadata, if any.
     pub fn get_identity(&self) -> Result<Option<StoredIdentity>, StorageError> {
         let conn = lock_mutex(&self.conn)?;
         let mut stmt = conn
             .prepare(
-                "SELECT device_id, display_name, public_key, platform, created_at_ms
+                "SELECT device_id, display_name, public_key, platform, created_at_ms, key_label
                  FROM device_identity LIMIT 1",
             )
             .map_err(|e| StorageError::Sqlite(e.to_string()))?;
-        let result = stmt
-            .query_row([], |row| {
-                Ok(StoredIdentity {
-                    device_id: row.get(0)?,
-                    display_name: row.get(1)?,
-                    public_key: row.get(2)?,
-                    platform: row.get(3)?,
-                    created_at_ms: row.get(4)?,
-                })
+        match stmt.query_row([], |row| {
+            Ok(StoredIdentity {
+                device_id: row.get(0)?,
+                display_name: row.get(1)?,
+                public_key: row.get(2)?,
+                platform: row.get(3)?,
+                created_at_ms: row.get(4)?,
+                key_label: row.get(5)?,
             })
-            .ok();
-        Ok(result)
+        }) {
+            Ok(identity) => Ok(Some(identity)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(StorageError::Sqlite(e.to_string())),
+        }
+    }
+
+    /// Remove the stored identity metadata (used on coherent rotation so the
+    /// new device identity becomes the single source of truth).
+    pub fn delete_identity(&self) -> Result<(), StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        conn.execute("DELETE FROM device_identity", [])
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(())
     }
 
     // ── Schedules ──────────────────────────────────────────────────────────
@@ -260,6 +282,68 @@ impl MovePartyDb {
         conn.execute(
             "UPDATE schedules SET status = ?1 WHERE schedule_id = ?2",
             params![status, schedule_id],
+        )
+        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Atomically claim a due schedule for execution. Returns `true` only
+    /// when this caller won the transition from a pending state to `Claimed`.
+    pub fn claim_due_schedule(&self, schedule_id: &str, now_ms: i64) -> Result<bool, StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        let changed = conn
+            .execute(
+                "UPDATE schedules
+                 SET status = 'Claimed'
+                 WHERE schedule_id = ?1
+                   AND status IN ('Planned', 'WaitingForPeer')
+                   AND planned_preload_utc_ms <= ?2",
+                params![schedule_id, now_ms],
+            )
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(changed == 1)
+    }
+
+    /// Recover schedules left in `Claimed` by a process crash. A claimed
+    /// schedule has not reached `Transferring`, so it is safe to return it to
+    /// the retryable waiting state.
+    pub fn recover_claimed_schedules(&self, now_ms: i64) -> Result<usize, StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        conn.execute(
+            "UPDATE schedules
+             SET status = 'WaitingForPeer'
+             WHERE status = 'Claimed'
+               AND planned_preload_utc_ms <= ?1",
+            params![now_ms],
+        )
+        .map_err(|e| StorageError::Sqlite(e.to_string()))
+    }
+
+    /// Update the planned preload deadline of a schedule (rescheduling).
+    pub fn update_schedule_preload(
+        &self,
+        schedule_id: &str,
+        planned_preload_utc_ms: i64,
+    ) -> Result<(), StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        conn.execute(
+            "UPDATE schedules SET planned_preload_utc_ms = ?1 WHERE schedule_id = ?2",
+            params![planned_preload_utc_ms, schedule_id],
+        )
+        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Update the media id of a schedule.
+    pub fn update_schedule_media(
+        &self,
+        schedule_id: &str,
+        media_id: &str,
+    ) -> Result<(), StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        conn.execute(
+            "UPDATE schedules SET media_id = ?1 WHERE schedule_id = ?2",
+            params![media_id, schedule_id],
         )
         .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         Ok(())
@@ -427,13 +511,21 @@ impl MovePartyDb {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
+        self.due_schedules(now_ms)
+    }
+
+    /// Schedules due for preload at the given `now_ms` (injectable clock):
+    /// status "Planned" or "WaitingForPeer" (both not-yet-started) and
+    /// `planned_preload_utc_ms <= now_ms`.
+    pub fn due_schedules(&self, now_ms: i64) -> Result<Vec<StoredSchedule>, StorageError> {
         let conn = lock_mutex(&self.conn)?;
         let mut stmt = conn
             .prepare(
                 "SELECT schedule_id, room_id, media_id, scheduled_start_utc_ms,
                         planned_preload_utc_ms, guest_device_id, status, created_at_ms
                  FROM schedules
-                 WHERE status = 'Planned' AND planned_preload_utc_ms <= ?1
+                 WHERE status IN ('Planned', 'WaitingForPeer')
+                   AND planned_preload_utc_ms <= ?1
                  ORDER BY planned_preload_utc_ms",
             )
             .map_err(|e| StorageError::Sqlite(e.to_string()))?;
@@ -458,6 +550,26 @@ impl MovePartyDb {
         Ok(schedules)
     }
 
+    /// The earliest future preload deadline among still-pending schedules
+    /// (Planned or WaitingForPeer) after `now_ms` (injectable clock).
+    /// `None` when nothing is pending.
+    pub fn next_preload_deadline(&self, now_ms: i64) -> Result<Option<i64>, StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        let result = conn.query_row(
+            "SELECT MIN(planned_preload_utc_ms)
+             FROM schedules
+             WHERE status IN ('Planned', 'WaitingForPeer')
+               AND planned_preload_utc_ms > ?1",
+            params![now_ms],
+            |row| row.get::<_, Option<i64>>(0),
+        );
+        match result {
+            Ok(deadline) => Ok(deadline),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(StorageError::Sqlite(e.to_string())),
+        }
+    }
+
     // ── Cache retention ───────────────────────────────────────────────────
 
     /// Retention action: Keep leaves the cache entry untouched.
@@ -466,7 +578,7 @@ impl MovePartyDb {
         Ok(())
     }
 
-    /// Retention action: Remove deletes only the Move Party cache entry and
+    /// Retention action: Remove deletes only the Movie Party cache entry and
     /// any associated cached data on disk.  Never deletes the host's
     /// original media file.
     pub fn retention_remove(&self, media_id: &str) -> Result<(), StorageError> {
@@ -474,6 +586,22 @@ impl MovePartyDb {
         self.delete_cache_entry(media_id)?;
         Ok(())
     }
+}
+
+fn device_identity_has_key_label(conn: &Connection) -> Result<bool, StorageError> {
+    let mut statement = conn
+        .prepare("PRAGMA table_info(device_identity)")
+        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+
+    for column in columns {
+        if column.map_err(|e| StorageError::Sqlite(e.to_string()))? == "key_label" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 // ── Migrations ──────────────────────────────────────────────────────────────
@@ -484,9 +612,9 @@ CREATE TABLE IF NOT EXISTS device_identity (
     display_name TEXT NOT NULL,
     public_key TEXT NOT NULL,
     platform TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL
+    created_at_ms INTEGER NOT NULL,
+    key_label TEXT NOT NULL
 );
-
 CREATE TABLE IF NOT EXISTS schedules (
     schedule_id TEXT PRIMARY KEY,
     room_id TEXT NOT NULL,
@@ -520,6 +648,14 @@ CREATE INDEX IF NOT EXISTS idx_schedules_start ON schedules(scheduled_start_utc_
 CREATE INDEX IF NOT EXISTS idx_chat_room ON chat_messages(room_id, created_host_time_us);
 ";
 
+/// v2: M4 moved private identity material into the platform secure store and
+/// needs a stable Keychain/Credential Manager entry label beside public metadata.
+/// The conditional migration also repairs databases produced by the prior v1
+/// schema declaration, which recorded `user_version = 1` without this column.
+const MIGRATION_002: &str = "
+ALTER TABLE device_identity ADD COLUMN key_label TEXT NOT NULL DEFAULT '';
+";
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -528,20 +664,51 @@ mod tests {
 
     #[test]
     fn creates_database_and_runs_migrations() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
         let version = db.schema_version().expect("version");
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
     }
 
     #[test]
+    fn upgrades_v1_identity_table_missing_key_label() {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "
+            CREATE TABLE device_identity (
+                device_id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                public_key TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL
+            );
+            PRAGMA user_version=1;
+            ",
+        )
+        .expect("legacy schema");
+        let db = MoviePartyDb {
+            conn: Mutex::new(conn),
+            path: PathBuf::from(":memory:"),
+        };
+
+        db.run_migrations().expect("upgrade");
+
+        let conn = lock_mutex(&db.conn).expect("lock");
+        let has_key_label = device_identity_has_key_label(&conn).expect("columns");
+        assert!(has_key_label);
+        drop(conn);
+        assert_eq!(db.schema_version().expect("version"), CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
     fn persists_and_retrieves_identity() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
         let identity = StoredIdentity {
             device_id: "test-device-id".to_string(),
             display_name: "Test Host".to_string(),
             public_key: "base64key".to_string(),
             platform: "macos".to_string(),
             created_at_ms: 1_000_000,
+            key_label: "movie-party-device-signing-key".to_string(),
         };
 
         db.upsert_identity(&identity).expect("upsert");
@@ -550,8 +717,24 @@ mod tests {
     }
 
     #[test]
+    fn identity_key_label_round_trips() {
+        let db = MoviePartyDb::open_in_memory().expect("open");
+        let identity = StoredIdentity {
+            device_id: "label-device".to_string(),
+            display_name: "Label".to_string(),
+            public_key: "pk".to_string(),
+            platform: "macos".to_string(),
+            created_at_ms: 1,
+            key_label: "custom-key-label".to_string(),
+        };
+        db.upsert_identity(&identity).expect("upsert");
+        let retrieved = db.get_identity().expect("get").expect("some");
+        assert_eq!(retrieved.key_label, "custom-key-label");
+    }
+
+    #[test]
     fn persists_and_lists_schedules() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
         let schedule = StoredSchedule {
             schedule_id: "sched-1".to_string(),
             room_id: "room-1".to_string(),
@@ -579,8 +762,49 @@ mod tests {
     }
 
     #[test]
+    fn claim_due_schedule_is_atomic_and_one_winner_only() {
+        let db = MoviePartyDb::open_in_memory().expect("open");
+        let schedule = StoredSchedule {
+            schedule_id: "claim-1".to_string(),
+            room_id: "room".to_string(),
+            media_id: "media".to_string(),
+            scheduled_start_utc_ms: 100,
+            planned_preload_utc_ms: 50,
+            guest_device_id: "guest".to_string(),
+            status: "Planned".to_string(),
+            created_at_ms: 1,
+        };
+
+        db.insert_schedule(&schedule).expect("insert");
+        assert!(db.claim_due_schedule("claim-1", 60).expect("claim"));
+        assert!(!db.claim_due_schedule("claim-1", 60).expect("claim2"));
+        assert_eq!(db.list_schedules().expect("list")[0].status, "Claimed");
+    }
+
+    #[test]
+    fn claimed_schedule_recovers_after_restart_before_execution() {
+        let db = MoviePartyDb::open_in_memory().expect("open");
+        let schedule = StoredSchedule {
+            schedule_id: "claimed-restart".to_string(),
+            room_id: "room".to_string(),
+            media_id: "media".to_string(),
+            scheduled_start_utc_ms: 100,
+            planned_preload_utc_ms: 50,
+            guest_device_id: "guest".to_string(),
+            status: "Claimed".to_string(),
+            created_at_ms: 1,
+        };
+
+        db.insert_schedule(&schedule).expect("insert");
+        assert_eq!(db.recover_claimed_schedules(60).expect("recover"), 1);
+        let due = db.due_schedules(60).expect("due");
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].status, "WaitingForPeer");
+    }
+
+    #[test]
     fn persists_and_manages_cache_entries() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
         let entry = StoredCacheEntry {
             media_id: "local-abc".to_string(),
             filename: "movie.mkv".to_string(),
@@ -603,7 +827,7 @@ mod tests {
 
     #[test]
     fn persists_and_retrieves_chat_messages() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
         let msg = StoredChatMessage {
             message_id: "msg-1".to_string(),
             room_id: "room-1".to_string(),
@@ -635,7 +859,7 @@ mod tests {
 
     #[test]
     fn duplicate_schedule_id_is_idempotent() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
         let schedule = StoredSchedule {
             schedule_id: "dup".to_string(),
             room_id: "room".to_string(),
@@ -660,25 +884,46 @@ mod tests {
         let db_path = dir.join("test.db");
 
         {
-            let db = MovePartyDb::open(&db_path).expect("open1");
+            let db = MoviePartyDb::open(&db_path).expect("open1");
             db.upsert_identity(&StoredIdentity {
                 device_id: "persistent-device".to_string(),
                 display_name: "Persistent".to_string(),
                 public_key: "key".to_string(),
                 platform: "macos".to_string(),
                 created_at_ms: 100,
+                key_label: "persistent-key".to_string(),
             })
             .expect("upsert1");
         }
 
         // Reopen — identity must survive
         {
-            let db = MovePartyDb::open(&db_path).expect("open2");
+            let db = MoviePartyDb::open(&db_path).expect("open2");
             let identity = db.get_identity().expect("get").expect("exists");
             assert_eq!(identity.device_id, "persistent-device");
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_identity_row_surfaces_read_error() {
+        let db = MoviePartyDb::open_in_memory().expect("open");
+        {
+            let conn = db.conn.lock().expect("conn");
+            conn.execute(
+                "INSERT INTO device_identity
+                 (device_id, display_name, public_key, platform, created_at_ms, key_label)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params!["bad", "Bad", "pk", "macos", "not-an-integer", "label"],
+            )
+            .expect("insert");
+        }
+
+        assert!(
+            db.get_identity().is_err(),
+            "corrupt identity metadata must surface an error, not look like first launch"
+        );
     }
 
     #[test]
@@ -692,7 +937,7 @@ mod tests {
             .as_millis() as i64;
         let scheduled_ms: i64 = now_ms + 3 * 3600 * 1000; // +3h
 
-        let preload = MovePartyDb::calculate_preload_start(remaining, goodput, scheduled_ms);
+        let preload = MoviePartyDb::calculate_preload_start(remaining, goodput, scheduled_ms);
         // Transfer time: 1e9 / 1e7 = 100s, × 1.4 = 140s = 140000ms
         // Plus 15 min margin = 900000ms
         // Expected: scheduled_ms - 140000 - 900000 = scheduled_ms - 1_040_000
@@ -701,7 +946,7 @@ mod tests {
 
     #[test]
     fn preload_calculation_zero_goodput_returns_scheduled_time() {
-        let preload = MovePartyDb::calculate_preload_start(1_000_000_000, 0, 7_200_000);
+        let preload = MoviePartyDb::calculate_preload_start(1_000_000_000, 0, 7_200_000);
         // Zero goodput = unknown → start immediately, but capped at now
         // Since now_ms >> scheduled_ms in test, result >= now_ms
         assert!(preload >= 0);
@@ -709,7 +954,7 @@ mod tests {
 
     #[test]
     fn overdue_schedules_returns_planned_past_preload() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
         let schedule = StoredSchedule {
             schedule_id: "overdue-1".to_string(),
             room_id: "room-1".to_string(),
@@ -734,8 +979,15 @@ mod tests {
     }
 
     #[test]
+    fn next_preload_deadline_returns_none_when_no_pending_schedule_exists() {
+        let db = MoviePartyDb::open_in_memory().expect("open");
+
+        assert_eq!(db.next_preload_deadline(100).expect("deadline"), None);
+    }
+
+    #[test]
     fn retention_remove_deletes_cache_entry() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
         let entry = StoredCacheEntry {
             media_id: "to-delete".to_string(),
             filename: "movie.mkv".to_string(),

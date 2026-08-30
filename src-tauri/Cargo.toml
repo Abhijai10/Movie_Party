@@ -1,17 +1,17 @@
 [package]
-name = "move-party"
+name = "movie-party"
 version = "0.1.0"
 description = "Private two-person desktop cinema app"
-authors = ["Move Party"]
+authors = ["Movie Party"]
 edition = "2021"
 license = "LicenseRef-Proprietary"
 
 [lib]
-name = "move_party_lib"
+name = "movie_party_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = []
+default = ["mpv"]
 mpv = ["dep:libloading"]
 
 [build-dependencies]
@@ -19,6 +19,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

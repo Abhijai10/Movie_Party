@@ -3,11 +3,11 @@
 // All use real loopback QUIC and real AppRuntime paths.
 // ──────────────────────────────────────────────────────────────────────────────
 
-use move_party_lib::app_runtime::AppRuntime;
+use movie_party_lib::app_runtime::AppRuntime;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-/// Serializes all access to the process-global `MOVE_PARTY_DEV_LOOPBACK` env
+/// Serializes all access to the process-global `MOVIE_PARTY_DEV_LOOPBACK` env
 /// var. Tests run in parallel (tokio multi-thread), and `create_local_party`
 /// reads the var, so the env_tests module and every `setup_host_guest` must
 /// hold this lock while touching the var or calling `create_local_party`.
@@ -29,8 +29,8 @@ fn write_temp_media(path: &std::path::PathBuf) {
 fn poll_host(
     host: &AppRuntime,
     deadline: std::time::Duration,
-    mut predicate: impl FnMut(&move_party_lib::app_runtime::AppSnapshot) -> bool,
-) -> move_party_lib::app_runtime::AppSnapshot {
+    mut predicate: impl FnMut(&movie_party_lib::app_runtime::AppSnapshot) -> bool,
+) -> movie_party_lib::app_runtime::AppSnapshot {
     let start = std::time::Instant::now();
     loop {
         let snap = host.snapshot();
@@ -49,8 +49,8 @@ fn poll_host(
 fn poll_guest(
     guest: &AppRuntime,
     deadline: std::time::Duration,
-    mut predicate: impl FnMut(&move_party_lib::app_runtime::AppSnapshot) -> bool,
-) -> move_party_lib::app_runtime::AppSnapshot {
+    mut predicate: impl FnMut(&movie_party_lib::app_runtime::AppSnapshot) -> bool,
+) -> movie_party_lib::app_runtime::AppSnapshot {
     let start = std::time::Instant::now();
     loop {
         let snap = guest.snapshot();
@@ -67,7 +67,7 @@ fn poll_guest(
 /// Set up host + guest on loopback QUIC. Returns (host, guest, invite_code).
 async fn setup_host_guest() -> (AppRuntime, AppRuntime, String) {
     let _env_guard = env_lock().lock().await;
-    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+    std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
 
     let host = AppRuntime::new();
     let guest = AppRuntime::new();
@@ -81,7 +81,7 @@ async fn setup_host_guest() -> (AppRuntime, AppRuntime, String) {
         .expect("host create_local_party");
 
     let invite = host_snap.room.invite_code.clone().expect("invite code");
-    assert!(invite.starts_with("moveparty://join/"));
+    assert!(invite.starts_with("movieparty://join/"));
 
     guest
         .join_party(invite.clone())
@@ -97,12 +97,36 @@ async fn setup_host_guest() -> (AppRuntime, AppRuntime, String) {
 
 /// Both participants mark ready and the host waits for the READY_CHECK
 /// consensus (the guest's ReadyState round trip over QUIC) before returning.
+///
+/// V1 correctness: readiness requires genuinely prepared media, so the guest's
+/// async media fetch must have landed before either side presses Ready, and the
+/// guest must report genuine buffer through the real buffer-status path before
+/// the play protocol can commit.
 fn ready_both(host: &AppRuntime, guest: &AppRuntime) {
+    let _ = poll_guest(guest, std::time::Duration::from_secs(5), |s| {
+        s.participants
+            .iter()
+            .any(|p| p.role == "Guest" && p.media_ready)
+    });
+    guest.report_buffer_status(0, 8_000, false);
     guest.set_ready();
     host.set_ready();
     let _ = poll_host(host, std::time::Duration::from_secs(5), |s| {
         s.room.state == "READYCHECK"
     });
+}
+
+/// Press the guest's Ready only after its media is genuinely prepared (V1
+/// correctness: set_ready must not fabricate media readiness) and the guest
+/// has reported genuine buffer.
+fn guest_ready_when_prepared(guest: &AppRuntime) {
+    let _ = poll_guest(guest, std::time::Duration::from_secs(5), |s| {
+        s.participants
+            .iter()
+            .any(|p| p.role == "Guest" && p.media_ready)
+    });
+    guest.report_buffer_status(0, 8_000, false);
+    guest.set_ready();
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -854,7 +878,7 @@ async fn test_t_seek_waits_for_guest_and_resumes_together() {
 #[cfg(test)]
 mod env_tests {
     use super::*;
-    use move_party_lib::app_runtime::AppRuntime;
+    use movie_party_lib::app_runtime::AppRuntime;
 
     struct ScopedEnv {
         key: &'static str,
@@ -879,8 +903,8 @@ mod env_tests {
     async fn dev_loopback_mode_selects_correct_bind_addr() {
         let _env_guard = env_lock().lock().await;
         // No env var → Tailscale path (err expected locally)
-        let _g0 = scoped("MOVE_PARTY_DEV_LOOPBACK", "");
-        std::env::remove_var("MOVE_PARTY_DEV_LOOPBACK");
+        let _g0 = scoped("MOVIE_PARTY_DEV_LOOPBACK", "");
+        std::env::remove_var("MOVIE_PARTY_DEV_LOOPBACK");
         let r0 = AppRuntime::new();
         assert!(
             r0.create_local_party(None).await.is_err(),
@@ -889,7 +913,7 @@ mod env_tests {
         drop(_g0);
 
         // 0 → Tailscale (error locally)
-        let _g1 = scoped("MOVE_PARTY_DEV_LOOPBACK", "0");
+        let _g1 = scoped("MOVIE_PARTY_DEV_LOOPBACK", "0");
         let r1 = AppRuntime::new();
         assert!(
             r1.create_local_party(None).await.is_err(),
@@ -898,7 +922,7 @@ mod env_tests {
         drop(_g1);
 
         // 1 → loopback
-        let _g2 = scoped("MOVE_PARTY_DEV_LOOPBACK", "1");
+        let _g2 = scoped("MOVIE_PARTY_DEV_LOOPBACK", "1");
         let r2 = AppRuntime::new();
         let snap = r2
             .create_local_party(None)
@@ -916,7 +940,7 @@ mod env_tests {
             .invite_code
             .as_ref()
             .unwrap()
-            .starts_with("moveparty://join/"));
+            .starts_with("movieparty://join/"));
         r2.leave_party();
     }
 }
@@ -926,12 +950,12 @@ mod env_tests {
 // authenticated QUIC room transport and arrive at the peer.
 // ──────────────────────────────────────────────────────────────────────────────
 
-use move_party_lib::call::{CallSignal, CallSignalType};
+use movie_party_lib::call::{CallSignal, CallSignalType};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn m5_call_signal_offer_arrives_at_guest() {
     let _env_guard = env_lock().lock().await;
-    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+    std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
 
     let host = AppRuntime::new();
     let guest = AppRuntime::new();
@@ -964,7 +988,7 @@ async fn m5_call_signal_offer_arrives_at_guest() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn m5_call_signal_answer_arrives_at_host() {
     let _env_guard = env_lock().lock().await;
-    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+    std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
 
     let host = AppRuntime::new();
     let guest = AppRuntime::new();
@@ -998,7 +1022,7 @@ async fn m5_call_signal_answer_arrives_at_host() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn m5_call_signal_ice_arrives_bidirectional() {
     let _env_guard = env_lock().lock().await;
-    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+    std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
 
     let host = AppRuntime::new();
     let guest = AppRuntime::new();
@@ -1037,5 +1061,86 @@ async fn m5_call_signal_ice_arrives_bidirectional() {
     });
 
     host.leave_party();
+    guest.leave_party();
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// TEST W — Running-app deep-link join: a guest already inside a room joins a
+// second room from a fresh invite. The old room's session must be torn down
+// (fresh invite, no stale media/chat/provider state), never a duplicate worker.
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_w_guest_joins_second_room_cleanly_from_running_app() {
+    let _env_guard = env_lock().lock().await;
+    std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
+
+    let host_a = AppRuntime::new();
+    let host_b = AppRuntime::new();
+    let guest = AppRuntime::new();
+
+    let media_a = temp_media_path();
+    write_temp_media(&media_a);
+    let snap_a = host_a
+        .create_local_party(Some(media_a.to_string_lossy().to_string()))
+        .await
+        .expect("host A create");
+    let invite_a = snap_a.room.invite_code.clone().expect("invite A");
+
+    // Guest joins room A first (the "already inside a party" state).
+    guest.join_party(invite_a.clone()).await.expect("guest join A");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let snap = guest.snapshot();
+    assert_eq!(snap.room.role, "Guest");
+    assert_eq!(
+        snap.room.invite_code.as_deref(),
+        Some(invite_a.as_str()),
+        "guest must be in room A"
+    );
+
+    // Host B starts a separate room and hands out a fresh invite.
+    let media_b = temp_media_path();
+    write_temp_media(&media_b);
+    let snap_b = host_b
+        .create_local_party(Some(media_b.to_string_lossy().to_string()))
+        .await
+        .expect("host B create");
+    let invite_b = snap_b.room.invite_code.clone().expect("invite B");
+    assert_ne!(invite_a, invite_b, "second room must be a distinct invite");
+
+    // Running-app deep link: the guest joins room B while still in room A.
+    guest.join_party(invite_b.clone()).await.expect("guest join B");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    drop(_env_guard);
+
+    let snap = poll_guest(&guest, std::time::Duration::from_secs(5), |s| {
+        s.room.state == "LOBBY" && s.media.is_some()
+    });
+    assert_eq!(
+        snap.room.invite_code.as_deref(),
+        Some(invite_b.as_str()),
+        "guest must now be in room B"
+    );
+    assert_eq!(snap.room.role, "Guest");
+    assert!(
+        snap.chat.is_empty(),
+        "joining a new room must clear the previous room's chat"
+    );
+    assert!(snap.reactions.is_empty());
+    assert_eq!(
+        snap.sync.position_ms, 0,
+        "joining a new room must reset canonical position"
+    );
+    assert!(
+        snap.provider.provider_id.is_none(),
+        "joining a new room must clear stale provider state"
+    );
+    assert_eq!(
+        snap.media.as_ref().map(|m| m.filename.as_str()),
+        Some("m2_test.mp4")
+    );
+
+    host_a.leave_party();
+    host_b.leave_party();
     guest.leave_party();
 }
