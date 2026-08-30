@@ -41,12 +41,18 @@ struct PendingDeepLinks(Mutex<Vec<String>>);
 
 impl PendingDeepLinks {
     fn push(&self, url: String) {
-        let mut links = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut links = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         links.push(url);
     }
 
     fn take(&self) -> Vec<String> {
-        let mut links = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut links = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         std::mem::take(&mut *links)
     }
 }
@@ -198,7 +204,9 @@ async fn open_tailscale_setup(action: TailscaleSetupAction) -> Result<(), String
             .await
             .map_err(|error| error.to_string()),
         TailscaleSetupAction::Install => open_external_url("https://tailscale.com/download"),
-        TailscaleSetupAction::PartnerHelp => open_external_url("https://tailscale.com/kb/1084/sharing"),
+        TailscaleSetupAction::PartnerHelp => {
+            open_external_url("https://tailscale.com/kb/1084/sharing")
+        }
     }
 }
 
@@ -212,7 +220,9 @@ fn open_external_url(url: &str) -> Result<(), String> {
         std::io::ErrorKind::Unsupported,
         "external setup actions are unsupported on this platform",
     ));
-    result.map(|_| ()).map_err(|error| format!("MP-NET-TS-003 could not open Tailscale setup: {error}"))
+    result
+        .map(|_| ())
+        .map_err(|error| format!("MP-NET-TS-003 could not open Tailscale setup: {error}"))
 }
 
 #[tauri::command]
@@ -477,8 +487,7 @@ fn launch_provider_chrome(
         launch_managed_chrome,
     };
 
-    let chrome_path = find_chrome(&default_chrome_candidates())
-        .map_err(|e| e.to_string())?;
+    let chrome_path = find_chrome(&default_chrome_candidates()).map_err(|e| e.to_string())?;
     let profiles_root = std::env::temp_dir().join("MoviePartyProfiles");
     let cdp_port = allocate_local_cdp_port().map_err(|e| e.to_string())?;
     let plan = build_launch_plan(chrome_path, &profiles_root, provider_id, cdp_port, url)
@@ -504,11 +513,10 @@ fn open_provider_browser(
     // Reuse the existing session when the browser is already running for this
     // provider; never spawn a duplicate browser process for the same session.
     if runtime.session_matches_provider(&provider_id) {
-        let (login_required, media_detected) = runtime.detect_provider_session_status(&provider_id)?;
-        let readiness = crate::providers::sync::readiness_from_detection(
-            login_required,
-            media_detected,
-        );
+        let (login_required, media_detected) =
+            runtime.detect_provider_session_status(&provider_id)?;
+        let readiness =
+            crate::providers::sync::readiness_from_detection(login_required, media_detected);
         return Ok(runtime.update_provider_readiness(readiness));
     }
 
@@ -524,15 +532,12 @@ fn check_provider_status(
     runtime: tauri::State<'_, app_runtime::AppRuntime>,
 ) -> Result<app_runtime::AppSnapshot, String> {
     if !runtime.session_matches_provider(&provider_id) {
-        return Ok(runtime.update_provider_readiness(
-            crate::providers::sync::ProviderReadiness::NotStarted,
-        ));
+        return Ok(runtime
+            .update_provider_readiness(crate::providers::sync::ProviderReadiness::NotStarted));
     }
     let (login_required, media_detected) = runtime.detect_provider_session_status(&provider_id)?;
-    let readiness = crate::providers::sync::readiness_from_detection(
-        login_required,
-        media_detected,
-    );
+    let readiness =
+        crate::providers::sync::readiness_from_detection(login_required, media_detected);
     Ok(runtime.update_provider_readiness(readiness))
 }
 
@@ -550,15 +555,15 @@ fn navigate_provider_title(
     let provider = provider_id_from_str(&provider_id)
         .ok_or_else(|| "MP-PROVIDER-002 unsupported provider".to_string())?;
     if !runtime.session_matches_provider(&provider_id) {
-        return Err("MP-PROVIDER-003 open the provider browser before choosing a title".to_string());
+        return Err(
+            "MP-PROVIDER-003 open the provider browser before choosing a title".to_string(),
+        );
     }
     let url = provider_search_url(provider, &title)
         .ok_or_else(|| "MP-PROVIDER-003 enter a movie or show title".to_string())?;
 
     runtime.navigate_provider_to(&provider_id, &url)?;
-    Ok(runtime.update_provider_readiness(
-        crate::providers::sync::ProviderReadiness::Navigating,
-    ))
+    Ok(runtime.update_provider_readiness(crate::providers::sync::ProviderReadiness::Navigating))
 }
 
 #[tauri::command]

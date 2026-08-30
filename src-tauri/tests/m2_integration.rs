@@ -119,16 +119,6 @@ fn ready_both(host: &AppRuntime, guest: &AppRuntime) {
 /// Press the guest's Ready only after its media is genuinely prepared (V1
 /// correctness: set_ready must not fabricate media readiness) and the guest
 /// has reported genuine buffer.
-fn guest_ready_when_prepared(guest: &AppRuntime) {
-    let _ = poll_guest(guest, std::time::Duration::from_secs(5), |s| {
-        s.participants
-            .iter()
-            .any(|p| p.role == "Guest" && p.media_ready)
-    });
-    guest.report_buffer_status(0, 8_000, false);
-    guest.set_ready();
-}
-
 // ──────────────────────────────────────────────────────────────────────────────
 // TEST A — READY is consensus, never an auto-play
 // Guest set_ready → coordinator.guest_ready → host sees Guest ready. Both
@@ -1088,7 +1078,10 @@ async fn test_w_guest_joins_second_room_cleanly_from_running_app() {
     let invite_a = snap_a.room.invite_code.clone().expect("invite A");
 
     // Guest joins room A first (the "already inside a party" state).
-    guest.join_party(invite_a.clone()).await.expect("guest join A");
+    guest
+        .join_party(invite_a.clone())
+        .await
+        .expect("guest join A");
     std::thread::sleep(std::time::Duration::from_millis(300));
     let snap = guest.snapshot();
     assert_eq!(snap.room.role, "Guest");
@@ -1109,7 +1102,10 @@ async fn test_w_guest_joins_second_room_cleanly_from_running_app() {
     assert_ne!(invite_a, invite_b, "second room must be a distinct invite");
 
     // Running-app deep link: the guest joins room B while still in room A.
-    guest.join_party(invite_b.clone()).await.expect("guest join B");
+    guest
+        .join_party(invite_b.clone())
+        .await
+        .expect("guest join B");
     std::thread::sleep(std::time::Duration::from_millis(300));
     drop(_env_guard);
 

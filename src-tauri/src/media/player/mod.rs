@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-pub mod presentation;
 pub mod native_surface;
+pub mod presentation;
 
 pub const LOCAL_PLAYER_BACKEND: &str = "libmpv";
 
@@ -278,7 +278,9 @@ impl LocalPlayer for LibMpvPlayer {
         if self.available {
             presentation::PlayerPresentationStatus::native_render_host_required()
         } else {
-            presentation::PlayerPresentationStatus::unavailable("libmpv is unavailable in this environment.")
+            presentation::PlayerPresentationStatus::unavailable(
+                "libmpv is unavailable in this environment.",
+            )
         }
     }
 }

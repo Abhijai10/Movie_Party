@@ -57,13 +57,17 @@ impl MediaManifest {
             return Err(ManifestError::InvalidManifest("unsafe filename"));
         }
         if self.file_size == 0 || self.chunk_size != DEFAULT_CHUNK_SIZE_BYTES {
-            return Err(ManifestError::InvalidManifest("invalid media size or chunk size"));
+            return Err(ManifestError::InvalidManifest(
+                "invalid media size or chunk size",
+            ));
         }
         if self.chunk_count != self.file_size.div_ceil(self.chunk_size) {
             return Err(ManifestError::InvalidManifest("inconsistent chunk count"));
         }
         if self.quick_fingerprint.file_size != self.file_size {
-            return Err(ManifestError::InvalidManifest("inconsistent fingerprint size"));
+            return Err(ManifestError::InvalidManifest(
+                "inconsistent fingerprint size",
+            ));
         }
         Ok(())
     }

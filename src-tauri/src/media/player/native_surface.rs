@@ -43,17 +43,13 @@ pub struct NativeVideoSurfaceState {
 }
 
 impl NativeVideoSurfaceState {
-    pub fn attach(
-        &self,
-        app: &AppHandle,
-        bounds: NativeVideoBounds,
-    ) -> Result<usize, PlayerError> {
+    pub fn attach(&self, app: &AppHandle, bounds: NativeVideoBounds) -> Result<usize, PlayerError> {
         let bounds = bounds.validate()?;
-        let webview = app
-            .get_webview_window("main")
-            .ok_or_else(|| PlayerError::NativeSurfaceUnavailable {
+        let webview = app.get_webview_window("main").ok_or_else(|| {
+            PlayerError::NativeSurfaceUnavailable {
                 reason: "main webview is unavailable".to_string(),
-            })?;
+            }
+        })?;
         let output = std::sync::Arc::new(Mutex::new(Err(PlayerError::NativeSurfaceUnavailable {
             reason: "native surface creation did not run".to_string(),
         })));
@@ -68,16 +64,21 @@ impl NativeVideoSurfaceState {
             .0 as usize;
         #[cfg(not(windows))]
         let parent_handle = 0_usize;
-        let scale_factor = webview.scale_factor().map_err(|error| {
-            PlayerError::NativeSurfaceUnavailable {
-                reason: error.to_string(),
-            }
-        })?;
+        let scale_factor =
+            webview
+                .scale_factor()
+                .map_err(|error| PlayerError::NativeSurfaceUnavailable {
+                    reason: error.to_string(),
+                })?;
 
         webview
             .with_webview(move |webview| {
-                let mut guard = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                *result.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                let mut guard = state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *result
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) =
                     PlatformSurface::attach_or_resize(
                         &mut guard,
                         webview,
@@ -90,7 +91,9 @@ impl NativeVideoSurfaceState {
                 reason: error.to_string(),
             })?;
 
-        let mut guard = output.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = output
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         std::mem::replace(
             &mut *guard,
             Err(PlayerError::NativeSurfaceUnavailable {
@@ -100,15 +103,17 @@ impl NativeVideoSurfaceState {
     }
 
     pub fn detach(&self, app: &AppHandle) -> Result<(), PlayerError> {
-        let webview = app
-            .get_webview_window("main")
-            .ok_or_else(|| PlayerError::NativeSurfaceUnavailable {
+        let webview = app.get_webview_window("main").ok_or_else(|| {
+            PlayerError::NativeSurfaceUnavailable {
                 reason: "main webview is unavailable".to_string(),
-            })?;
+            }
+        })?;
         let state = self.inner.clone();
         webview
             .with_webview(move |webview| {
-                let mut guard = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut guard = state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if let Some(surface) = guard.take() {
                     surface.detach(webview);
                 }
@@ -174,12 +179,20 @@ impl PlatformSurface {
                         });
                     }
                     msg_void_bool(view, "setWantsLayer:", true);
-                    msg_void_id_isize_id(parent, "addSubview:positioned:relativeTo:", view, -1, webview_view);
+                    msg_void_id_isize_id(
+                        parent,
+                        "addSubview:positioned:relativeTo:",
+                        view,
+                        -1,
+                        webview_view,
+                    );
                     msg_void_bool(webview_view, "setDrawsBackground:", false);
                     *current = Some(Self { view });
-                    current.as_mut().ok_or_else(|| PlayerError::NativeSurfaceUnavailable {
-                        reason: "native video view was not retained".to_string(),
-                    })?
+                    current
+                        .as_mut()
+                        .ok_or_else(|| PlayerError::NativeSurfaceUnavailable {
+                            reason: "native video view was not retained".to_string(),
+                        })?
                 }
             };
             msg_void_rect(surface.view, "setFrame:", native_frame);
@@ -199,18 +212,31 @@ impl PlatformSurface {
 #[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct NsPoint { x: f64, y: f64 }
+struct NsPoint {
+    x: f64,
+    y: f64,
+}
 #[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct NsSize { width: f64, height: f64 }
+struct NsSize {
+    width: f64,
+    height: f64,
+}
 #[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct NsRect { origin: NsPoint, size: NsSize }
+struct NsRect {
+    origin: NsPoint,
+    size: NsSize,
+}
 #[cfg(target_os = "macos")]
 #[link(name = "objc")]
-extern "C" { fn objc_getClass(name: *const i8) -> *mut std::ffi::c_void; fn sel_registerName(name: *const i8) -> *mut std::ffi::c_void; fn objc_msgSend(); }
+extern "C" {
+    fn objc_getClass(name: *const i8) -> *mut std::ffi::c_void;
+    fn sel_registerName(name: *const i8) -> *mut std::ffi::c_void;
+    fn objc_msgSend();
+}
 #[cfg(target_os = "macos")]
 unsafe fn selector(name: &str) -> *mut std::ffi::c_void {
     let mut bytes = name.as_bytes().to_vec();
@@ -218,21 +244,78 @@ unsafe fn selector(name: &str) -> *mut std::ffi::c_void {
     sel_registerName(bytes.as_ptr().cast())
 }
 #[cfg(target_os = "macos")]
-unsafe fn class(name: &'static str) -> Result<*mut std::ffi::c_void, PlayerError> { let mut bytes = name.as_bytes().to_vec(); bytes.push(0); let value = objc_getClass(bytes.as_ptr().cast()); if value.is_null() { Err(PlayerError::NativeSurfaceUnavailable { reason: format!("missing Objective-C class {name}") }) } else { Ok(value) } }
+unsafe fn class(name: &'static str) -> Result<*mut std::ffi::c_void, PlayerError> {
+    let mut bytes = name.as_bytes().to_vec();
+    bytes.push(0);
+    let value = objc_getClass(bytes.as_ptr().cast());
+    if value.is_null() {
+        Err(PlayerError::NativeSurfaceUnavailable {
+            reason: format!("missing Objective-C class {name}"),
+        })
+    } else {
+        Ok(value)
+    }
+}
 #[cfg(target_os = "macos")]
-unsafe fn msg_id(target: *mut std::ffi::c_void, name: &'static str) -> *mut std::ffi::c_void { let f: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> *mut std::ffi::c_void = std::mem::transmute(objc_msgSend as *const ()); f(target, selector(name)) }
+unsafe fn msg_id(target: *mut std::ffi::c_void, name: &'static str) -> *mut std::ffi::c_void {
+    let f: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> *mut std::ffi::c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    f(target, selector(name))
+}
 #[cfg(target_os = "macos")]
-unsafe fn msg_rect(target: *mut std::ffi::c_void, name: &'static str) -> NsRect { let f: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> NsRect = std::mem::transmute(objc_msgSend as *const ()); f(target, selector(name)) }
+unsafe fn msg_rect(target: *mut std::ffi::c_void, name: &'static str) -> NsRect {
+    let f: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> NsRect =
+        std::mem::transmute(objc_msgSend as *const ());
+    f(target, selector(name))
+}
 #[cfg(target_os = "macos")]
-unsafe fn msg_id_rect(target: *mut std::ffi::c_void, name: &'static str, frame: NsRect) -> *mut std::ffi::c_void { let f: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, NsRect) -> *mut std::ffi::c_void = std::mem::transmute(objc_msgSend as *const ()); f(target, selector(name), frame) }
+unsafe fn msg_id_rect(
+    target: *mut std::ffi::c_void,
+    name: &'static str,
+    frame: NsRect,
+) -> *mut std::ffi::c_void {
+    let f: extern "C" fn(
+        *mut std::ffi::c_void,
+        *mut std::ffi::c_void,
+        NsRect,
+    ) -> *mut std::ffi::c_void = std::mem::transmute(objc_msgSend as *const ());
+    f(target, selector(name), frame)
+}
 #[cfg(target_os = "macos")]
-unsafe fn msg_void(target: *mut std::ffi::c_void, name: &'static str) { let f: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) = std::mem::transmute(objc_msgSend as *const ()); f(target, selector(name)); }
+unsafe fn msg_void(target: *mut std::ffi::c_void, name: &'static str) {
+    let f: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) =
+        std::mem::transmute(objc_msgSend as *const ());
+    f(target, selector(name));
+}
 #[cfg(target_os = "macos")]
-unsafe fn msg_void_bool(target: *mut std::ffi::c_void, name: &'static str, value: bool) { let f: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, bool) = std::mem::transmute(objc_msgSend as *const ()); f(target, selector(name), value); }
+unsafe fn msg_void_bool(target: *mut std::ffi::c_void, name: &'static str, value: bool) {
+    let f: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, bool) =
+        std::mem::transmute(objc_msgSend as *const ());
+    f(target, selector(name), value);
+}
 #[cfg(target_os = "macos")]
-unsafe fn msg_void_rect(target: *mut std::ffi::c_void, name: &'static str, value: NsRect) { let f: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, NsRect) = std::mem::transmute(objc_msgSend as *const ()); f(target, selector(name), value); }
+unsafe fn msg_void_rect(target: *mut std::ffi::c_void, name: &'static str, value: NsRect) {
+    let f: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, NsRect) =
+        std::mem::transmute(objc_msgSend as *const ());
+    f(target, selector(name), value);
+}
 #[cfg(target_os = "macos")]
-unsafe fn msg_void_id_isize_id(target: *mut std::ffi::c_void, name: &'static str, view: *mut std::ffi::c_void, position: isize, relative: *mut std::ffi::c_void) { let f: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, *mut std::ffi::c_void, isize, *mut std::ffi::c_void) = std::mem::transmute(objc_msgSend as *const ()); f(target, selector(name), view, position, relative); }
+unsafe fn msg_void_id_isize_id(
+    target: *mut std::ffi::c_void,
+    name: &'static str,
+    view: *mut std::ffi::c_void,
+    position: isize,
+    relative: *mut std::ffi::c_void,
+) {
+    let f: extern "C" fn(
+        *mut std::ffi::c_void,
+        *mut std::ffi::c_void,
+        *mut std::ffi::c_void,
+        isize,
+        *mut std::ffi::c_void,
+    ) = std::mem::transmute(objc_msgSend as *const ());
+    f(target, selector(name), view, position, relative);
+}
 
 #[cfg(windows)]
 struct PlatformSurface {
@@ -279,12 +362,22 @@ impl PlatformSurface {
                     }
                     SetWindowPos(hwnd, HWND_BOTTOM, x, y, width, height, SWP_NOACTIVATE);
                     *current = Some(Self { hwnd });
-                    current.as_mut().ok_or_else(|| PlayerError::NativeSurfaceUnavailable {
-                        reason: "Windows video host was not retained".to_string(),
-                    })?
+                    current
+                        .as_mut()
+                        .ok_or_else(|| PlayerError::NativeSurfaceUnavailable {
+                            reason: "Windows video host was not retained".to_string(),
+                        })?
                 }
             };
-            SetWindowPos(surface.hwnd, HWND_BOTTOM, x, y, width, height, SWP_NOACTIVATE);
+            SetWindowPos(
+                surface.hwnd,
+                HWND_BOTTOM,
+                x,
+                y,
+                width,
+                height,
+                SWP_NOACTIVATE,
+            );
             Ok(surface.hwnd as usize)
         }
     }
@@ -337,7 +430,17 @@ extern "system" {
 struct PlatformSurface;
 #[cfg(not(any(target_os = "macos", windows)))]
 impl PlatformSurface {
-    fn attach_or_resize(_current: &mut Option<Self>, _webview: tauri::webview::PlatformWebview, _bounds: NativeVideoBounds, _parent_handle: usize, _scale_factor: f64) -> Result<usize, PlayerError> { Err(PlayerError::NativeSurfaceUnavailable { reason: "native video embedding is unsupported on this platform".to_string() }) }
+    fn attach_or_resize(
+        _current: &mut Option<Self>,
+        _webview: tauri::webview::PlatformWebview,
+        _bounds: NativeVideoBounds,
+        _parent_handle: usize,
+        _scale_factor: f64,
+    ) -> Result<usize, PlayerError> {
+        Err(PlayerError::NativeSurfaceUnavailable {
+            reason: "native video embedding is unsupported on this platform".to_string(),
+        })
+    }
     fn detach(self, _webview: tauri::webview::PlatformWebview) {}
 }
 

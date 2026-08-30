@@ -188,9 +188,9 @@ pub fn provider_search_url(provider: ProviderId, title: &str) -> Option<String> 
         return None;
     }
     match provider {
-        ProviderId::YouTube => {
-            Some(format!("https://www.youtube.com/results?search_query={query}"))
-        }
+        ProviderId::YouTube => Some(format!(
+            "https://www.youtube.com/results?search_query={query}"
+        )),
         ProviderId::Netflix => Some(format!("https://www.netflix.com/search?q={query}")),
         ProviderId::Prime => Some(format!(
             "https://www.primevideo.com/search/ref=atv_nb_sr?phrase={query}"
@@ -416,12 +416,18 @@ mod tests {
         let capabilities = provider_capabilities();
 
         assert_eq!(capabilities.len(), 4);
-        assert!(capabilities.iter().all(|capability| capability.sync_available));
-        assert!(capabilities.iter().all(|capability| !capability.shared_available));
+        assert!(capabilities
+            .iter()
+            .all(|capability| capability.sync_available));
+        assert!(capabilities
+            .iter()
+            .all(|capability| !capability.shared_available));
         assert!(capabilities
             .iter()
             .all(|capability| capability.verification == "EXTERNAL_VERIFICATION_PENDING"));
-        assert!(capabilities.iter().all(|capability| capability.support_level == "SUPPORTED"));
+        assert!(capabilities
+            .iter()
+            .all(|capability| capability.support_level == "SUPPORTED"));
         assert_eq!(
             capabilities
                 .iter()
@@ -429,26 +435,37 @@ mod tests {
                 .map(|capability| capability.title_resolution.as_str()),
             Some("DIRECT_URL")
         );
-        assert!(
-            capabilities
-                .iter()
-                .filter(|capability| capability.id != "youtube")
-                .all(|capability| capability.title_resolution == "PROVIDER_SEARCH")
-        );
+        assert!(capabilities
+            .iter()
+            .filter(|capability| capability.id != "youtube")
+            .all(|capability| capability.title_resolution == "PROVIDER_SEARCH"));
     }
 
     #[test]
     fn provider_home_urls_are_https_and_never_empty() {
-        for provider in [ProviderId::YouTube, ProviderId::Netflix, ProviderId::Prime, ProviderId::JioHotstar] {
+        for provider in [
+            ProviderId::YouTube,
+            ProviderId::Netflix,
+            ProviderId::Prime,
+            ProviderId::JioHotstar,
+        ] {
             let url = provider_home_url(provider);
-            assert!(url.starts_with("https://"), "home URL for {provider:?} must be https");
+            assert!(
+                url.starts_with("https://"),
+                "home URL for {provider:?} must be https"
+            );
             assert!(!url.is_empty());
         }
     }
 
     #[test]
     fn provider_search_url_returns_none_for_empty_title() {
-        for provider in [ProviderId::YouTube, ProviderId::Netflix, ProviderId::Prime, ProviderId::JioHotstar] {
+        for provider in [
+            ProviderId::YouTube,
+            ProviderId::Netflix,
+            ProviderId::Prime,
+            ProviderId::JioHotstar,
+        ] {
             assert_eq!(provider_search_url(provider, ""), None);
             assert_eq!(provider_search_url(provider, "   "), None);
         }
@@ -456,7 +473,12 @@ mod tests {
 
     #[test]
     fn provider_search_url_encodes_non_empty_title() {
-        for provider in [ProviderId::YouTube, ProviderId::Netflix, ProviderId::Prime, ProviderId::JioHotstar] {
+        for provider in [
+            ProviderId::YouTube,
+            ProviderId::Netflix,
+            ProviderId::Prime,
+            ProviderId::JioHotstar,
+        ] {
             let url = provider_search_url(provider, "Inception 2010").unwrap();
             assert!(url.starts_with("https://"));
             assert!(url.contains("Inception"));
@@ -497,7 +519,10 @@ mod tests {
             ProviderReadiness::Error,
         ] {
             let desc = readiness_description(variant);
-            assert!(!desc.is_empty(), "description for {variant:?} must not be empty");
+            assert!(
+                !desc.is_empty(),
+                "description for {variant:?} must not be empty"
+            );
         }
     }
 

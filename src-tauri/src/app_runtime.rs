@@ -980,8 +980,7 @@ impl AppRuntime {
     ) -> AppSnapshot {
         let mut state = self.lock();
         state.provider.readiness = readiness;
-        state.provider.state =
-            crate::providers::sync::readiness_description(readiness).to_string();
+        state.provider.state = crate::providers::sync::readiness_description(readiness).to_string();
         state.error = None;
         snapshot_from_state(&state)
     }
@@ -1005,7 +1004,8 @@ impl AppRuntime {
             crate::providers::sync::ProviderReadiness::Navigating => {
                 Err("MP-PROVIDER-004 wait for the title to open in the provider".to_string())
             }
-            crate::providers::sync::ProviderReadiness::Unavailable | crate::providers::sync::ProviderReadiness::Error => {
+            crate::providers::sync::ProviderReadiness::Unavailable
+            | crate::providers::sync::ProviderReadiness::Error => {
                 Err("MP-PROVIDER-004 provider is unavailable or in an error state".to_string())
             }
         }
@@ -1017,7 +1017,9 @@ impl AppRuntime {
         &self,
         provider_id: &str,
     ) -> Result<(bool, bool), String> {
-        use crate::providers::sync::{detect_media_command, login_required_command, provider_id_from_str};
+        use crate::providers::sync::{
+            detect_media_command, login_required_command, provider_id_from_str,
+        };
 
         let provider = provider_id_from_str(provider_id)
             .ok_or_else(|| "MP-PROVIDER-002 unsupported provider".to_string())?;
@@ -1061,11 +1063,7 @@ impl AppRuntime {
     /// Attaches the current provider session to a newly created room without
     /// launching a new browser. Validates readiness before allowing the
     /// transition. The caller must have already created the room.
-    pub fn attach_launched_provider(
-        &self,
-        provider_id: String,
-        url: String,
-    ) -> AppSnapshot {
+    pub fn attach_launched_provider(&self, provider_id: String, url: String) -> AppSnapshot {
         let mut state = self.lock();
         state.provider.mode = "PROVIDER_SYNC".to_string();
         state.provider.provider_id = Some(provider_id);
@@ -1078,11 +1076,7 @@ impl AppRuntime {
 
     /// Navigates the managed provider browser's current page to a new URL
     /// using CDP. Used for provider search navigation.
-    pub fn navigate_provider_to(
-        &self,
-        provider_id: &str,
-        url: &str,
-    ) -> Result<(), String> {
+    pub fn navigate_provider_to(&self, provider_id: &str, url: &str) -> Result<(), String> {
         use crate::providers::sync::provider_id_from_str;
 
         let _provider = provider_id_from_str(provider_id)
@@ -1402,7 +1396,9 @@ impl AppRuntime {
                             if let Err(error) =
                                 db.update_schedule_status(&schedule.schedule_id, "Transferring")
                             {
-                                eprintln!("MovieParty: scheduler status transition failed: {error}");
+                                eprintln!(
+                                    "MovieParty: scheduler status transition failed: {error}"
+                                );
                                 continue;
                             }
                             inner
@@ -2808,8 +2804,18 @@ impl AppRuntime {
                     state.pending_operation_id = Some(operation_id.clone());
                     state.pending_operation_kind = Some("PLAY".to_string());
                     state.pending_operation_target_ms = target_position_ms;
-                    let ready = state.local_participant.media_ready
-                        && state.buffer.guest_buffer_ahead_ms >= minimum_buffer_ms;
+                    // The play-readiness gate mirrors the coordinator's
+                    // recorded local readiness (set by set_ready) rather than
+                    // the volatile player-buffer field, so that the guest's
+                    // auto-answer is consistent with the host's all_ready check.
+                    let local_buffer = state
+                        .sync_coordinator
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .guest_ready
+                        .buffer_ahead_ms;
+                    let ready =
+                        state.local_participant.media_ready && local_buffer >= minimum_buffer_ms;
                     let position_ms = state.sync.position_ms;
                     let buffer_ahead_ms = state.buffer.guest_buffer_ahead_ms;
                     let client = state.client.clone();
@@ -3947,9 +3953,7 @@ impl AppRuntime {
             let genuinely_ready = Self::local_media_genuinely_ready(&state);
             state.local_participant.media_ready = genuinely_ready;
             if !genuinely_ready {
-                state.error = Some(
-                    "MP-MEDIA-001 media is not ready for playback".to_string(),
-                );
+                state.error = Some("MP-MEDIA-001 media is not ready for playback".to_string());
                 sync_room_snapshot(&mut state);
                 return snapshot_from_state(&state);
             }
@@ -5445,21 +5449,18 @@ mod tests {
         assert!(runtime.validate_provider_ready_for_room().is_err());
 
         // Set readiness to LoginRequired via update
-        let _snap = runtime.update_provider_readiness(
-            crate::providers::sync::ProviderReadiness::LoginRequired,
-        );
+        let _snap = runtime
+            .update_provider_readiness(crate::providers::sync::ProviderReadiness::LoginRequired);
         assert!(runtime.validate_provider_ready_for_room().is_err());
 
         // Set to Ready — should pass
-        let _snap = runtime.update_provider_readiness(
-            crate::providers::sync::ProviderReadiness::Ready,
-        );
+        let _snap =
+            runtime.update_provider_readiness(crate::providers::sync::ProviderReadiness::Ready);
         assert!(runtime.validate_provider_ready_for_room().is_ok());
 
         // Set to PlaybackReady — should pass
-        let _snap = runtime.update_provider_readiness(
-            crate::providers::sync::ProviderReadiness::PlaybackReady,
-        );
+        let _snap = runtime
+            .update_provider_readiness(crate::providers::sync::ProviderReadiness::PlaybackReady);
         assert!(runtime.validate_provider_ready_for_room().is_ok());
     }
 
@@ -5474,9 +5475,8 @@ mod tests {
     #[test]
     fn provider_switching_replaces_stale_state() {
         let runtime = AppRuntime::new();
-        let _snap = runtime.update_provider_readiness(
-            crate::providers::sync::ProviderReadiness::Ready,
-        );
+        let _snap =
+            runtime.update_provider_readiness(crate::providers::sync::ProviderReadiness::Ready);
 
         assert_eq!(
             runtime.snapshot().provider.readiness,
@@ -5797,7 +5797,10 @@ mod tests {
 
         let snapshot = runtime.snapshot();
         assert!(snapshot.media.is_none(), "media must be cleared on leave");
-        assert!(snapshot.transfer.is_none(), "transfer must be cleared on leave");
+        assert!(
+            snapshot.transfer.is_none(),
+            "transfer must be cleared on leave"
+        );
         assert_eq!(snapshot.buffer.guest_buffer_ahead_ms, 0);
         assert_eq!(snapshot.buffer.percent, 0);
         assert_eq!(snapshot.sync.position_ms, 0);
@@ -5892,9 +5895,7 @@ mod tests {
 
         // A malformed invite must fail BEFORE the existing session is torn
         // down, so an accidental bad paste never destroys the current room.
-        let result = runtime
-            .join_party("not-an-invite".to_string())
-            .await;
+        let result = runtime.join_party("not-an-invite".to_string()).await;
         assert!(result.is_err(), "malformed invite must be rejected");
         assert!(
             runtime.lock().host_session.is_some(),
@@ -6055,11 +6056,7 @@ mod tests {
                 buffer_ahead_ms: 8_000,
             },
         };
-        AppRuntime::apply_peer_event(
-            &runtime.inner,
-            &envelope,
-            envelope.event.clone(),
-        );
+        AppRuntime::apply_peer_event(&runtime.inner, &envelope, envelope.event.clone());
 
         let snapshot = runtime.snapshot();
         let peer = snapshot

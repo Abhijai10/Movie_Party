@@ -696,7 +696,10 @@ mod tests {
         let has_key_label = device_identity_has_key_label(&conn).expect("columns");
         assert!(has_key_label);
         drop(conn);
-        assert_eq!(db.schema_version().expect("version"), CURRENT_SCHEMA_VERSION);
+        assert_eq!(
+            db.schema_version().expect("version"),
+            CURRENT_SCHEMA_VERSION
+        );
     }
 
     #[test]

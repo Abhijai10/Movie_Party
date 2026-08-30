@@ -1120,7 +1120,10 @@ fn configure_server() -> Result<(ServerConfig, CertificateDer<'static>), QuicErr
         .with_no_client_auth()
         .with_single_cert(vec![cert_der.clone()], priv_key.into())
         .map_err(|error| QuicError::Tls(error.to_string()))?;
-    crypto.alpn_protocols = MOVIE_PARTY_ALPN.iter().map(|value| value.to_vec()).collect();
+    crypto.alpn_protocols = MOVIE_PARTY_ALPN
+        .iter()
+        .map(|value| value.to_vec())
+        .collect();
 
     let crypto =
         QuicServerConfig::try_from(crypto).map_err(|error| QuicError::Tls(error.to_string()))?;
@@ -1179,7 +1182,10 @@ fn make_client_endpoint(server_certificate_fingerprint: String) -> Result<Endpoi
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
-    crypto.alpn_protocols = MOVIE_PARTY_ALPN.iter().map(|value| value.to_vec()).collect();
+    crypto.alpn_protocols = MOVIE_PARTY_ALPN
+        .iter()
+        .map(|value| value.to_vec())
+        .collect();
 
     let crypto =
         QuicClientConfig::try_from(crypto).map_err(|error| QuicError::Tls(error.to_string()))?;

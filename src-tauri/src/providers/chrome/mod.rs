@@ -622,7 +622,8 @@ mod tests {
     #[ignore = "launches real Chrome and opens a localhost CDP session"]
     fn real_chrome_launches_and_evaluates_cdp() {
         let executable = find_chrome(&default_chrome_candidates()).expect("Chrome installed");
-        let root = std::env::temp_dir().join(format!("movie-party-chrome-{}", uuid::Uuid::now_v7()));
+        let root =
+            std::env::temp_dir().join(format!("movie-party-chrome-{}", uuid::Uuid::now_v7()));
         let plan = build_launch_plan(executable, &root, "youtube", 9333, "about:blank")
             .expect("launch plan");
         let session = launch_managed_chrome(plan).expect("launch Chrome");

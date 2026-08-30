@@ -98,7 +98,9 @@ pub async fn detect_status() -> Result<TailscaleStatus, TailscaleError> {
     for executable in candidate_executables() {
         let output = tokio::time::timeout(
             Duration::from_secs(3),
-            Command::new(&executable).args(["status", "--json"]).output(),
+            Command::new(&executable)
+                .args(["status", "--json"])
+                .output(),
         )
         .await;
 
@@ -243,7 +245,10 @@ pub fn parse_status_json(bytes: &[u8]) -> Result<TailscaleStatus, TailscaleError
         .as_ref()
         .map(|node: &RawNode| node.tailscale_ips.clone())
         .and_then(|ips: Vec<String>| first_usable_tailscale_ipv4(&ips));
-    let device_name = raw.self_node.as_ref().and_then(|node| node.dns_name.clone());
+    let device_name = raw
+        .self_node
+        .as_ref()
+        .and_then(|node| node.dns_name.clone());
 
     let peers = raw
         .peer
@@ -341,7 +346,10 @@ struct RawNode {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_status_json, readiness_from_error, readiness_from_status, required_ipv4, TailscaleError, TailscalePath, TailscaleState};
+    use super::{
+        parse_status_json, readiness_from_error, readiness_from_status, required_ipv4,
+        TailscaleError, TailscalePath, TailscaleState,
+    };
 
     #[test]
     fn parses_local_ipv4_and_peer_path() {
@@ -408,7 +416,10 @@ mod tests {
             br#"{"BackendState":"NeedsLogin","Self":{"TailscaleIPs":["100.64.0.10"]}}"#,
         )
         .expect("valid signed-out status");
-        assert_eq!(readiness_from_status(signed_out).state, TailscaleState::SignedOut);
+        assert_eq!(
+            readiness_from_status(signed_out).state,
+            TailscaleState::SignedOut
+        );
 
         let connected = parse_status_json(
             br#"{"BackendState":"Running","Self":{"DNSName":"cinema.tailnet.ts.net.","TailscaleIPs":["100.64.0.10"]}}"#,
@@ -417,7 +428,10 @@ mod tests {
         let readiness = readiness_from_status(connected);
         assert_eq!(readiness.state, TailscaleState::Connected);
         assert_eq!(readiness.ip.as_deref(), Some("100.64.0.10"));
-        assert_eq!(readiness.device_name.as_deref(), Some("cinema.tailnet.ts.net."));
+        assert_eq!(
+            readiness.device_name.as_deref(),
+            Some("cinema.tailnet.ts.net.")
+        );
     }
 
     #[test]
@@ -433,10 +447,8 @@ mod tests {
 
     #[test]
     fn stopped_daemon_is_unavailable_not_signed_out() {
-        let status = parse_status_json(
-            br#"{"BackendState":"Stopped","Self":{"TailscaleIPs":[]}}"#,
-        )
-        .expect("valid stopped status");
+        let status = parse_status_json(br#"{"BackendState":"Stopped","Self":{"TailscaleIPs":[]}}"#)
+            .expect("valid stopped status");
         let readiness = readiness_from_status(status);
         assert_eq!(readiness.state, TailscaleState::Unavailable);
         assert_eq!(readiness.code.as_deref(), Some("MP-NET-TS-003"));
@@ -465,8 +477,10 @@ mod tests {
             .starts_with("MP-NET-TS-002"));
 
         let connected = readiness_from_status(
-            parse_status_json(br#"{"BackendState":"Running","Self":{"TailscaleIPs":["100.64.0.10"]}}"#)
-                .expect("valid connected status"),
+            parse_status_json(
+                br#"{"BackendState":"Running","Self":{"TailscaleIPs":["100.64.0.10"]}}"#,
+            )
+            .expect("valid connected status"),
         );
         assert_eq!(
             required_ipv4(&connected).expect("usable IP"),

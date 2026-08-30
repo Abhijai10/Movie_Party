@@ -38,7 +38,12 @@ mod tests {
             correction_for_drift(120, 1_000),
             DriftCorrection::PlaybackRate { rate: 0.97 },
         );
-        assert_eq!(correction_for_drift(-500, 1_000), DriftCorrection::MicroSeek { target_position_ms: 1_500 });
+        assert_eq!(
+            correction_for_drift(-500, 1_000),
+            DriftCorrection::MicroSeek {
+                target_position_ms: 1_500
+            }
+        );
         assert_eq!(
             correction_for_drift(900, 1_000),
             DriftCorrection::HardSeek {

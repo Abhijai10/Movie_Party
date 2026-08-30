@@ -580,7 +580,8 @@ fn scheduler_notifications_use_mock_and_recover_on_failure() {
     let _guard = env_lock().lock();
     let db_path = temp_db_path("notify");
 
-    let runtime = AppRuntime::new_with_notifier(movie_party_lib::notifications::FakeNotifier::new());
+    let runtime =
+        AppRuntime::new_with_notifier(movie_party_lib::notifications::FakeNotifier::new());
     runtime.init_db_at_path(&db_path);
     let now_ms = now_utc_ms();
     let id = runtime
