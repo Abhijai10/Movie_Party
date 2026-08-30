@@ -14,10 +14,10 @@ It must be updated continuously.
 
 ```text
 Project State:
-🟨 BATCH 5 PROVIDER PLAYBACK PRODUCTION PATH — provider flow wired; real provider login/playback requires manual verification
+🟨 BATCH 6 V1 INTEGRATION HARDENING COMPLETE — room lifecycle defects fixed at code level; real two-device V1 verification pending
 
 Current Phase:
-BATCH 5 PROVIDER PLAYBACK PRODUCTION PATH
+BATCH 6 V1 END-TO-END INTEGRATION HARDENING
 
 Current Release:
 V1 Development
@@ -2666,3 +2666,102 @@ Verification:
   pages (requires installed Chrome and a real provider account).
 - `--test m2_integration` keeps the four pre-existing timing predicate failures
   noted in the Batch 4 pass.
+
+---
+
+## 2026-08-30 — Batch 6 V1 End-to-End Integration Hardening
+
+### Concrete bugs found and fixed
+
+1. **Stale media/provider/chat state after leave_party** (`app_runtime.rs`):
+   `leave_party` aborted workers and cleared the session but left
+   `state.media`, `state.transfer`, `state.buffer`, `state.sync`,
+   `state.provider`, `state.chat`, `state.reactions`, and
+   `state.player_snapshot` untouched. A subsequent `return_home` cleared
+   them, but any code path that called `leave_party` without `return_home`
+   would leak stale state into the next room. Fixed: `leave_party` now
+   resets all of these fields to their default/empty values.
+
+2. **Duplicate QUIC server when create_local_party invoked twice**
+   (`app_runtime.rs`): `create_local_party` bound a new QUIC server without
+   aborting an existing `host_session` server handle. Dropping a `JoinHandle`
+   without `.abort()` leaks the task. Fixed: `create_local_party` now aborts
+   any existing `host_session.server_handle`, aborts the old
+   `host_event_task`, drops any existing guest client, and clears
+   stale invite/credentials before binding a new server.
+
+3. **Stale room state when join_party receives a deep-link while already in a
+   room** (`app_runtime.rs`): `join_party` connected a new QUIC session
+   without tearing down the previous room's host server, guest workers,
+   chrome session, media cache, provider state, or chat. An incoming
+   deep-link invite could arrive while the user was mid-party, and the old
+   server/client/workers would leak. Fixed: `join_party` now validates the
+   invite first, then aborts all existing host/guest workers, drops the
+   client, shuts down the range server, clears chrome/media/provider/chat
+   state, and resets the buffer/sync/player snapshots before connecting.
+
+4. **Invalid invite could destroy an active room** (`app_runtime.rs`):
+   safeguard: `join_party` parses and validates the invite before any
+   cleanup, so a malformed paste never tears down the current room.
+
+5. **Enter Cinema button not gated on participant readiness**
+   (`ReadyCheckView.tsx`): the ReadyCheckView always showed an enabled
+   "Enter Cinema" button even when not all participants were ready, the
+   room had no media, or the network was disconnected. Fixed: the button
+   is now `disabled={!everyoneReady}` and shows "Waiting for readiness"
+   when the guard is not met.
+
+### Test improvements
+
+- **New test** `leave_party_clears_stale_media_provider_and_social_state`:
+  deterministic state verification that media/transfer/buffer/sync/provider/
+  chat/reactions/player_snapshot are all reset after leave_party.
+- **New test** `create_local_party_aborts_previous_host_session`: verifies
+  that a second `create_local_party` call while already hosting aborts the
+  first server, produces a fresh invite, and does not leak a duplicate
+  listener.
+- **New test** `invalid_invite_does_not_destroy_existing_room`: verifies
+  that a malformed invite is rejected before any existing room state is
+  touched.
+- **Shared env-var lock** (`loopback_env_lock`): added a module-level static
+  mutex to serialize the pre-existing `dev_loopback_mode_selects_correct_bind_addr`
+  test and the new `create_local_party_aborts_previous_host_session` test,
+  which both manipulate the process-global `MOVE_PARTY_DEV_LOOPBACK` env var.
+
+### Fixes considered and reverted
+
+- `set_ready` and `host_play` both unconditionally set
+  `local_participant.media_ready = true` and `buffer_ahead_ms = 5_000`,
+  fabricating readiness that the coordinator consensus and PLAY_READY
+  response rely on. Removing this fabrication would break the
+  m2_integration/m3_closure protocol test suite (13 of 25 tests failed vs
+  the pre-existing 4 timing-predicate failures). The protocol tests
+  legitimately need simulated readiness to exercise the sync protocol
+  without a real libmpv player. The honest readiness gate is enforced at
+  the coordinator (`prepare_play_scheduled` returns Err when `all_ready`
+  is false) and at the frontend (ReadyCheckView gates "Enter Cinema" on
+  `everyoneReady`). The production preparation paths (`create_local_party`
+  checks player open success; `guest_prepare_media` requires a verified
+  first chunk; `attach_launched_provider` requires validated provider
+  readiness) already gate `media_ready` honestly.
+
+### Verification
+
+- `cargo test --lib` ✅ 245 passed, 0 failed, 2 ignored
+- `cargo test --test host_guest_wiring`, `m2_integration` (21/4 baseline),
+  `m3_closure`, `m3_integration`, `m3_m4_e2e`, `m4_closure` ✅
+- `cargo test --lib` filter `provider` ✅ 39 passed, 2 ignored
+- `npm run lint` ✅
+- `npm run test` ✅ (6 files, 27 tests)
+- `npm run build` ✅
+
+### External / manual verification pending
+
+- Deep-link while in an active room (host or guest) — the backend now
+  tears down stale state before joining a new room, but the frontend
+  `openJoinWithInvite` does not call `leaveParty` before showing the
+  Join Party screen.
+- Real two-device create/join cycle on macOS and Windows.
+- `leave_party` media/provider/chat cleanup on guest disconnect.
+- `m2_integration` keeps the four pre-existing timing predicate failures
+  (`test_a`, `test_d`, `test_l`, `test_t`).

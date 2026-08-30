@@ -1676,6 +1676,24 @@ impl AppRuntime {
         &self,
         media_path: Option<String>,
     ) -> Result<AppSnapshot, String> {
+        // Lifecycle hygiene: a duplicate create call (double-tap, stale UI)
+        // must never leave the previous host server running. Abort any
+        // existing server and guest client before starting a fresh session.
+        {
+            let mut state = self.lock();
+            if let Some(host) = state.host_session.take() {
+                host.server_handle.abort();
+            }
+            if let Some(task) = state.host_event_task.take() {
+                task.abort();
+            }
+            if let Some(client) = state.client.take() {
+                let _ = client;
+            }
+            state.invite = None;
+            state.credentials = None;
+        }
+
         let identity = self.inner.identity();
         let credentials = RoomCredentials::generate();
 
@@ -1888,10 +1906,85 @@ impl AppRuntime {
 
     // M1: real guest flow — parse invite, authenticate via QUIC
     pub async fn join_party(&self, invite_url: String) -> Result<AppSnapshot, String> {
+        // Validate the invite before touching any existing session: an
+        // invalid invite must never tear down a room the user is already in.
         let invite = room::parse_invite(&invite_url).map_err(|e| e.to_string())?;
         let addr = room::invite_socket_addr(&invite).map_err(|e| e.to_string())?;
         quic::validate_quic_bind_addr(addr)
             .map_err(|e| format!("MP-NET-001 invalid peer endpoint: {e}"))?;
+
+        // Lifecycle hygiene: a join may arrive through a deep link while the
+        // user is still in a previous room. After the invite is valid, abort
+        // any existing host server and stale guest session before connecting,
+        // so the new room never leaks the old server/client/workers or carries
+        // stale media/provider state.
+        {
+            let mut state = self.lock();
+            if let Some(host) = state.host_session.take() {
+                host.server_handle.abort();
+            }
+            if let Some(task) = state.host_event_task.take() {
+                task.abort();
+            }
+            if let Some(task) = state.peer_event_task.take() {
+                task.abort();
+            }
+            if let Some(task) = state.calibration_task.take() {
+                task.abort();
+            }
+            if let Some(task) = state.player_event_task.take() {
+                task.abort();
+            }
+            if let Some(task) = state.transfer_task.take() {
+                task.abort();
+                state.old_transfer_task = Some(task);
+            }
+            if let Some(task) = state.transfer_stall_watcher_task.take() {
+                task.abort();
+            }
+            if let Some(task) = state.reconnect_task.take() {
+                task.abort();
+            }
+            if let Some(task) = state.heartbeat_task.take() {
+                task.abort();
+            }
+            if let Some(task) = state.preload_task.take() {
+                task.abort();
+            }
+            if let Some(client) = state.client.take() {
+                let _ = client;
+            }
+            if let Some(range) = state.range_server_handle.take() {
+                range.shutdown();
+            }
+            state.chrome_session = None;
+            state.player = None;
+            state.guest_cache = None;
+            state.media = None;
+            state.transfer = None;
+            state.buffer = BufferSnapshot {
+                guest_buffer_ahead_ms: 0,
+                percent: 0,
+                buffering_participant: None,
+            };
+            state.sync = SyncSnapshot {
+                room_state: "CREATED".to_string(),
+                strict_sync_paused: false,
+                position_ms: 0,
+            };
+            state.provider = ProviderSnapshot {
+                mode: "LOCAL_PERFECT".to_string(),
+                provider_id: None,
+                url: None,
+                state: "Idle".to_string(),
+                readiness: crate::providers::sync::ProviderReadiness::NotStarted,
+            };
+            state.chat.clear();
+            state.reactions.clear();
+            state.player_snapshot = PlayerSnapshot::default();
+            state.call_signals.clear();
+            state.call_signal_ledger.reset();
+        }
 
         if !crate::network::tailscale::dev_loopback_enabled() {
             let readiness = crate::network::tailscale::local_readiness().await;
@@ -3976,6 +4069,28 @@ impl AppRuntime {
         state.chrome_session = None;
         state.player = None;
         state.guest_cache = None;
+        state.media = None;
+        state.transfer = None;
+        state.buffer = BufferSnapshot {
+            guest_buffer_ahead_ms: 0,
+            percent: 0,
+            buffering_participant: None,
+        };
+        state.sync = SyncSnapshot {
+            room_state: "ENDED".to_string(),
+            strict_sync_paused: false,
+            position_ms: 0,
+        };
+        state.provider = ProviderSnapshot {
+            mode: "LOCAL_PERFECT".to_string(),
+            provider_id: None,
+            url: None,
+            state: "Idle".to_string(),
+            readiness: crate::providers::sync::ProviderReadiness::NotStarted,
+        };
+        state.chat.clear();
+        state.reactions.clear();
+        state.player_snapshot = PlayerSnapshot::default();
         state.call.status = CallRuntimeStatus::Ended;
         state.call.connected = false;
         state.call.camera = CameraState::disabled();
@@ -4855,6 +4970,15 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::Mutex;
 
+    /// Serializes tests that read or write the process-global
+    /// `MOVE_PARTY_DEV_LOOPBACK` env var so Rust's parallel test runner never
+    /// races two loopback-bind scenarios against each other.
+    static LOOPBACK_ENV_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+        std::sync::OnceLock::new();
+    fn loopback_env_lock() -> &'static tokio::sync::Mutex<()> {
+        LOOPBACK_ENV_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
     #[test]
     fn backend_snapshot_has_no_demo_peer_or_movie_by_default() {
         let runtime = AppRuntime::new();
@@ -5380,6 +5504,7 @@ mod tests {
     // env-var races from Rust's default parallel test runner.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dev_loopback_mode_selects_correct_bind_addr() {
+        let _env_guard = loopback_env_lock().lock().await;
         struct ScopedEnv {
             key: &'static str,
             prev: Option<std::ffi::OsString>,
@@ -5474,5 +5599,172 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn leave_party_clears_stale_media_provider_and_social_state() {
+        let runtime = AppRuntime::new();
+
+        // Simulate a room that has accumulated media, provider, buffer,
+        // chat, reactions and player state.
+        {
+            let mut state = runtime.lock();
+            state.media = Some(crate::media::manifest::MediaManifest {
+                media_id: "m".to_string(),
+                filename: "movie.mkv".to_string(),
+                file_size: 1000,
+                container: Some("mkv".to_string()),
+                full_hash: "h".to_string(),
+                quick_fingerprint: crate::media::manifest::QuickFingerprint {
+                    file_size: 1000,
+                    first_hash: "a".to_string(),
+                    last_hash: "b".to_string(),
+                },
+                chunk_size: 100,
+                chunk_count: 10,
+            });
+            state.provider.mode = "PROVIDER_SYNC".to_string();
+            state.provider.provider_id = Some("netflix".to_string());
+            state.provider.url = Some("https://www.netflix.com/watch/1".to_string());
+            state.provider.readiness = crate::providers::sync::ProviderReadiness::PlaybackReady;
+            state.buffer.guest_buffer_ahead_ms = 8_000;
+            state.buffer.percent = 60;
+            state.sync.position_ms = 42_000;
+            state.chat.push(super::ChatSnapshot {
+                id: "c".to_string(),
+                sender: "host".to_string(),
+                body: "hi".to_string(),
+                created_host_time_us: 1,
+            });
+            state.reactions.push(super::ReactionSnapshot {
+                id: "r".to_string(),
+                sender: "guest".to_string(),
+                reaction: "popcorn".to_string(),
+                created_host_time_us: 2,
+            });
+            state.player_snapshot = super::PlayerSnapshot {
+                state: "Playing".to_string(),
+                position_ms: 42_000,
+                duration_ms: Some(100_000),
+                ..super::PlayerSnapshot::default()
+            };
+        }
+
+        runtime.leave_party();
+
+        let snapshot = runtime.snapshot();
+        assert!(snapshot.media.is_none(), "media must be cleared on leave");
+        assert!(snapshot.transfer.is_none(), "transfer must be cleared on leave");
+        assert_eq!(snapshot.buffer.guest_buffer_ahead_ms, 0);
+        assert_eq!(snapshot.buffer.percent, 0);
+        assert_eq!(snapshot.sync.position_ms, 0);
+        assert!(snapshot.provider.provider_id.is_none());
+        assert_eq!(
+            snapshot.provider.readiness,
+            crate::providers::sync::ProviderReadiness::NotStarted
+        );
+        assert!(snapshot.chat.is_empty(), "chat must be cleared on leave");
+        assert!(
+            snapshot.reactions.is_empty(),
+            "reactions must be cleared on leave"
+        );
+        assert_eq!(snapshot.player.state, "STOPPED");
+        assert_eq!(snapshot.player.position_ms, 0);
+    }
+
+    #[tokio::test]
+    async fn create_local_party_aborts_previous_host_session() {
+        let guard = loopback_env_lock().lock().await;
+        struct ScopedEnv(&'static str, Option<std::ffi::OsString>);
+        impl Drop for ScopedEnv {
+            fn drop(&mut self) {
+                match &self.1 {
+                    Some(value) => std::env::set_var(self.0, value),
+                    None => std::env::remove_var(self.0),
+                }
+            }
+        }
+        let _env = ScopedEnv(
+            "MOVE_PARTY_DEV_LOOPBACK",
+            std::env::var_os("MOVE_PARTY_DEV_LOOPBACK"),
+        );
+        std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+        let runtime = AppRuntime::new();
+        let first = runtime
+            .create_local_party(None)
+            .await
+            .expect("first create_local_party");
+        assert_eq!(first.screen, "LOBBY");
+        let first_invite = first.room.invite_code.clone().expect("invite");
+        assert!(runtime.lock().host_session.is_some());
+
+        // Creating a second room while the first server is running must
+        // abort the first server and produce a fresh session, never a leak
+        // or a duplicated listener.
+        let second = runtime
+            .create_local_party(None)
+            .await
+            .expect("second create_local_party");
+        assert_eq!(second.screen, "LOBBY");
+        let second_invite = second.room.invite_code.clone().expect("invite");
+        assert_ne!(
+            first_invite, second_invite,
+            "a new room must generate a fresh invite"
+        );
+        assert!(
+            runtime.lock().host_session.is_some(),
+            "host session must be present after second create"
+        );
+
+        runtime.leave_party();
+        drop(_env);
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn invalid_invite_does_not_destroy_existing_room() {
+        let guard = loopback_env_lock().lock().await;
+        struct ScopedEnv(&'static str, Option<std::ffi::OsString>);
+        impl Drop for ScopedEnv {
+            fn drop(&mut self) {
+                match &self.1 {
+                    Some(value) => std::env::set_var(self.0, value),
+                    None => std::env::remove_var(self.0),
+                }
+            }
+        }
+        let _env = ScopedEnv(
+            "MOVE_PARTY_DEV_LOOPBACK",
+            std::env::var_os("MOVE_PARTY_DEV_LOOPBACK"),
+        );
+        std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+
+        let runtime = AppRuntime::new();
+        let first = runtime
+            .create_local_party(None)
+            .await
+            .expect("create_local_party");
+        assert!(runtime.lock().host_session.is_some());
+        let original_invite = first.room.invite_code.clone().expect("invite");
+
+        // A malformed invite must fail BEFORE the existing session is torn
+        // down, so an accidental bad paste never destroys the current room.
+        let result = runtime
+            .join_party("not-an-invite".to_string())
+            .await;
+        assert!(result.is_err(), "malformed invite must be rejected");
+        assert!(
+            runtime.lock().host_session.is_some(),
+            "invalid invite must not destroy the current host session"
+        );
+        assert_eq!(
+            runtime.snapshot().room.invite_code.as_deref(),
+            Some(original_invite.as_str()),
+            "invalid invite must not overwrite the current room invite"
+        );
+
+        runtime.leave_party();
+        drop(_env);
+        drop(guard);
     }
 }

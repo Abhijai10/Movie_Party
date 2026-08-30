@@ -28,6 +28,23 @@ Movie Party has progressed beyond the prototype/UI stage. The room flow, QUIC ar
 
 The current highest-value work is no longer broad feature creation. It is **closing the remaining production gaps and proving the real vertical slices**.
 
+Batch 6 (2026-08-30) hardened the room lifecycle at the code level:
+
+- `leave_party` now clears stale media, transfer, buffer, sync, provider,
+  chat, reactions, and player state so a new room never inherits them.
+- `create_local_party` aborts an existing host server before binding a new
+  one, preventing duplicate QUIC listeners on repeated create.
+- `join_party` validates the invite first, then tears down any previous
+  room's server/workers/chrome/media/provider state before connecting, so a
+  deep-link join while already in a room does not leak the old session.
+- The ReadyCheckView "Enter Cinema" button is now gated on
+  `everyoneReady` (participants media-ready + media/provider present +
+  network connected), so the UI does not let the user start Cinema before
+  readiness consensus.
+
+Remaining V1 work is dominated by **real-device and real-account
+verification** plus the long-pending native libmpv presentation fix.
+
 ## Highest-priority current items
 
 1. 🔴 **Native libmpv video presentation inside the Cinema surface**

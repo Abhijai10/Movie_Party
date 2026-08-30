@@ -134,8 +134,13 @@ export function ReadyCheckView({ snapshot, onStart }: ReadyCheckViewProps) {
           className="mt-10"
         >
           {countdown === null ? (
-            <CinemaButton onClick={enterCinema} icon={ArrowRight} data-testid="enter-cinema-btn">
-              Enter Cinema
+            <CinemaButton
+              onClick={enterCinema}
+              icon={ArrowRight}
+              disabled={!everyoneReady}
+              data-testid="enter-cinema-btn"
+            >
+              {everyoneReady ? "Enter Cinema" : "Waiting for readiness"}
             </CinemaButton>
           ) : (
             <div
