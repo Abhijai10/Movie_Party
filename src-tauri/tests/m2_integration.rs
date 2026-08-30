@@ -97,12 +97,36 @@ async fn setup_host_guest() -> (AppRuntime, AppRuntime, String) {
 
 /// Both participants mark ready and the host waits for the READY_CHECK
 /// consensus (the guest's ReadyState round trip over QUIC) before returning.
+///
+/// V1 correctness: readiness requires genuinely prepared media, so the guest's
+/// async media fetch must have landed before either side presses Ready, and the
+/// guest must report genuine buffer through the real buffer-status path before
+/// the play protocol can commit.
 fn ready_both(host: &AppRuntime, guest: &AppRuntime) {
+    let _ = poll_guest(guest, std::time::Duration::from_secs(5), |s| {
+        s.participants
+            .iter()
+            .any(|p| p.role == "Guest" && p.media_ready)
+    });
+    guest.report_buffer_status(0, 8_000, false);
     guest.set_ready();
     host.set_ready();
     let _ = poll_host(host, std::time::Duration::from_secs(5), |s| {
         s.room.state == "READYCHECK"
     });
+}
+
+/// Press the guest's Ready only after its media is genuinely prepared (V1
+/// correctness: set_ready must not fabricate media readiness) and the guest
+/// has reported genuine buffer.
+fn guest_ready_when_prepared(guest: &AppRuntime) {
+    let _ = poll_guest(guest, std::time::Duration::from_secs(5), |s| {
+        s.participants
+            .iter()
+            .any(|p| p.role == "Guest" && p.media_ready)
+    });
+    guest.report_buffer_status(0, 8_000, false);
+    guest.set_ready();
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

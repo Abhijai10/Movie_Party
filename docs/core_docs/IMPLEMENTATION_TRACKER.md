@@ -14,10 +14,13 @@ It must be updated continuously.
 
 ```text
 Project State:
-🟨 BATCH 6 V1 INTEGRATION HARDENING COMPLETE — room lifecycle defects fixed at code level; real two-device V1 verification pending
+🟨 BATCH 7 V1 READINESS HONESTY AUDIT COMPLETE — no real-device failure
+    observations were supplied, so a code-level audit against the V1
+    correctness rules was performed; fake media/peer readiness paths were
+    removed. Real two-device V1 verification remains pending.
 
 Current Phase:
-BATCH 6 V1 END-TO-END INTEGRATION HARDENING
+BATCH 7 V1 REAL-DEVICE VALIDATION FIXES (code-audit mode)
 
 Current Release:
 V1 Development
@@ -33,6 +36,129 @@ M6: Real Chrome/provider login and media playback require external verification
 M7: ScreenCaptureKit needs macOS permission dialog
 M8: Chrome/player crash watchers not wired
 ````
+
+---
+
+# BATCH 7 — V1 READINESS HONESTY AUDIT (2026-08-30)
+
+## Background
+
+The user provided no real-device failure observations (the batch template was
+supplied with the `ACTUAL_FAILURES_OBSERVED` section unfilled). The user chose
+"Audit code against rules only" mode. This batch therefore inspected the
+codebase against the V1 correctness rules and fixed all concrete code-level
+defects found.
+
+## Concrete defects found and fixed
+
+### D1 — `set_ready` unconditionally fabricated media readiness
+
+**Location**: `app_runtime.rs:3854-3908`, `set_ready()`
+
+**Defect**: `set_ready` unconditionally set `local_participant.media_ready = true`,
+`buffer.guest_buffer_ahead_ms = 5_000`, and `peer.media_ready = true` — the
+host marked the guest ready (and the guest marked the host ready) purely because
+the local user pressed Ready, regardless of actual media/player/provider state.
+The comment even said "M2 fake player: pressing Ready means the local player can
+consume media; later phases gate this on real transfer/media."
+
+This violated:
+- V1 rule: "Never allow fake media readiness"
+- V1 rule: "Never allow Ready before actual prerequisites are satisfied"
+- V1 rule: "media-ready must correspond to actual usable media"
+- V1 rule: "Do not solve buffering by falsely marking a participant ready"
+
+**Fix**: `set_ready` now gates the local participant's readiness on genuine
+media/player/provider state via a new `local_media_genuinely_ready()` helper.
+For Local Perfect: the player must be present and opened without error, and a
+media manifest must exist. For provider/generic rooms: the provider readiness
+must be `Ready` or `PlaybackReady`. If not genuinely ready, a stable
+`MP-MEDIA-001` error is surfaced and neither the coordinator nor the QUIC
+ReadyState is advanced. The peer's `media_ready` is no longer force-set; it is
+propagated from the peer's genuine state.
+
+### D2 — Host ignored `QuicHostEvent::GuestReadyState`
+
+**Location**: `app_runtime.rs:2173`, `apply_host_event()`
+
+**Defect**: The host's `GuestReadyState` handler was an empty block `{}`,
+meaning the host's `peer_participant.media_ready` was never updated from the
+guest's actual readiness. It was only force-set to `true` in `set_ready` (D1).
+
+**Fix**: The handler now updates `peer_participant.media_ready` and
+`buffer_ahead_ms` from the guest's reported readiness and buffer values.
+
+### D3 — `CoordinatorStateUpdate` did not mirror peer readiness
+
+**Location**: `app_runtime.rs:3034-3060`, `apply_peer_event()`
+
+**Defect**: The `CoordinatorStateUpdate` handler applied coordinator state
+(host_ready/guest_ready flags, room state, position) but never synchronized
+`peer_participant.media_ready` from those flags. On the guest, the host's
+readiness was never reflected in the participant snapshot; on the host, the
+guest's readiness was only set via the force-set in `set_ready`.
+
+**Fix**: The handler now sets `peer_participant.media_ready = guest_ready` on
+the host side and `= host_ready` on the guest side, reflecting the genuine
+coordinator state.
+
+### D4 — m2 integration tests relied on fabricated readiness
+
+**Defect**: The m2_integration protocol tests called `guest.set_ready()`
+immediately after the 300ms join sleep, before the guest's async media fetch
+had completed, and relied on the fabricated `media_ready = true` /
+`buffer = 5_000` in `set_ready`. The `ready_both` helper unconditionally set
+`peer.media_ready = true`.
+
+**Fix**: Updated `ready_both` and `guest_ready_when_prepared` helpers to:
+(a) poll for the guest's genuine `media_ready` before pressing Ready; (b) call
+`guest.report_buffer_status(0, 8_000, false)` to report genuine buffer through
+the real buffer-status path before Ready. This matches the production flow
+(player event loop reports buffer headroom) and aligns with how `m3_closure`
+tests handle buffer reporting.
+
+## Verification
+
+- `npm run lint` ✅
+- `npm run test` ✅ (27 tests)
+- `npm run build` ✅
+- `cargo check` ✅ (temp target directory)
+- `cargo test --lib app_runtime` ✅ (34 tests, including 5 new regression tests)
+- `cargo test --test m3_closure` ✅ (7 tests)
+- `cargo test --test m4_closure` ✅ (15 tests)
+- `cargo test --test host_guest_wiring` ✅ (2 tests)
+- `cargo test --test m3_m4_e2e` ✅ (9 tests)
+- `cargo test --test m2_integration` ✅ matches baseline (21 pass, 4 pre-existing
+  environment failures unrelated to this batch)
+
+## Regression tests added
+
+1. `set_ready_does_not_fabricate_media_readiness` — fresh runtime with no
+   media: set_ready returns MP-MEDIA-001 error, media_ready stays false.
+2. `set_ready_requires_provider_playback_readiness` — provider room with
+   LoginRequired: set_ready rejects with MP-MEDIA-001.
+3. `set_ready_with_genuine_local_media_marks_ready` — runtime with an opened
+   player and manifest: set_ready marks media_ready true.
+4. `guest_ready_state_propagates_peer_media_readiness` — apply_host_event
+   GuestReadyState updates peer snapshot.
+5. `coordinator_update_mirrors_peer_media_readiness` — apply_peer_event
+   CoordinatorStateUpdate syncs peer.media_ready from coordinator flags.
+
+## Platform affected
+
+Code-level only — no platform-specific changes. The fix applies equally to
+macOS and Windows.
+
+## Status
+
+This batch is CODE COMPLETE. No physical verification was performed (no
+real-device test was supplied). The following items require manual verification
+on physical devices:
+
+- Two-device READY consensus flow with genuine media readiness
+- Cross-device QUIC ReadyState round trip and GuestReadyState propagation
+- Real-player buffer reporting (player event loop → report_buffer_status)
+- Provider mode readiness gating
 
 ---
 

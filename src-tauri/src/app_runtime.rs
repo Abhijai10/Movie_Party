@@ -2170,7 +2170,19 @@ impl AppRuntime {
                     let _ = Self::apply_disconnect(&self.inner);
                 }
             }
-            QuicHostEvent::GuestReadyState { .. } => {}
+            QuicHostEvent::GuestReadyState {
+                coordinator_ready,
+                coordinator_buffer_ahead_ms,
+                ..
+            } => {
+                let mut state = self.lock();
+                if let Some(peer) = &mut state.peer_participant {
+                    peer.media_ready = coordinator_ready;
+                    if coordinator_ready {
+                        peer.buffer_ahead_ms = coordinator_buffer_ahead_ms;
+                    }
+                }
+            }
             QuicHostEvent::GuestPlayReady {
                 broadcaster_device_id: _,
                 operation_id,
@@ -3042,6 +3054,13 @@ impl AppRuntime {
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .apply_coordinator_state(host_ready, guest_ready, &coordinator_play_state);
+                    // Peer readiness mirrors the coordinator's genuine flags:
+                    // the host reflects the guest's ready, the guest reflects
+                    // the host's ready. Never fabricated locally.
+                    let is_host = Self::is_host_role(&state);
+                    if let Some(peer) = &mut state.peer_participant {
+                        peer.media_ready = if is_host { guest_ready } else { host_ready };
+                    }
                     let room_state = state
                         .sync_coordinator
                         .lock()
@@ -3573,6 +3592,29 @@ impl AppRuntime {
         state.local_participant.role == "Host"
     }
 
+    /// V1 correctness gate: the local participant may only claim readiness
+    /// when the media/player/provider prerequisite is genuinely usable. This
+    /// never fabricates readiness from metadata or a user click alone.
+    fn local_media_genuinely_ready(state: &AppRuntimeState) -> bool {
+        if state.provider.url.is_some() {
+            // Provider / generic-link room: usable media requires the provider
+            // page to be authenticated and playback-ready (Ready means the
+            // managed session is usable for navigation; PlaybackReady means a
+            // real media element was detected over CDP).
+            matches!(
+                state.provider.readiness,
+                crate::providers::sync::ProviderReadiness::PlaybackReady
+                    | crate::providers::sync::ProviderReadiness::Ready
+            )
+        } else {
+            // Local Perfect: a real player is present, opened without error,
+            // and a media manifest exists. Metadata alone is never readiness.
+            state.media.is_some()
+                && state.player.is_some()
+                && state.player_snapshot.error_message.is_none()
+        }
+    }
+
     /// M3: Dispatch a play command to the live player instance, if present.
     fn dispatch_player_play(state: &mut AppRuntimeState) {
         let Some(player) = state.player.clone() else {
@@ -3856,10 +3898,18 @@ impl AppRuntime {
             let mut state = self.lock();
             state.screen = "READY_CHECK".to_string();
             let is_host = Self::is_host_role(&state);
-            // M2 fake player: pressing Ready means the local player can
-            // consume media; later phases gate this on real transfer/media.
-            state.local_participant.media_ready = true;
-            state.buffer.guest_buffer_ahead_ms = 5_000;
+
+            // V1 correctness: readiness must reflect genuinely usable media.
+            // Never fabricate media readiness to let the UI advance.
+            let genuinely_ready = Self::local_media_genuinely_ready(&state);
+            state.local_participant.media_ready = genuinely_ready;
+            if !genuinely_ready {
+                state.error = Some(
+                    "MP-MEDIA-001 media is not ready for playback".to_string(),
+                );
+                sync_room_snapshot(&mut state);
+                return snapshot_from_state(&state);
+            }
             if is_host {
                 state
                     .sync_coordinator
@@ -3889,11 +3939,9 @@ impl AppRuntime {
                     });
                 }
             }
-            if let Some(peer) = &mut state.peer_participant {
-                peer.media_ready = true;
-            }
-            // Readiness consensus only: PLAYING arrives exclusively through a
-            // committed play operation, never as a side effect of Ready.
+            // Peer readiness is propagated from the peer's genuine state via
+            // GuestReadyState / CoordinatorStateUpdate — never fabricated
+            // locally. V1 correctness: no fake media readiness.
             let room_state = state
                 .sync_coordinator
                 .lock()
@@ -5766,5 +5814,167 @@ mod tests {
         runtime.leave_party();
         drop(_env);
         drop(guard);
+    }
+
+    #[test]
+    fn set_ready_does_not_fabricate_media_readiness() {
+        let runtime = AppRuntime::new();
+
+        // No media, no player, no provider: the local participant must NOT
+        // become media-ready just because Ready was pressed (V1 correctness).
+        let snapshot = runtime.set_ready();
+
+        assert_eq!(snapshot.screen, "READY_CHECK");
+        assert!(
+            !snapshot.participants[0].media_ready,
+            "set_ready must not fabricate media readiness"
+        );
+        assert_eq!(
+            snapshot.error.as_deref(),
+            Some("MP-MEDIA-001 media is not ready for playback")
+        );
+    }
+
+    #[test]
+    fn set_ready_requires_provider_playback_readiness() {
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            state.provider.mode = "PROVIDER_SYNC".to_string();
+            state.provider.provider_id = Some("netflix".to_string());
+            state.provider.url = Some("https://www.netflix.com/watch/1".to_string());
+            state.provider.readiness = crate::providers::sync::ProviderReadiness::LoginRequired;
+        }
+
+        let snapshot = runtime.set_ready();
+
+        assert!(
+            !snapshot.participants[0].media_ready,
+            "a provider room must not be ready while login is required"
+        );
+        assert_eq!(
+            snapshot.error.as_deref(),
+            Some("MP-MEDIA-001 media is not ready for playback")
+        );
+    }
+
+    #[test]
+    fn set_ready_with_genuine_local_media_marks_ready() {
+        use crate::media::player::{LibMpvPlayer, LocalPlayer};
+        let runtime = AppRuntime::new();
+        let path = std::env::temp_dir().join(format!("mp_ready_{}", uuid::Uuid::now_v7()));
+        std::fs::write(&path, b"movie").expect("write");
+        {
+            let mut state = runtime.lock();
+            state.media = Some(crate::media::manifest::MediaManifest {
+                media_id: "m".to_string(),
+                filename: "movie.mkv".to_string(),
+                file_size: 5,
+                container: Some("mkv".to_string()),
+                full_hash: "h".to_string(),
+                quick_fingerprint: crate::media::manifest::QuickFingerprint {
+                    file_size: 5,
+                    first_hash: "a".to_string(),
+                    last_hash: "b".to_string(),
+                },
+                chunk_size: 5,
+                chunk_count: 1,
+            });
+            let mut player = LibMpvPlayer::with_availability(true);
+            player.open(&path).expect("open");
+            state.player_snapshot = super::PlayerSnapshot::from_player(&player);
+            state.player = Some(Arc::new(std::sync::Mutex::new(player)));
+        }
+
+        let snapshot = runtime.set_ready();
+
+        assert!(snapshot.participants[0].media_ready);
+        assert!(snapshot.error.is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn guest_ready_state_propagates_peer_media_readiness() {
+        use crate::network::quic::QuicHostEvent;
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            state.peer_participant = Some(super::ParticipantSnapshot {
+                id: "guest-id".to_string(),
+                display_name: "Guest".to_string(),
+                role: "Guest".to_string(),
+                connected: true,
+                media_ready: false,
+                camera_enabled: true,
+                microphone_enabled: false,
+                buffer_ahead_ms: 0,
+            });
+        }
+
+        runtime.apply_host_event(QuicHostEvent::GuestReadyState {
+            broadcaster_device_id: "guest-id".to_string(),
+            coordinator_play_state: "READYCHECK".to_string(),
+            coordinator_ready: true,
+            coordinator_buffer_ahead_ms: 8_000,
+        });
+
+        let snapshot = runtime.snapshot();
+        let peer = snapshot
+            .participants
+            .iter()
+            .find(|p| p.role == "Guest")
+            .expect("guest participant");
+        assert!(
+            peer.media_ready,
+            "guest readiness must propagate to the host's peer snapshot"
+        );
+        assert_eq!(peer.buffer_ahead_ms, 8_000);
+    }
+
+    #[test]
+    fn coordinator_update_mirrors_peer_media_readiness() {
+        use crate::network::quic::{EventEnvelope, ServerEvent as QuicServerEvent};
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            state.peer_participant = Some(super::ParticipantSnapshot {
+                id: "guest-id".to_string(),
+                display_name: "Guest".to_string(),
+                role: "Guest".to_string(),
+                connected: true,
+                media_ready: false,
+                camera_enabled: true,
+                microphone_enabled: false,
+                buffer_ahead_ms: 0,
+            });
+        }
+
+        let envelope = EventEnvelope {
+            seq: 1,
+            sender: "host-id".to_string(),
+            sent_mono_us: 1,
+            event: QuicServerEvent::CoordinatorStateUpdate {
+                host_ready: true,
+                guest_ready: true,
+                coordinator_play_state: "READYCHECK".to_string(),
+                buffer_ahead_ms: 8_000,
+            },
+        };
+        AppRuntime::apply_peer_event(
+            &runtime.inner,
+            &envelope,
+            envelope.event.clone(),
+        );
+
+        let snapshot = runtime.snapshot();
+        let peer = snapshot
+            .participants
+            .iter()
+            .find(|p| p.role == "Guest")
+            .expect("guest participant");
+        assert!(
+            peer.media_ready,
+            "CoordinatorStateUpdate must mirror the peer's genuine readiness"
+        );
     }
 }

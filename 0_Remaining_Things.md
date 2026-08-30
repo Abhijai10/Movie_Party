@@ -3,7 +3,7 @@
 > **Purpose:** This is the living source of truth for everything still required to finish Movie Party V1.  
 > **Scope:** Two-person private desktop watch parties on macOS and Windows.  
 > **Current branch:** `emergent-ui-integration-complete`  
-> **Latest checkpoint discussed:** `0e8f387` — Windows deep links + provider-mode separation  
+> **Latest checkpoint discussed:** `8622174` — Batch 7 readiness-honesty audit (no real-device failures supplied)  
 > **Rule:** “Code exists” is not the same as “production-ready.” Items that need real devices, real accounts, real media, or OS behavior remain pending until manually verified.
 
 ---
@@ -42,6 +42,22 @@ Batch 6 (2026-08-30) hardened the room lifecycle at the code level:
   network connected), so the UI does not let the user start Cinema before
   readiness consensus.
 
+Batch 7 (2026-08-30) removed fake readiness paths at the code level (no
+real-device failure observations were supplied, so a code audit against the
+V1 correctness rules was performed):
+
+- `set_ready` no longer fabricates `media_ready = true` /
+  `buffer.guest_buffer_ahead_ms = 5_000` / `peer.media_ready = true`
+  unconditionally. The local participant is only marked ready when the
+  player/media/provider is genuinely usable (`local_media_genuinely_ready`);
+  otherwise a stable `MP-MEDIA-001` is returned and readiness is not advanced.
+- The host now applies `GuestReadyState` so the guest's genuine readiness
+  reaches the host's participant snapshot.
+- `CoordinatorStateUpdate` now mirrors the peer's readiness from the
+  coordinator's `host_ready`/`guest_ready` flags on both sides.
+- m2 protocol tests were updated to wait for genuine guest media readiness and
+  report genuine buffer before pressing Ready.
+
 Remaining V1 work is dominated by **real-device and real-account
 verification** plus the long-pending native libmpv presentation fix.
 
@@ -62,6 +78,24 @@ verification** plus the long-pending native libmpv presentation fix.
 13. 🎨 **Cinema curtain/countdown visual polish by another AI**
 14. ⚠️ **Re-check unresolved audit/security/reliability findings against the current branch**
 15. 🔮 **Packaging/release hardening**
+
+## Batch 7 readiness-honesty status (2026-08-30)
+
+No real-device failure observations were supplied for Batch 7, so a code-level
+audit against the V1 correctness rules was run instead. Results:
+
+- ✅ `set_ready` no longer fabricates media readiness (local participant,
+  guest buffer, or peer readiness). Readiness now requires genuine
+  player/media/provider state (`local_media_genuinely_ready`), with a stable
+  `MP-MEDIA-001` on failure.
+- ✅ Host applies `GuestReadyState`; both sides mirror peer readiness from
+  `CoordinatorStateUpdate`.
+- ✅ Regression tests added (5) and existing m2 helpers now wait for genuine
+  guest readiness + genuine buffer reporting.
+- 🧪 The real two-device READY consensus flow (both devices genuinely ready →
+  READYCHECK → Cinema) still requires physical verification.
+- 🧪 Real-player buffer reporting through the player event loop →
+  `report_buffer_status` still requires physical verification.
 
 ---
 
