@@ -1,11 +1,11 @@
 use std::sync::OnceLock;
 use tokio::sync::Mutex;
 
-use move_party_lib::app_runtime::AppRuntime;
-use move_party_lib::media::cache::CACHE_DATA_FILE;
-use move_party_lib::media::transfer::validate_chunk_packet;
-use move_party_lib::storage::sqlite::{MovePartyDb, StoredSchedule};
-use move_party_lib::storage::{apply_retention_decision, RetentionDecision};
+use movie_party_lib::app_runtime::AppRuntime;
+use movie_party_lib::media::cache::CACHE_DATA_FILE;
+use movie_party_lib::media::transfer::validate_chunk_packet;
+use movie_party_lib::storage::sqlite::{MoviePartyDb, StoredSchedule};
+use movie_party_lib::storage::{apply_retention_decision, RetentionDecision};
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 fn env_lock() -> &'static Mutex<()> {
@@ -15,11 +15,11 @@ fn env_lock() -> &'static Mutex<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_e2e_host_guest_manifest_transfer() {
     let _guard = env_lock().lock().await;
-    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+    std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
     let path = std::env::temp_dir().join(format!("m3_e2e_{}.mkv", uuid::Uuid::now_v7()));
     let data: Vec<u8> = (0..2_500_000).map(|i| (i % 251) as u8).collect();
     std::fs::write(&path, &data).expect("write fixture");
-    let manifest = move_party_lib::media::manifest::build_manifest(&path).expect("build_manifest");
+    let manifest = movie_party_lib::media::manifest::build_manifest(&path).expect("build_manifest");
     assert!(manifest.chunk_count >= 2);
 
     let host = AppRuntime::new();
@@ -58,12 +58,12 @@ async fn test_e2e_host_guest_manifest_transfer() {
     host.leave_party();
     guest.leave_party();
     let _ = std::fs::remove_file(&path);
-    std::env::remove_var("MOVE_PARTY_DEV_LOOPBACK");
+    std::env::remove_var("MOVIE_PARTY_DEV_LOOPBACK");
 }
 
 #[test]
 fn test_corrupt_chunk_rejected() {
-    use move_party_lib::media::manifest::{MediaManifest, QuickFingerprint};
+    use movie_party_lib::media::manifest::{MediaManifest, QuickFingerprint};
     let m = MediaManifest {
         media_id: "ct".into(),
         filename: "m.bin".into(),
@@ -78,7 +78,7 @@ fn test_corrupt_chunk_rejected() {
         chunk_size: 4,
         chunk_count: 2,
     };
-    let v = move_party_lib::media::transfer::build_chunk_packet(&m, 0, b"abcd".to_vec()).unwrap();
+    let v = movie_party_lib::media::transfer::build_chunk_packet(&m, 0, b"abcd".to_vec()).unwrap();
     assert!(validate_chunk_packet(&m, &v).is_ok());
     let mut c = v.clone();
     c.payload[0] = b'x';
@@ -95,8 +95,8 @@ fn test_corrupt_chunk_rejected() {
 fn test_identity_survives_db_reopen() {
     let p = std::env::temp_dir().join(format!("m4_id_{}.db", uuid::Uuid::now_v7()));
     {
-        let db = MovePartyDb::open(&p).unwrap();
-        db.upsert_identity(&move_party_lib::storage::sqlite::StoredIdentity {
+        let db = MoviePartyDb::open(&p).unwrap();
+        db.upsert_identity(&movie_party_lib::storage::sqlite::StoredIdentity {
             device_id: "dev-42".into(),
             display_name: "User".into(),
             public_key: "pk".into(),
@@ -107,7 +107,7 @@ fn test_identity_survives_db_reopen() {
         .unwrap();
     }
     {
-        let db = MovePartyDb::open(&p).unwrap();
+        let db = MoviePartyDb::open(&p).unwrap();
         let i = db.get_identity().unwrap().unwrap();
         assert_eq!(i.device_id, "dev-42");
     }
@@ -128,17 +128,17 @@ fn test_schedule_crud_persists() {
         created_at_ms: 1700000000000,
     };
     {
-        let db = MovePartyDb::open(&p).unwrap();
+        let db = MoviePartyDb::open(&p).unwrap();
         db.insert_schedule(&s).unwrap();
         assert_eq!(db.list_schedules().unwrap().len(), 1);
     }
     {
-        let db = MovePartyDb::open(&p).unwrap();
+        let db = MoviePartyDb::open(&p).unwrap();
         db.update_schedule_status("s1", "Preloading").unwrap();
         assert_eq!(db.list_schedules().unwrap()[0].status, "Preloading");
     }
     {
-        let db = MovePartyDb::open(&p).unwrap();
+        let db = MoviePartyDb::open(&p).unwrap();
         db.delete_schedule("s1").unwrap();
         assert!(db.list_schedules().unwrap().is_empty());
     }
@@ -152,7 +152,7 @@ fn test_preload_calculation_matches_prd() {
         .unwrap()
         .as_millis() as i64;
     let future = now_ms + 3_600_000;
-    let p = MovePartyDb::calculate_preload_start(1_000_000_000, 5_000_000, future);
+    let p = MoviePartyDb::calculate_preload_start(1_000_000_000, 5_000_000, future);
     assert_eq!(p, future - 1_180_000);
 }
 
@@ -163,14 +163,14 @@ fn test_zero_goodput_returns_scheduled_time() {
         .unwrap()
         .as_millis() as i64;
     let future = now_ms + 3_600_000;
-    let p = MovePartyDb::calculate_preload_start(1_000_000_000, 0, future);
+    let p = MoviePartyDb::calculate_preload_start(1_000_000_000, 0, future);
     assert_eq!(p, future);
 }
 
 #[test]
 fn test_overdue_schedule_detected() {
     let p = std::env::temp_dir().join(format!("m4_ov_{}.db", uuid::Uuid::now_v7()));
-    let db = MovePartyDb::open(&p).unwrap();
+    let db = MoviePartyDb::open(&p).unwrap();
     db.insert_schedule(&StoredSchedule {
         schedule_id: "o1".into(),
         room_id: "r1".into(),

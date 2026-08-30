@@ -1,4 +1,4 @@
-# Move Party Remaining Milestones Execution
+# Movie Party Remaining Milestones Execution
 
 ## CURRENT RESUME STATE
 

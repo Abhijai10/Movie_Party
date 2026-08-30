@@ -7,14 +7,14 @@ use std::sync::{Arc, OnceLock};
 
 use tokio::sync::Mutex;
 
-use move_party_lib::app_runtime::AppRuntime;
-use move_party_lib::identity::DeviceIdentity;
-use move_party_lib::media::cache::SparseCache;
-use move_party_lib::media::stream::range_server::{start_range_server, RangeServerConfig};
-use move_party_lib::media::transfer::{validate_chunk_packet, ChunkDemandHandle, ChunkPriority};
-use move_party_lib::network::quic::QuicClient;
-use move_party_lib::room::{
-    invite_socket_addr, invite_to_credentials, parse_invite, MovePartyInvite,
+use movie_party_lib::app_runtime::AppRuntime;
+use movie_party_lib::identity::DeviceIdentity;
+use movie_party_lib::media::cache::SparseCache;
+use movie_party_lib::media::stream::range_server::{start_range_server, RangeServerConfig};
+use movie_party_lib::media::transfer::{validate_chunk_packet, ChunkDemandHandle, ChunkPriority};
+use movie_party_lib::network::quic::QuicClient;
+use movie_party_lib::room::{
+    invite_socket_addr, invite_to_credentials, parse_invite, MoviePartyInvite,
 };
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -29,7 +29,7 @@ fn temp_media(size: usize) -> std::path::PathBuf {
     path
 }
 
-fn invite_details(invite_code: &str) -> (MovePartyInvite, std::net::SocketAddr) {
+fn invite_details(invite_code: &str) -> (MoviePartyInvite, std::net::SocketAddr) {
     let invite = parse_invite(invite_code).expect("parse invite");
     let addr = invite_socket_addr(&invite).expect("addr");
     (invite, addr)
@@ -81,7 +81,7 @@ fn find_http_header_end(raw: &[u8]) -> Option<usize> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn uncached_http_range_triggers_real_quic_fetch_and_serves() {
     let _guard = env_lock().lock().await;
-    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+    std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
     let path = temp_media(2_500_000);
     let source = std::fs::read(&path).expect("read source");
 
@@ -114,7 +114,7 @@ async fn uncached_http_range_triggers_real_quic_fetch_and_serves() {
     let cache = SparseCache::open(&cache_root, manifest.clone()).expect("cache");
     let cache_arc = Arc::new(Mutex::new(cache));
     let demand = ChunkDemandHandle::new();
-    let chunk_wake = Arc::new(move_party_lib::media::stream::range_server::ChunkWake::new());
+    let chunk_wake = Arc::new(movie_party_lib::media::stream::range_server::ChunkWake::new());
 
     let token = "m3c-token";
     let range = start_range_server(RangeServerConfig {
@@ -183,13 +183,13 @@ async fn uncached_http_range_triggers_real_quic_fetch_and_serves() {
     host.leave_party();
     let _ = std::fs::remove_dir_all(&cache_root);
     let _ = std::fs::remove_file(&path);
-    std::env::remove_var("MOVE_PARTY_DEV_LOOPBACK");
+    std::env::remove_var("MOVIE_PARTY_DEV_LOOPBACK");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cache_write_contention_eventually_persists_chunk() {
     let _guard = env_lock().lock().await;
-    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+    std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
     let path = temp_media(1_200_000);
     let source = std::fs::read(&path).expect("read source");
 
@@ -217,7 +217,7 @@ async fn cache_write_contention_eventually_persists_chunk() {
     let cache = SparseCache::open(&cache_root, manifest.clone()).expect("cache");
     let cache_arc = Arc::new(Mutex::new(cache));
     let demand = ChunkDemandHandle::new();
-    let chunk_wake = Arc::new(move_party_lib::media::stream::range_server::ChunkWake::new());
+    let chunk_wake = Arc::new(movie_party_lib::media::stream::range_server::ChunkWake::new());
 
     let token = "cont-token";
     let range = start_range_server(RangeServerConfig {
@@ -309,7 +309,7 @@ async fn cache_write_contention_eventually_persists_chunk() {
     host.leave_party();
     let _ = std::fs::remove_dir_all(&cache_root);
     let _ = std::fs::remove_file(&path);
-    std::env::remove_var("MOVE_PARTY_DEV_LOOPBACK");
+    std::env::remove_var("MOVIE_PARTY_DEV_LOOPBACK");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -355,7 +355,7 @@ fn duplicate_range_demands_deduplicate() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn guest_fetch_media_owns_session_and_leave_releases_everything() {
     let _guard = env_lock().lock().await;
-    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+    std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
     let path = temp_media(1_200_000);
 
     let host = AppRuntime::new();
@@ -416,13 +416,13 @@ async fn guest_fetch_media_owns_session_and_leave_releases_everything() {
     );
     host.leave_party();
     let _ = std::fs::remove_file(&path);
-    std::env::remove_var("MOVE_PARTY_DEV_LOOPBACK");
+    std::env::remove_var("MOVIE_PARTY_DEV_LOOPBACK");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reconnect_reuses_single_session_worker() {
     let _guard = env_lock().lock().await;
-    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+    std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
     let path = temp_media(1_100_000);
 
     let host = AppRuntime::new();
@@ -439,7 +439,7 @@ async fn reconnect_reuses_single_session_worker() {
         guest: AppRuntime,
         addr: std::net::SocketAddr,
         fingerprint: String,
-        credentials: move_party_lib::network::quic::RoomCredentials,
+        credentials: movie_party_lib::network::quic::RoomCredentials,
     ) {
         let identity = DeviceIdentity::new_ephemeral();
         let (client, _auth) = QuicClient::connect(
@@ -489,7 +489,7 @@ async fn reconnect_reuses_single_session_worker() {
     guest.leave_party();
     host.leave_party();
     let _ = std::fs::remove_file(&path);
-    std::env::remove_var("MOVE_PARTY_DEV_LOOPBACK");
+    std::env::remove_var("MOVIE_PARTY_DEV_LOOPBACK");
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -501,7 +501,7 @@ async fn reconnect_reuses_single_session_worker() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn guest_starvation_pauses_host_and_guest_with_consensus_resume() {
     let _guard = env_lock().lock().await;
-    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+    std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
     let path = temp_media(1_000_000);
 
     let host = AppRuntime::new();
@@ -579,5 +579,5 @@ async fn guest_starvation_pauses_host_and_guest_with_consensus_resume() {
     guest.leave_party();
     host.leave_party();
     let _ = std::fs::remove_file(&path);
-    std::env::remove_var("MOVE_PARTY_DEV_LOOPBACK");
+    std::env::remove_var("MOVIE_PARTY_DEV_LOOPBACK");
 }

@@ -213,7 +213,7 @@ pub fn required_ipv4(readiness: &TailscaleReadiness) -> Result<Ipv4Addr, String>
 }
 
 pub fn dev_loopback_enabled() -> bool {
-    std::env::var("MOVE_PARTY_DEV_LOOPBACK")
+    std::env::var("MOVIE_PARTY_DEV_LOOPBACK")
         .map(|value| value == "1")
         .unwrap_or(false)
 }

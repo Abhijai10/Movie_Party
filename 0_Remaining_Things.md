@@ -233,7 +233,7 @@ These are considered implemented at the code level unless later manual testing d
 ## 3.3 Invites / deep links
 
 - ✅ Full invite format preserved:
-  `moveparty://join/<room_id>#<descriptor>`
+  `movieparty://join/<room_id>#<descriptor>`
 - ✅ Shared frontend invite parser.
 - ✅ macOS deep-link plumbing.
 - ✅ Windows deep-link plumbing through official Tauri mechanisms.
@@ -754,7 +754,7 @@ Requirements:
 The current architecture requires the full descriptor-bearing invite:
 
 ```text
-moveparty://join/<room_id>#<descriptor>
+movieparty://join/<room_id>#<descriptor>
 ```
 
 A bare short room code is insufficient without adding a rendezvous/lookup service, which is not part of the current serverless architecture.
@@ -769,7 +769,7 @@ A bare short room code is insufficient without adding a rendezvous/lookup servic
 ## 12.3 Windows
 
 - ✅ official Tauri deep-link/single-instance plumbing exists
-- 🧪 verify Windows installer actually registers `moveparty://`
+- 🧪 verify Windows installer actually registers `movieparty://`
 - 🧪 verify:
   - cold start
   - running app
@@ -1342,49 +1342,59 @@ Also ensure:
 
 # 30. Packaging / Distribution
 
-## Future release-hardening work
+## Status (2026-08-30 — Windows release-candidate packaging complete)
+
+- ✅ Windows 11 x64 NSIS installer pipeline (`.github/workflows/build.yml`): builds on
+  `windows-latest`, bundles the frontend and a self-contained `libmpv` runtime
+  (`mpv_runtime/mpv-2.dll`) into the installer, and uploads the NSIS `.exe` as an Actions
+  artifact (and attaches it to GitHub Releases for `v*` tags).
+- ✅ `movieparty://` protocol registration is wired through `tauri-plugin-deep-link`
+  (NSIS registers the scheme at install).
+- ✅ Installer does not require Git/Rust/Node/pnpm/repository cloning; Tailscale remains a
+  separately installed prerequisite.
+- 🧪 Physical Windows install + two-device verification still required (see
+  `0_Remaining_Things.md` §31 manual matrix).
+
+## Remaining release-hardening work
 
 ### libmpv
 
-- decide/bundle required native runtime correctly;
-- macOS dylib/runtime loading;
-- Windows DLL/runtime loading;
-- startup detection;
-- user-safe unavailable state;
-- installer verification.
+- ✅ Windows DLL/runtime loading is bundled and self-contained (`mpv-2.dll` staged in CI).
+- 🧪 macOS dylib/runtime loading and installer verification remain manual.
+- 🧪 startup detection and user-safe unavailable state remain manual.
 
 ### Tailscale
 
-- first-run dependency/onboarding;
-- installer/setup handoff;
-- sign-in handoff;
-- partner connectivity setup;
-- runtime health checks.
+- 🔮 first-run dependency/onboarding;
+- 🔮 installer/setup handoff;
+- 🔮 sign-in handoff;
+- 🔮 partner connectivity setup;
+- 🔮 runtime health checks.
 
 ### macOS
 
-- app bundle;
-- signing;
-- notarization when release-ready;
-- protocol-handler verification;
-- permissions/privacy strings.
+- ✅ app bundle;
+- ⬜ signing;
+- ⬜ notarization when release-ready;
+- 🧪 protocol-handler verification;
+- ⬜ permissions/privacy strings.
 
 ### Windows
 
-- installer;
-- protocol-handler registration;
-- native renderer;
-- camera/mic permissions;
-- required runtime/native libraries.
+- ✅ installer (NSIS x64);
+- ✅ protocol-handler registration;
+- 🧪 native renderer (real device);
+- 🧪 camera/mic permissions;
+- ✅ required runtime/native libraries (libmpv bundled).
 
 ### Security/release
 
-- CSP;
-- release Rust profile;
-- dependency audit;
-- privacy/data-handling notice;
-- versioning/release notes;
-- reproducible build checks.
+- ⬜ CSP;
+- ⬜ release Rust profile;
+- ⬜ dependency audit;
+- ⬜ privacy/data-handling notice;
+- ⬜ versioning/release notes;
+- ⬜ reproducible build checks.
 
 ---
 

@@ -1,4 +1,4 @@
-//! Clean notification abstraction for Move Party.
+//! Clean notification abstraction for Movie Party.
 //!
 //! Product targets: macOS and Windows (no Linux product work).
 //!
@@ -19,7 +19,7 @@ use std::sync::{
 #[cfg(target_os = "windows")]
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 
-pub const NOTIFICATION_APP_NAME: &str = "Move Party";
+pub const NOTIFICATION_APP_NAME: &str = "Movie Party";
 
 pub trait Notifier: Send + Sync + std::fmt::Debug {
     fn notify(&self, title: &str, body: &str) -> Result<(), String>;
@@ -132,7 +132,7 @@ fn native_windows_notify(title: &str, body: &str) -> Result<(), String> {
          $xml = New-Object Windows.Data.Xml.Dom.XmlDocument; \
          $xml.LoadXml($xmlText); \
          $toast = [Windows.UI.Notifications.ToastNotification]::new($xml); \
-         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Move Party').Show($toast)",
+         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Movie Party').Show($toast)",
         encoded,
     );
     let result = std::process::Command::new("powershell")
@@ -268,7 +268,7 @@ end run";
                  $xml = New-Object Windows.Data.Xml.Dom.XmlDocument; \
                  $xml.LoadXml($xmlText); \
                  $toast = [Windows.UI.Notifications.ToastNotification]::new($xml); \
-                 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Move Party').Show($toast)",
+                 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Movie Party').Show($toast)",
                 encoded,
             );
             assert!(!script.contains("A &"));

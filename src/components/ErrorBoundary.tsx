@@ -26,7 +26,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
       return (
         <main className="centered-shell">
           <section className="modal-panel" role="alert" aria-live="assertive">
-            <h1>Move Party needs a quick refresh</h1>
+            <h1>Movie Party needs a quick refresh</h1>
             <div className="modal-body">
               <p>MP-UI-001 A rendering failure stopped this screen.</p>
             </div>
@@ -38,7 +38,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
                   window.location.reload();
                 }}
               >
-                Reload Move Party
+                Reload Movie Party
               </button>
             </div>
           </section>

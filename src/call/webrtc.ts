@@ -1,9 +1,9 @@
 export type CallMode = "VIDEO_VOICE" | "VOICE_ONLY" | "OFF";
 
-export type MovePartyCallSignalType = "OFFER" | "ANSWER" | "ICE";
+export type MoviePartyCallSignalType = "OFFER" | "ANSWER" | "ICE";
 
-export type MovePartyCallSignal = {
-  signalType: MovePartyCallSignalType;
+export type MoviePartyCallSignal = {
+  signalType: MoviePartyCallSignalType;
   data: string;
 };
 
@@ -20,7 +20,7 @@ export type LocalCallLoopbackResult = {
   status: CallConnectionStatus;
   localTrackKinds: string[];
   remoteTrackKinds: string[];
-  signals: MovePartyCallSignal[];
+  signals: MoviePartyCallSignal[];
   usedRealMedia: boolean;
   errorCode: string | null;
 };
@@ -46,7 +46,7 @@ export function buildCallMediaIntent(mode: CallMode, cameraEnabled: boolean): Ca
   };
 }
 
-export function createMovePartyPeerConnection(): RTCPeerConnection | null {
+export function createMoviePartyPeerConnection(): RTCPeerConnection | null {
   if (typeof RTCPeerConnection === "undefined") {
     return null;
   }
@@ -88,11 +88,11 @@ export async function runLocalPeerConnectionLoopback(
   mode: CallMode,
   cameraEnabled: boolean,
   microphoneEnabled: boolean,
-  onSignal?: (signal: MovePartyCallSignal) => Promise<void> | void,
+  onSignal?: (signal: MoviePartyCallSignal) => Promise<void> | void,
   abortSignal?: AbortSignal,
 ): Promise<LocalCallLoopbackResult> {
-  const host = createMovePartyPeerConnection();
-  const guest = createMovePartyPeerConnection();
+  const host = createMoviePartyPeerConnection();
+  const guest = createMoviePartyPeerConnection();
 
   if (!host || !guest) {
     return {
@@ -106,12 +106,12 @@ export async function runLocalPeerConnectionLoopback(
     };
   }
 
-  const signals: MovePartyCallSignal[] = [];
+  const signals: MoviePartyCallSignal[] = [];
   const remoteTrackKinds: string[] = [];
   let stream = new MediaStream();
   let usedRealMedia = false;
 
-  const publishSignal = async (signal: MovePartyCallSignal) => {
+  const publishSignal = async (signal: MoviePartyCallSignal) => {
     if (abortSignal?.aborted) {
       return;
     }
@@ -264,7 +264,7 @@ function createSyntheticVideoTrack(): MediaStreamTrack | null {
   context.fillRect(0, 0, canvas.width, canvas.height);
   context.fillStyle = "#f8fafc";
   context.font = "24px sans-serif";
-  context.fillText("Move Party call test", 32, 64);
+  context.fillText("Movie Party call test", 32, 64);
   return canvas.captureStream(15).getVideoTracks()[0] ?? null;
 }
 

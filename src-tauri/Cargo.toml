@@ -1,13 +1,13 @@
 [package]
-name = "move-party"
+name = "movie-party"
 version = "0.1.0"
 description = "Private two-person desktop cinema app"
-authors = ["Move Party"]
+authors = ["Movie Party"]
 edition = "2021"
 license = "LicenseRef-Proprietary"
 
 [lib]
-name = "move_party_lib"
+name = "movie_party_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]

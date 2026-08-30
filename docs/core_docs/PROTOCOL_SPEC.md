@@ -1,7 +1,7 @@
 
 # DOCUMENT 2 — `PROTOCOL_SPEC.md`
 
-# Move Party Network Protocol Specification
+# Movie Party Network Protocol Specification
 ## Protocol Version 1
 
 Status: LOCKED FOR INITIAL IMPLEMENTATION
@@ -10,7 +10,7 @@ Status: LOCKED FOR INITIAL IMPLEMENTATION
 
 # 1. PURPOSE
 
-This document defines the exact peer-to-peer control and coordination protocol used by Move Party V1.
+This document defines the exact peer-to-peer control and coordination protocol used by Movie Party V1.
 
 V1 supports exactly:
 

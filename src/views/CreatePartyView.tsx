@@ -520,7 +520,7 @@ export function CreatePartyView({
 
                   <p className="mt-4 text-white/40 text-xs leading-relaxed">
                     Sync opens the selected provider in its dedicated browser profile. Each viewer
-                    signs in directly on the provider's own page; Move Party never receives
+                    signs in directly on the provider's own page; Movie Party never receives
                     provider credentials.
                   </p>
                 </div>

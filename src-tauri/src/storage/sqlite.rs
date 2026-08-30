@@ -1,4 +1,4 @@
-//! Real SQLite persistence for Move Party.
+//! Real SQLite persistence for Movie Party.
 //!
 //! Provides actual database storage for device identity, trusted peers,
 //! room history, schedules, cache metadata, and chat messages.
@@ -21,8 +21,8 @@ fn lock_mutex<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, Stora
         .map_err(|e| StorageError::Sqlite(format!("lock poisoned: {e}")))
 }
 
-/// Move Party database backed by real SQLite.
-pub struct MovePartyDb {
+/// Movie Party database backed by real SQLite.
+pub struct MoviePartyDb {
     conn: Mutex<Connection>,
     #[allow(dead_code)]
     path: PathBuf,
@@ -78,7 +78,7 @@ pub struct StoredChatMessage {
     pub created_host_time_us: i64,
 }
 
-impl MovePartyDb {
+impl MoviePartyDb {
     /// Open or create the database at the given path.
     /// Runs migrations automatically and idempotently.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
@@ -578,7 +578,7 @@ impl MovePartyDb {
         Ok(())
     }
 
-    /// Retention action: Remove deletes only the Move Party cache entry and
+    /// Retention action: Remove deletes only the Movie Party cache entry and
     /// any associated cached data on disk.  Never deletes the host's
     /// original media file.
     pub fn retention_remove(&self, media_id: &str) -> Result<(), StorageError> {
@@ -664,7 +664,7 @@ mod tests {
 
     #[test]
     fn creates_database_and_runs_migrations() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
         let version = db.schema_version().expect("version");
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
     }
@@ -685,7 +685,7 @@ mod tests {
             ",
         )
         .expect("legacy schema");
-        let db = MovePartyDb {
+        let db = MoviePartyDb {
             conn: Mutex::new(conn),
             path: PathBuf::from(":memory:"),
         };
@@ -701,14 +701,14 @@ mod tests {
 
     #[test]
     fn persists_and_retrieves_identity() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
         let identity = StoredIdentity {
             device_id: "test-device-id".to_string(),
             display_name: "Test Host".to_string(),
             public_key: "base64key".to_string(),
             platform: "macos".to_string(),
             created_at_ms: 1_000_000,
-            key_label: "move-party-device-signing-key".to_string(),
+            key_label: "movie-party-device-signing-key".to_string(),
         };
 
         db.upsert_identity(&identity).expect("upsert");
@@ -718,7 +718,7 @@ mod tests {
 
     #[test]
     fn identity_key_label_round_trips() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
         let identity = StoredIdentity {
             device_id: "label-device".to_string(),
             display_name: "Label".to_string(),
@@ -734,7 +734,7 @@ mod tests {
 
     #[test]
     fn persists_and_lists_schedules() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
         let schedule = StoredSchedule {
             schedule_id: "sched-1".to_string(),
             room_id: "room-1".to_string(),
@@ -763,7 +763,7 @@ mod tests {
 
     #[test]
     fn claim_due_schedule_is_atomic_and_one_winner_only() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
         let schedule = StoredSchedule {
             schedule_id: "claim-1".to_string(),
             room_id: "room".to_string(),
@@ -783,7 +783,7 @@ mod tests {
 
     #[test]
     fn claimed_schedule_recovers_after_restart_before_execution() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
         let schedule = StoredSchedule {
             schedule_id: "claimed-restart".to_string(),
             room_id: "room".to_string(),
@@ -804,7 +804,7 @@ mod tests {
 
     #[test]
     fn persists_and_manages_cache_entries() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
         let entry = StoredCacheEntry {
             media_id: "local-abc".to_string(),
             filename: "movie.mkv".to_string(),
@@ -827,7 +827,7 @@ mod tests {
 
     #[test]
     fn persists_and_retrieves_chat_messages() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
         let msg = StoredChatMessage {
             message_id: "msg-1".to_string(),
             room_id: "room-1".to_string(),
@@ -859,7 +859,7 @@ mod tests {
 
     #[test]
     fn duplicate_schedule_id_is_idempotent() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
         let schedule = StoredSchedule {
             schedule_id: "dup".to_string(),
             room_id: "room".to_string(),
@@ -884,7 +884,7 @@ mod tests {
         let db_path = dir.join("test.db");
 
         {
-            let db = MovePartyDb::open(&db_path).expect("open1");
+            let db = MoviePartyDb::open(&db_path).expect("open1");
             db.upsert_identity(&StoredIdentity {
                 device_id: "persistent-device".to_string(),
                 display_name: "Persistent".to_string(),
@@ -898,7 +898,7 @@ mod tests {
 
         // Reopen — identity must survive
         {
-            let db = MovePartyDb::open(&db_path).expect("open2");
+            let db = MoviePartyDb::open(&db_path).expect("open2");
             let identity = db.get_identity().expect("get").expect("exists");
             assert_eq!(identity.device_id, "persistent-device");
         }
@@ -908,7 +908,7 @@ mod tests {
 
     #[test]
     fn corrupt_identity_row_surfaces_read_error() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
         {
             let conn = db.conn.lock().expect("conn");
             conn.execute(
@@ -937,7 +937,7 @@ mod tests {
             .as_millis() as i64;
         let scheduled_ms: i64 = now_ms + 3 * 3600 * 1000; // +3h
 
-        let preload = MovePartyDb::calculate_preload_start(remaining, goodput, scheduled_ms);
+        let preload = MoviePartyDb::calculate_preload_start(remaining, goodput, scheduled_ms);
         // Transfer time: 1e9 / 1e7 = 100s, × 1.4 = 140s = 140000ms
         // Plus 15 min margin = 900000ms
         // Expected: scheduled_ms - 140000 - 900000 = scheduled_ms - 1_040_000
@@ -946,7 +946,7 @@ mod tests {
 
     #[test]
     fn preload_calculation_zero_goodput_returns_scheduled_time() {
-        let preload = MovePartyDb::calculate_preload_start(1_000_000_000, 0, 7_200_000);
+        let preload = MoviePartyDb::calculate_preload_start(1_000_000_000, 0, 7_200_000);
         // Zero goodput = unknown → start immediately, but capped at now
         // Since now_ms >> scheduled_ms in test, result >= now_ms
         assert!(preload >= 0);
@@ -954,7 +954,7 @@ mod tests {
 
     #[test]
     fn overdue_schedules_returns_planned_past_preload() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
         let schedule = StoredSchedule {
             schedule_id: "overdue-1".to_string(),
             room_id: "room-1".to_string(),
@@ -980,14 +980,14 @@ mod tests {
 
     #[test]
     fn next_preload_deadline_returns_none_when_no_pending_schedule_exists() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
 
         assert_eq!(db.next_preload_deadline(100).expect("deadline"), None);
     }
 
     #[test]
     fn retention_remove_deletes_cache_entry() {
-        let db = MovePartyDb::open_in_memory().expect("open");
+        let db = MoviePartyDb::open_in_memory().expect("open");
         let entry = StoredCacheEntry {
             media_id: "to-delete".to_string(),
             filename: "movie.mkv".to_string(),

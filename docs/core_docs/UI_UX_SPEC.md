@@ -1,14 +1,14 @@
 # DOCUMENT 3 — `UI_UX_SPEC.md`
 
 
-# Move Party UI / UX Specification
+# Movie Party UI / UX Specification
 ## Version 1
 
 ---
 
 # 1. DESIGN OBJECTIVE
 
-Move Party must feel like:
+Movie Party must feel like:
 
 ```text
 a movie
@@ -189,7 +189,7 @@ No playful bouncing UI during serious playback states.
 
 # 8. APPLICATION WINDOW MODES
 
-Move Party has:
+Movie Party has:
 
 ```
 STANDARD
@@ -229,7 +229,7 @@ Frontend must render according to backend state.
 First launch screen:
 
 ```
-Welcome to Move Party
+Welcome to Movie Party
 
 Watch together.
 Stay synchronized.
@@ -287,7 +287,7 @@ Layout:
 
 ```
 ┌──────────────────────────────────────────┐
-│ Move Party                               │
+│ Movie Party                               │
 │                                          │
 │ What are we watching?                    │
 │                                          │
@@ -429,7 +429,7 @@ V1 methods:
 
 ```
 Copy invite code
-Copy moveparty:// link
+Copy movieparty:// link
 Show QR code
 ```
 
@@ -440,7 +440,7 @@ QR is useful for transferring invite between devices but mobile client is not re
 # 17. JOIN SCREEN
 
 ```
-Join Move Party
+Join Movie Party
 
 Invite code
 
@@ -503,7 +503,7 @@ If guest currently offline:
 Rahul is offline.
 
 The schedule will still be saved.
-Move Party will begin transfer when both devices are online.
+Movie Party will begin transfer when both devices are online.
 
 Rahul's local reminder will appear if their device is running.
 ```
@@ -603,7 +603,7 @@ but waiting longer will improve reliability.
 
 ```
 For the smoothest experience,
-Move Party recommends finishing the transfer first.
+Movie Party recommends finishing the transfer first.
 
 Estimated remaining:
 31 minutes
@@ -1028,7 +1028,7 @@ No technical DRM jargon unless details expanded.
 
 When provider interaction is required:
 
-Move Party may show provider Chrome window.
+Movie Party may show provider Chrome window.
 
 Example:
 
@@ -1036,14 +1036,14 @@ Example:
 Netflix requires sign-in.
 
 Sign in directly in the Netflix window.
-Move Party never receives your password.
+Movie Party never receives your password.
 
 [ Open Netflix Window ]
 ```
 
-After login, Move Party can minimize/position it as appropriate.
+After login, Movie Party can minimize/position it as appropriate.
 
-Never fake provider login inside Move Party.
+Never fake provider login inside Movie Party.
 
 ---
 
@@ -1192,7 +1192,7 @@ Host ends:
 confirmation:
 
 ```
-End Move Party for everyone?
+End Movie Party for everyone?
 
 [ Cancel ]
 [ End Party ]
@@ -1210,7 +1210,7 @@ Keep Interstellar on this device?
 The movie was transferred for this party.
 
 [ Remove ]
-[ Keep in Move Party ]
+[ Keep in Movie Party ]
 [ Save As... ]
 ```
 
@@ -1254,18 +1254,18 @@ Waiting for Rahul to come online
 Examples:
 
 ```
-Move Party
+Movie Party
 Interstellar preload starts in 30 minutes.
 Keep this computer online.
 ```
 
 ```
-Move Party
+Movie Party
 Rahul is online. Movie preload has started.
 ```
 
 ```
-Move Party
+Movie Party
 Interstellar is ready for tonight.
 ```
 
@@ -1277,7 +1277,7 @@ Do not spam.
 
 ```
 Display name
-Start Move Party at login
+Start Movie Party at login
 Minimize to tray
 Notification preferences
 ```
@@ -1414,7 +1414,7 @@ Toggle dev shortcut determined during implementation.
 Error layout:
 
 ```
-Move Party couldn't continue this session.
+Movie Party couldn't continue this session.
 
 MP-NET-003
 
@@ -1493,7 +1493,7 @@ When entering:
 Prompt:
 
 ```
-You're still in a Move Party.
+You're still in a Movie Party.
 
 [ Cancel ]
 [ Leave Party ]

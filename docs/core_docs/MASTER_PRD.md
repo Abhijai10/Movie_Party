@@ -1,49 +1,49 @@
-# Move Party
+# Movie Party
 
 ## Master Product Requirements Document, System Architecture, Engineering Specification & Implementation Roadmap
 
-**Document status:** Architecture Locked for V1  
-**Target:** Personal-use development build  
-**Primary platforms:** Windows 10/11 + macOS 11+  
-**Initial party size:** Exactly 2 participants  
-**Primary network environment:** Restrictive college network, approximately 10 Mbps Internet connectivity  
-**Infrastructure constraint:** ₹0 recurring Move Party infrastructure cost; no rented VPS/cloud media server/TURN server  
-**Primary connectivity layer:** Tailscale  
+**Document status:** Architecture Locked for V1
+**Target:** Personal-use development build
+**Primary platforms:** Windows 10/11 + macOS 11+
+**Initial party size:** Exactly 2 participants
+**Primary network environment:** Restrictive college network, approximately 10 Mbps Internet connectivity
+**Infrastructure constraint:** ₹0 recurring Movie Party infrastructure cost; no rented VPS/cloud media server/TURN server
+**Primary connectivity layer:** Tailscale
 **Document date:** August 15, 2026
 
 ---
 
 # 0. PURPOSE OF THIS DOCUMENT
 
-This document is the single source of truth for Move Party.
+This document is the single source of truth for Movie Party.
 
 An AI coding agent, human developer, or future contributor must **not make architectural decisions independently** when an answer already exists here.
 
 If implementation reveals that a locked assumption is technically impossible, the developer must:
 
 1. stop work on the affected subsystem;
-    
-2. create an Architecture Decision Record describing the blocker;
-    
-3. provide reproducible evidence;
-    
-4. propose alternatives;
-    
-5. obtain approval before replacing the architecture.
-    
 
-Do not silently redesign Move Party.
+2. create an Architecture Decision Record describing the blocker;
+
+3. provide reproducible evidence;
+
+4. propose alternatives;
+
+5. obtain approval before replacing the architecture.
+
+
+Do not silently redesign Movie Party.
 
 ---
 
 # 1. PRODUCT VISION
 
-Move Party is a private cross-platform desktop cinema application that allows two people to watch media together while remaining tightly synchronized.
+Movie Party is a private cross-platform desktop cinema application that allows two people to watch media together while remaining tightly synchronized.
 
 The desired experience is:
 
 ```
-Host opens Move Party
+Host opens Movie Party
         ↓
 chooses local movie
 OR
@@ -53,7 +53,7 @@ creates party
         ↓
 guest joins
         ↓
-Move Party prepares media
+Movie Party prepares media
         ↓
 network + buffer + call readiness check
         ↓
@@ -80,18 +80,18 @@ strict synchronization
 
 The movie must remain the primary experience.
 
-Move Party is **not** intended to resemble:
+Movie Party is **not** intended to resemble:
 
 - Discord;
-    
+
 - Google Meet;
-    
+
 - a remote-desktop application;
-    
+
 - a dashboard with a small movie player;
-    
+
 - a conventional side-panel watch-party extension.
-    
+
 
 The movie should visually occupy essentially the entire display.
 
@@ -108,18 +108,18 @@ V1 shall consist of a native desktop application.
 There shall be:
 
 - no browser extension;
-    
-- no required Move Party website;
-    
-- no hosted Move Party web application.
-    
+
+- no required Movie Party website;
+
+- no hosted Movie Party web application.
+
 
 Supported operating systems:
 
 - Windows 10/11;
-    
+
 - macOS 11 or later.
-    
+
 
 Tauri 2 is selected for the application shell because it supports cross-platform desktop applications with a Rust backend and web-based frontend architecture. citeturn932290search23turn777396search17
 
@@ -143,20 +143,20 @@ Protocol messages must nevertheless include participant IDs so that V2 can later
 
 ## 2.3 Zero rented infrastructure
 
-Move Party itself shall require no:
+Movie Party itself shall require no:
 
 - AWS instance;
-    
+
 - VPS;
-    
+
 - paid TURN server;
-    
+
 - hosted movie relay;
-    
+
 - hosted signalling backend;
-    
+
 - hosted database.
-    
+
 
 The host's computer acts as the temporary room coordinator.
 
@@ -168,7 +168,7 @@ As of August 2026, Tailscale's Personal plan allows up to six free users, which 
 
 # 3. NETWORKING PHILOSOPHY
 
-Move Party assumes both participants are members of the same Tailscale tailnet.
+Movie Party assumes both participants are members of the same Tailscale tailnet.
 
 Tailscale currently supports:
 
@@ -186,7 +186,7 @@ Direct connections provide the best throughput and latency; DERP is a fallback w
 
 This is especially important because the expected college network is restrictive.
 
-Move Party must always determine the current Tailscale path before starting high-bandwidth media.
+Movie Party must always determine the current Tailscale path before starting high-bandwidth media.
 
 Possible connection states:
 
@@ -204,7 +204,7 @@ Tailscale exposes the connection type through its status tooling, including `dir
 
 # 4. MEDIA MODES
 
-Move Party has exactly three primary media modes.
+Movie Party has exactly three primary media modes.
 
 They must remain separate internally even though they share the same UI.
 
@@ -240,19 +240,19 @@ Tailscale
 Guest Cache
    │
    ▼
-Move Party Player
+Movie Party Player
 ```
 
 There shall be:
 
 - no screen capture;
-    
+
 - no movie transcoding;
-    
+
 - no re-encoding;
-    
+
 - no central media server.
-    
+
 
 The guest receives the original encoded file.
 
@@ -267,13 +267,13 @@ This mode should provide the highest possible quality and reliability.
 Target providers:
 
 1. Netflix
-    
+
 2. Amazon Prime Video
-    
+
 3. JioHotstar
-    
+
 4. later: other providers
-    
+
 
 Only the host needs the provider playback session in this mode.
 
@@ -294,25 +294,25 @@ OS-supported window capture
 hardware video encoder
    │
    ▼
-Move Party media stream
+Movie Party media stream
    │
-   ├────────► Host Move Party Player
+   ├────────► Host Movie Party Player
    │
-   └────────► Guest Move Party Player
+   └────────► Guest Movie Party Player
 ```
 
-Move Party must **not** attempt to:
+Movie Party must **not** attempt to:
 
 - extract Widevine keys;
-    
+
 - export DRM licenses;
-    
+
 - decrypt provider packets itself;
-    
+
 - bypass protected-content restrictions;
-    
+
 - intercept and redistribute decrypted provider media buffers.
-    
+
 
 Encrypted Media Extensions explicitly use a Content Decryption Module and associated key/session architecture for protected media. citeturn777396search6
 
@@ -336,7 +336,7 @@ Reliable fallback.
 
 Each participant has authorized provider playback.
 
-Move Party controls and synchronizes each provider player.
+Movie Party controls and synchronizes each provider player.
 
 Architecture:
 
@@ -347,7 +347,7 @@ Netflix CDN
      │
      └──────── Guest Chrome
 
-Move Party
+Movie Party
      │
      └──────── synchronizes both
 ```
@@ -391,7 +391,7 @@ user-owned spare PC
 self-hosted vBrowser node
 ```
 
-A cloud VM rented specifically for Move Party is outside project requirements.
+A cloud VM rented specifically for Movie Party is outside project requirements.
 
 Important limitation:
 
@@ -403,11 +403,11 @@ Therefore this is an R&D fallback, not a guaranteed DRM solution.
 
 ---
 
-# 6. CUSTOM MOVE PARTY PLAYER
+# 6. CUSTOM Movie Party PLAYER
 
-Move Party shall contain its own media presentation layer.
+Movie Party shall contain its own media presentation layer.
 
-The Move Party player is responsible for:
+The Movie Party player is responsible for:
 
 ### Local Perfect Mode
 
@@ -421,7 +421,7 @@ Decoding the host-generated encoded stream.
 
 The actual DRM media remains in Chrome.
 
-Move Party may use an overlay/presentation window to make the provider playback visually feel integrated.
+Movie Party may use an overlay/presentation window to make the provider playback visually feel integrated.
 
 The custom player itself shall **not become a Netflix/Prime/JioHotstar DRM client**.
 
@@ -531,7 +531,7 @@ installed Google Chrome
 Chrome DevTools Protocol
 ```
 
-Chrome's remote debugging security behavior changed starting with Chrome 136: remote debugging must use a non-default `--user-data-dir`. That matches Move Party's dedicated provider-profile architecture. citeturn777396search13
+Chrome's remote debugging security behavior changed starting with Chrome 136: remote debugging must use a non-default `--user-data-dir`. That matches Movie Party's dedicated provider-profile architecture. citeturn777396search13
 
 ## Windows capture
 
@@ -580,7 +580,7 @@ Microsoft provides an H.264 Media Foundation encoder implementation. citet
 # 9. HIGH-LEVEL PROCESS ARCHITECTURE
 
 ```
-MoveParty.exe / MoveParty.app
+MovieParty.exe / MovieParty.app
 
 │
 ├── UI PROCESS
@@ -630,7 +630,7 @@ MoveParty.exe / MoveParty.app
 Required initial structure:
 
 ```
-move-party/
+movie-party/
 
 ├── README.md
 ├── LICENSE
@@ -722,7 +722,7 @@ Provider code shall never be mixed into the generic sync engine.
 
 # 11. INSTALLATION IDENTITY
 
-Every Move Party installation generates:
+Every Movie Party installation generates:
 
 ```
 DeviceID
@@ -760,7 +760,7 @@ ExpiresAt
 Invitation descriptor:
 
 ```
-MovePartyInvite {
+MoviePartyInvite {
     protocolVersion,
     roomId,
     hostDeviceId,
@@ -782,7 +782,7 @@ CBOR
 Represent as:
 
 ```
-moveparty://join/<encoded-descriptor>
+movieparty://join/<encoded-descriptor>
 ```
 
 or a copyable text code.
@@ -793,7 +793,7 @@ No central URL-shortening server.
 
 # 13. QUIC CONNECTION
 
-Default Move Party transport:
+Default Movie Party transport:
 
 ```
 QUIC over Tailscale
@@ -1005,15 +1005,15 @@ using repeated clock probes.
 Clock calibration procedure:
 
 1. send 20 `CLOCK_PING` messages;
-    
+
 2. guest records send/receive monotonic timestamps;
-    
+
 3. discard highest-latency outliers;
-    
+
 4. calculate median offset from best samples;
-    
+
 5. periodically refresh while party is active.
-    
+
 
 Clock recalibration interval:
 
@@ -1267,7 +1267,7 @@ full hash identical
 Guest cache structure:
 
 ```
-MovePartyCache/
+MoviePartyCache/
   <media-id>/
       metadata.cbor
       data.part
@@ -1456,7 +1456,7 @@ If `Keep`:
 allow:
 
 ```
-Keep in Move Party Cache
+Keep in Movie Party Cache
 
 or
 
@@ -1486,7 +1486,7 @@ Interstellar
 Saturday 10:00 PM
 ```
 
-If local media is selected, Move Party calculates preload requirements.
+If local media is selected, Movie Party calculates preload requirements.
 
 ---
 
@@ -1538,7 +1538,7 @@ Recommended notifications:
 
 ```
 T_preload - 30 min
-"Move Party preload starts soon. Keep this device online."
+"Movie Party preload starts soon. Keep this device online."
 
 T_preload
 "Movie preload should start now."
@@ -1547,10 +1547,10 @@ T_party - 15 min
 "Movie night starts in 15 minutes."
 
 T_party - 2 min
-"Move Party is almost ready."
+"Movie Party is almost ready."
 ```
 
-If a laptop is completely powered off, Move Party cannot notify it until the operating system runs again.
+If a laptop is completely powered off, Movie Party cannot notify it until the operating system runs again.
 
 No fake cloud push system shall be implemented.
 
@@ -1558,7 +1558,7 @@ No fake cloud push system shall be implemented.
 
 # 36. BACKGROUND MODE
 
-Move Party may remain in:
+Movie Party may remain in:
 
 ```
 system tray / menu bar
@@ -1567,13 +1567,13 @@ system tray / menu bar
 for:
 
 - scheduled transfers;
-    
+
 - notifications;
-    
+
 - active preload;
-    
+
 - reconnect preparation.
-    
+
 
 During an active scheduled transfer, optionally prevent sleep after user permission.
 
@@ -1767,9 +1767,9 @@ WebRTC peer-to-peer
 
 No SFU.
 
-No TURN service operated by Move Party.
+No TURN service operated by Movie Party.
 
-Because Tailscale already provides peer reachability, signalling occurs through the Move Party QUIC connection.
+Because Tailscale already provides peer reachability, signalling occurs through the Movie Party QUIC connection.
 
 Technology-validation phase must verify that WebRTC media uses a reliable route on both:
 
@@ -1874,13 +1874,13 @@ Initial reactions:
 Reaction should:
 
 - animate briefly;
-    
+
 - disappear automatically;
-    
+
 - never interrupt playback;
-    
+
 - use negligible bandwidth.
-    
+
 
 ---
 
@@ -1925,7 +1925,7 @@ chat
 reactions
 party controls
 room indicators
-Move Party branding
+Movie Party branding
 ```
 
 It does **not** automatically stop:
@@ -2044,25 +2044,25 @@ Default is to wait.
 On reconnection:
 
 1. authenticate guest;
-    
+
 2. restore room state;
-    
+
 3. compare media identity;
-    
+
 4. compare local playback position;
-    
+
 5. restore transfer session;
-    
+
 6. restore buffer;
-    
+
 7. run ready check;
-    
+
 8. seek guest if needed;
-    
+
 9. scheduled countdown;
-    
+
 10. resume.
-    
+
 
 No blind resume.
 
@@ -2075,7 +2075,7 @@ Each provider uses its own dedicated Chrome profile.
 Example:
 
 ```
-MovePartyProfiles/
+MoviePartyProfiles/
    netflix/
    prime/
    jiohotstar/
@@ -2099,7 +2099,7 @@ Chrome requires non-default profile directories for remote debugging under curre
 
 # 55. PROVIDER AUTHENTICATION
 
-Move Party never displays:
+Movie Party never displays:
 
 ```
 Netflix Email
@@ -2108,16 +2108,16 @@ Netflix Password
 
 Host logs into the actual provider page in Chrome.
 
-Move Party must never:
+Movie Party must never:
 
 - intercept password form data;
-    
+
 - store passwords;
-    
+
 - copy authentication cookies into its SQLite database;
-    
+
 - transmit cookies to another participant.
-    
+
 
 Chrome maintains its normal provider session.
 
@@ -2191,13 +2191,13 @@ Provider adapters must use multiple detection strategies.
 Priority:
 
 1. direct HTML media element where available;
-    
+
 2. stable accessibility/semantic attributes;
-    
+
 3. provider-specific known player APIs;
-    
+
 4. DOM selectors as fallback.
-    
+
 
 Never scatter CSS selectors throughout the codebase.
 
@@ -2281,13 +2281,13 @@ video region black
 Implement black-frame/protected-content heuristic:
 
 - compare expected video region;
-    
+
 - monitor frame variance;
-    
+
 - verify captured media changes while provider reports `playing`;
-    
+
 - allow user visual confirmation during diagnostics.
-    
+
 
 If protected video is not available:
 
@@ -2365,7 +2365,7 @@ Movie audio is independent from call audio.
 
 Use a dedicated QUIC media channel.
 
-Because Move Party intentionally maintains seconds of buffer, reliable QUIC delivery is acceptable for movie content.
+Because Movie Party intentionally maintains seconds of buffer, reliable QUIC delivery is acceptable for movie content.
 
 Do not put encoded movie bytes into chat/control streams.
 
@@ -2384,7 +2384,7 @@ QUIC connection
 
 # 65. SHARED MODE PRESENTATION ARCHITECTURE
 
-Host must **not watch Chrome directly** while guest watches delayed Move Party output.
+Host must **not watch Chrome directly** while guest watches delayed Movie Party output.
 
 That would create perceptual synchronization problems.
 
@@ -2398,8 +2398,8 @@ Capture
 Encoder
     ↓
 Encoded stream
-    ├──── Host Move Party decoder
-    └──── Guest Move Party decoder
+    ├──── Host Movie Party decoder
+    └──── Guest Movie Party decoder
 ```
 
 Both viewers therefore consume the same encoded representation.
@@ -2429,13 +2429,13 @@ of both presentation players.
 This gives room for:
 
 - network jitter;
-    
+
 - retransmission;
-    
+
 - synchronization;
-    
+
 - strict pause behavior.
-    
+
 
 ---
 
@@ -2452,21 +2452,21 @@ BUFFER_LOW
 Coordinator:
 
 1. pauses source Chrome;
-    
+
 2. schedules host presentation pause;
-    
+
 3. schedules guest presentation pause at matching PTS;
-    
+
 4. continues transmitting already encoded queued content;
-    
+
 5. guest rebuilds minimum safe queue;
-    
+
 6. both participants enter READY;
-    
+
 7. source resumes;
-    
+
 8. scheduled presentation resume follows.
-    
+
 
 Never allow host presentation to advance independently.
 
@@ -2540,17 +2540,17 @@ local VM
 Test:
 
 - DRM playback;
-    
+
 - hardware acceleration;
-    
+
 - video capture;
-    
+
 - audio capture;
-    
+
 - latency;
-    
+
 - 1080p capability.
-    
+
 
 If protected content remains uncapturable, close the experiment.
 
@@ -2581,7 +2581,7 @@ without DRM being the first debugging variable.
 
 ```
 ┌─────────────────────────────────────┐
-│             MOVE PARTY              │
+│             Movie Party              │
 │                                     │
 │ What are we watching?               │
 │                                     │
@@ -2750,7 +2750,7 @@ Sending immediately returns keyboard focus to cinema.
 
 Never display a generic browser spinner alone.
 
-Use Move Party status:
+Use Movie Party status:
 
 ```
 Pausing to keep everyone together
@@ -2804,7 +2804,7 @@ Diagnostics
 Show:
 
 ```
-Move Party cache
+Movie Party cache
 
 Used:
 12.4 GB
@@ -3001,19 +3001,19 @@ unless future setting changes it.
 Never log:
 
 - provider password;
-    
+
 - provider authentication headers;
-    
+
 - browser cookies;
-    
+
 - microphone audio;
-    
+
 - video call frames;
-    
+
 - captured movie frames;
-    
+
 - full personal chat content in diagnostics.
-    
+
 
 Debug logs may contain:
 
@@ -3052,7 +3052,7 @@ INFO
 Diagnostic bundle should contain:
 
 ```
-Move Party version
+Movie Party version
 OS
 architecture
 Tailscale state
@@ -3476,15 +3476,15 @@ disconnect
 Implement:
 
 - host clock;
-    
+
 - clock offset estimation;
-    
+
 - scheduled commands;
-    
+
 - strict ready consensus;
-    
+
 - drift correction state machine.
-    
+
 
 ## Gate
 
@@ -3945,7 +3945,7 @@ Host
 
 Implement jitter/presentation buffer.
 
-Guest plays in Move Party custom player.
+Guest plays in Movie Party custom player.
 
 ---
 
@@ -3958,8 +3958,8 @@ Chrome source is no longer the user's presentation surface.
 Now:
 
 ```
-Host Move Party Player
-Guest Move Party Player
+Host Movie Party Player
+Guest Movie Party Player
 ```
 
 must present the same PTS.
@@ -4047,7 +4047,7 @@ Test:
 
 ```
 Chrome crash
-Move Party crash
+Movie Party crash
 guest disconnect
 Tailscale reconnect
 network change
@@ -4272,7 +4272,7 @@ Required:
 4 GB file
 partial start
 disconnect at 35%
-restart Move Party
+restart Movie Party
 resume
 finish
 hash identical
@@ -4325,7 +4325,7 @@ No visible:
 camera
 chat
 room controls
-Move Party overlay
+Movie Party overlay
 ```
 
 ---
@@ -4348,7 +4348,7 @@ movie continues
 
 # 108. PROVIDER AUTH ACCEPTANCE
 
-Move Party must pass security review demonstrating:
+Movie Party must pass security review demonstrating:
 
 ```
 no provider passwords in logs
@@ -4457,101 +4457,101 @@ Do not build these during V1.
 V1 is complete only when:
 
 - Windows app works.
-    
+
 - macOS app works.
-    
+
 - Windows ↔ macOS connection works.
-    
+
 - Two-person rooms work.
-    
+
 - Tailscale connectivity works on college network.
-    
+
 - Direct/DERP path detection works.
-    
+
 - Local media can be selected.
-    
+
 - Guest can stream partial local file.
-    
+
 - Original local movie bytes are transferred without transcoding.
-    
+
 - Full pre-download works.
-    
+
 - Scheduled preloading works.
-    
+
 - Resume transfer works.
-    
+
 - Identical local files avoid transfer.
-    
+
 - Strict play synchronization works.
-    
+
 - Strict pause works.
-    
+
 - Strict seeking works.
-    
+
 - Guest buffering pauses host.
-    
+
 - Guest disconnect pauses host.
-    
+
 - Reconnect restores synchronization.
-    
+
 - Video calling is optional.
-    
+
 - Voice-only works.
-    
+
 - No-call works.
-    
+
 - Mic starts muted.
-    
+
 - Camera quality adapts.
-    
+
 - Chat does not resize movie.
-    
+
 - Reactions work.
-    
+
 - Ghost Mode works.
-    
+
 - Privacy Mode works.
-    
+
 - Host-only controls are default.
-    
+
 - Shared Controls toggle works.
-    
+
 - Keep/remove downloaded media prompt works.
-    
+
 - Managed Chrome works.
-    
+
 - Provider login stays inside Chrome.
-    
+
 - Netflix adapter tested.
-    
+
 - Prime Video adapter tested.
-    
+
 - JioHotstar adapter tested.
-    
+
 - YouTube adapter tested.
-    
+
 - Provider Sync Mode works.
-    
+
 - Windows Provider Shared experiment completed.
-    
+
 - macOS Provider Shared experiment completed.
-    
+
 - Successful capture combinations stream to guest.
-    
+
 - Provider Shared quality adapts automatically.
-    
+
 - Provider Shared buffering pauses both viewers.
-    
+
 - Failed protected capture does not trigger circumvention.
-    
+
 - vBrowser R&D outcome documented if required.
-    
+
 - 10 Mbps real-network tests completed.
-    
+
 - Diagnostics bundle works.
-    
-- No provider credentials are stored by Move Party.
-    
+
+- No provider credentials are stored by Movie Party.
+
 
 ---
 
@@ -4564,7 +4564,7 @@ Desktop app
 Tauri + React + Rust
 Windows + macOS
 2 users V1
-No rented Move Party server
+No rented Movie Party server
 Tailscale
 Host as room coordinator
 QUIC control/file transport
@@ -4604,7 +4604,7 @@ The first four milestones are:
 
 ```
 M1
-Mac ↔ Windows Move Party connection over Tailscale
+Mac ↔ Windows Movie Party connection over Tailscale
 
 M2
 Two fake players remain synchronized under artificial lag
@@ -4670,10 +4670,10 @@ Therefore implement a spike before committing the entire call subsystem.
 
 # 117. SUCCESS DEFINITION
 
-Move Party V1 succeeds if two people using Windows/macOS and a restrictive network can:
+Movie Party V1 succeeds if two people using Windows/macOS and a restrictive network can:
 
 ```
-open Move Party
+open Movie Party
 
 join each other through Tailscale
 
@@ -4696,7 +4696,7 @@ schedule movies ahead of time
 
 pre-transfer local media
 
-do all of this without paying for Move Party server infrastructure
+do all of this without paying for Movie Party server infrastructure
 ```
 
 The strongest supported experience should be:
@@ -4722,7 +4722,7 @@ PROVIDER SYNC MODE
 # 118. FINAL SYSTEM MODEL
 
 ```
-                           MOVE PARTY
+                           Movie Party
 
                       Windows / macOS
                              │

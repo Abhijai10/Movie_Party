@@ -2,7 +2,7 @@
 # DOCUMENT 5 — `IMPLEMENTATION_TRACKER.md`
 
 
-# Move Party — Implementation Tracker
+# Movie Party — Implementation Tracker
 
 This document records implementation status.
 
@@ -122,7 +122,7 @@ found already resolved or not currently real:
   reactions / position / provider state, media re-fetched, no stale room).
 - **Deep-link parsing**: `src/invites/deepLinks.ts` rejects missing room codes,
   missing descriptors, query params, whitespace/control chars, oversized links,
-  and non-`moveparty://` schemes; duplicate deliveries are idempotent.
+  and non-`movieparty://` schemes; duplicate deliveries are idempotent.
 - **Tailscale boundary**: `network/tailscale.rs` covers NOT_INSTALLED, SIGNED_OUT,
   CONNECTED, UNAVAILABLE, missing/invalid IPv4 (100.64/10 CGNAT range), host
   create requiring only the host's own readiness (`required_ipv4`), guest join
@@ -385,7 +385,7 @@ on physical devices:
 - `npm run lint` ✅
 - `npm run test` ✅ (6 files, 19 tests)
 - `npm run build` ✅
-- `cargo check` ✅ using `/private/tmp/moveparty-batch3-target`
+- `cargo check` ✅ using `/private/tmp/movieparty-batch3-target`
 - focused Ghost/Privacy runtime tests ✅
 
 ## External Verification Pending
@@ -411,11 +411,11 @@ on physical devices:
   now reports `NOT_INSTALLED`, `SIGNED_OUT`, `CONNECTED`, or `UNAVAILABLE`,
   with a usable Tailscale IPv4 and device name only for a healthy connection.
   CLI calls use structured arguments and a bounded timeout; loopback remains
-  available only under the explicit `MOVE_PARTY_DEV_LOOPBACK=1` flag.
+  available only under the explicit `MOVIE_PARTY_DEV_LOOPBACK=1` flag.
 - **First-run setup gate**: Home/Create/Join remain unchanged underneath a
   small prerequisite surface. It opens official Tailscale install/help pages
   or asks the locally installed Tailscale CLI to start its own sign-in flow;
-  Move Party never collects credentials or tailnet administration access.
+  Movie Party never collects credentials or tailnet administration access.
 - **Host precondition**: production room creation now rejects missing,
   signed-out, unavailable, or address-less Tailscale before starting QUIC.
   A healthy host can still create a room without any guest preconnection.
@@ -495,7 +495,7 @@ on physical devices:
 ## Implemented in this pass
 
 - **Windows invite support**: configured the official Tauri deep-link plugin
-  for `moveparty://`; the official single-instance companion forwards a second
+  for `movieparty://`; the official single-instance companion forwards a second
   invite activation to the running application. Cold starts continue through
   the existing pending-link buffer and Join Party parser.
 - **Provider source separation**: Create Party now submits distinct Local,
@@ -611,7 +611,7 @@ on physical devices:
 - `npm run test` ✅
 - `npm run build` ✅
 - `npm run tauri dev` ✅ launched after local-server permission approval.
-- `cargo test -p move-party --lib dev_loopback_mode_selects_correct_bind_addr` ✅
+- `cargo test -p movie-party --lib dev_loopback_mode_selects_correct_bind_addr` ✅
   with permission to bind local QUIC endpoints.
 
 ## External Verification Pending
@@ -1976,7 +1976,7 @@ Implemented locally on 2026-08-15:
 - Added redaction for common token, cookie, password, and authorization fields.
 - Added beta event records for trusted friend install, bug reports, diagnostic bundle export, and real movie nights.
 - Added beta readiness gate that remains externally pending until a trusted friend install, diagnostic bundle export, and real movie night are recorded.
-- Added local diagnostic JSON export helper with stable Move Party metadata, beta events, redacted logs, and destination validation.
+- Added local diagnostic JSON export helper with stable Movie Party metadata, beta events, redacted logs, and destination validation.
 - Real installer creation, trusted-device install, real diagnostic export, and real movie-night usage remain externally pending.
 ```
 
@@ -2809,7 +2809,7 @@ until every mandatory gate for that phase passes.
 You now have the equivalent of:
 
 ```text
-Move Party/
+Movie Party/
 │
 ├── MASTER_PRD.md
 ├── AGENTS.md
@@ -3046,7 +3046,7 @@ Verification:
 - **Shared env-var lock** (`loopback_env_lock`): added a module-level static
   mutex to serialize the pre-existing `dev_loopback_mode_selects_correct_bind_addr`
   test and the new `create_local_party_aborts_previous_host_session` test,
-  which both manipulate the process-global `MOVE_PARTY_DEV_LOOPBACK` env var.
+  which both manipulate the process-global `MOVIE_PARTY_DEV_LOOPBACK` env var.
 
 ### Fixes considered and reverted
 

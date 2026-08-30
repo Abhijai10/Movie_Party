@@ -18,7 +18,7 @@ pub mod storage;
 pub mod sync;
 pub mod telemetry;
 
-pub const APP_NAME: &str = "Move Party";
+pub const APP_NAME: &str = "Movie Party";
 pub const PROTOCOL_MAJOR: u16 = 1;
 pub const PROTOCOL_MINOR: u16 = 0;
 
@@ -71,21 +71,21 @@ pub fn run() {
 
             let pending_links = app.state::<PendingDeepLinks>();
             for arg in std::env::args().skip(1) {
-                if is_move_party_deep_link(&arg) {
+                if is_movie_party_deep_link(&arg) {
                     pending_links.push(arg.trim().to_string());
                 }
             }
 
             #[cfg(windows)]
             if let Err(error) = app.deep_link().register_all() {
-                tracing::warn!(error = %error, "Move Party could not register the Windows invite protocol");
+                tracing::warn!(error = %error, "Movie Party could not register the Windows invite protocol");
             }
 
             let app_handle = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
                 for url in event.urls() {
                     let value = url.to_string();
-                    if is_move_party_deep_link(&value) {
+                    if is_movie_party_deep_link(&value) {
                         let _ = app_handle.emit(DEEP_LINK_OPENED_EVENT, value);
                     }
                 }
@@ -146,17 +146,17 @@ pub fn run() {
     match result {
         Ok(app) => app.run(|_, _| {}),
         Err(error) => {
-            eprintln!("Move Party failed to start: {error}");
+            eprintln!("Movie Party failed to start: {error}");
             std::process::exit(1);
         }
     }
 }
 
-fn is_move_party_deep_link(value: &str) -> bool {
+fn is_movie_party_deep_link(value: &str) -> bool {
     value
         .trim_start()
         .to_ascii_lowercase()
-        .starts_with("moveparty://")
+        .starts_with("movieparty://")
 }
 
 #[tauri::command]
@@ -479,7 +479,7 @@ fn launch_provider_chrome(
 
     let chrome_path = find_chrome(&default_chrome_candidates())
         .map_err(|e| e.to_string())?;
-    let profiles_root = std::env::temp_dir().join("MovePartyProfiles");
+    let profiles_root = std::env::temp_dir().join("MoviePartyProfiles");
     let cdp_port = allocate_local_cdp_port().map_err(|e| e.to_string())?;
     let plan = build_launch_plan(chrome_path, &profiles_root, provider_id, cdp_port, url)
         .map_err(|e| e.to_string())?;
@@ -579,7 +579,7 @@ fn launch_generic_link(
         Ok(path) => path,
         Err(error) => return Ok(runtime.generic_link_unavailable(url, error.to_string())),
     };
-    let profiles_root = std::env::temp_dir().join("MovePartyProfiles");
+    let profiles_root = std::env::temp_dir().join("MoviePartyProfiles");
     let cdp_port = match allocate_local_cdp_port() {
         Ok(port) => port,
         Err(error) => return Ok(runtime.generic_link_unavailable(url, error.to_string())),

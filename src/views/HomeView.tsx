@@ -4,6 +4,7 @@ import { CinemaButton } from "../components/mp/CinemaButton";
 import { MovieReelHero } from "../components/mp/MovieReelHero";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
+import logoMark from "../assets/logo_mark.png";
 
 type HomeViewProps = {
   onCreate: () => void;
@@ -17,16 +18,13 @@ export function HomeView({ onCreate, onJoin }: HomeViewProps) {
 
       <header className="relative z-10 flex items-center justify-between px-12 pt-8">
         <div className="flex items-center gap-3">
-          <div
-            className="relative w-9 h-9 rounded-full flex items-center justify-center"
-            style={{
-              background: "linear-gradient(135deg, #6B46C1, #2E1B5A)",
-              boxShadow: "0 0 24px rgba(159,122,234,0.4)",
-            }}
-          >
-            <div className="w-3 h-3 rounded-full bg-white/95" />
-          </div>
-          <span className="font-serif-display text-xl tracking-tight text-white">Move Party</span>
+          <img
+            src={logoMark}
+            alt="Movie Party logo"
+            className="w-9 h-9 rounded-full object-cover"
+            style={{ boxShadow: "0 0 24px rgba(159,122,234,0.4)" }}
+          />
+          <span className="font-serif-display text-xl tracking-tight text-white">Movie Party</span>
         </div>
         <div className="hidden md:flex items-center gap-8 text-[11px] tracking-[0.28em] uppercase text-white/50">
           <span>Cinema</span>

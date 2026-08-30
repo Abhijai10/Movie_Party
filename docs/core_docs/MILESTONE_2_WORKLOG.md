@@ -81,7 +81,7 @@ Last updated:
 - **Reason:** Real `tailscale status --json` on macOS emits `\"TailscaleIPs\": null` for unauthenticated/offline nodes, which crashed `create_local_party` with `MP-NET-001 Tailscale output could not be parsed: invalid type: null, expected a sequence`.
 
 ### 2026-08-18 — M2 tests serialize the DEV_LOOPBACK env var
-- **Decision:** All access to the process-global `MOVE_PARTY_DEV_LOOPBACK` var is serialized with a shared `tokio::sync::Mutex` (`ENV_LOCK`); `setup_host_guest` and `env_tests::dev_loopback_mode_selects_correct_bind_addr` both hold it while calling `create_local_party`.
+- **Decision:** All access to the process-global `MOVIE_PARTY_DEV_LOOPBACK` var is serialized with a shared `tokio::sync::Mutex` (`ENV_LOCK`); `setup_host_guest` and `env_tests::dev_loopback_mode_selects_correct_bind_addr` both hold it while calling `create_local_party`.
 - **Reason:** Tests run in parallel and `create_local_party` reads the var; the env canary (no-env → Tailscale error) raced against tests setting `=1`, making it fail intermittently.
 
 ### 2026-08-18 — Guest-side assertions poll (async convergence)

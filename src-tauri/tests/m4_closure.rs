@@ -7,8 +7,8 @@ use std::sync::OnceLock;
 
 use tokio::sync::Mutex;
 
-use move_party_lib::app_runtime::AppRuntime;
-use move_party_lib::storage::sqlite::MovePartyDb;
+use movie_party_lib::app_runtime::AppRuntime;
+use movie_party_lib::storage::sqlite::MoviePartyDb;
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 fn env_lock() -> &'static Mutex<()> {
@@ -18,14 +18,14 @@ fn env_lock() -> &'static Mutex<()> {
 fn temp_db_path(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("m4c_{tag}_{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&dir).expect("temp dir");
-    dir.join("move_party.db")
+    dir.join("movie_party.db")
 }
 
 /// Runtime with a fake key store + fake notifier — tests never touch the
 /// real Keychain/Credential Manager or display OS notifications.
 fn test_runtime() -> AppRuntime {
     AppRuntime::new_with_key_store_for_test(std::sync::Arc::new(
-        move_party_lib::secure::FakeKeyStore::new(),
+        movie_party_lib::secure::FakeKeyStore::new(),
     ))
 }
 
@@ -40,8 +40,8 @@ fn appruntime_identity_restart_matches_exact_device_id() {
 
     // Both runtimes share the same OS-protected key store (as production
     // would with the real Keychain/Credential Manager).
-    let key_store: std::sync::Arc<dyn move_party_lib::secure::SecureKeyStore> =
-        std::sync::Arc::new(move_party_lib::secure::FakeKeyStore::new());
+    let key_store: std::sync::Arc<dyn movie_party_lib::secure::SecureKeyStore> =
+        std::sync::Arc::new(movie_party_lib::secure::FakeKeyStore::new());
 
     let device_id_a;
     let public_key_a;
@@ -78,12 +78,12 @@ fn appruntime_identity_restart_matches_exact_device_id() {
 
     // Exactly one identity row exists (never created a replacement), and it
     // only references the key by label — never by raw material.
-    let db = MovePartyDb::open(&db_path).expect("open");
+    let db = MoviePartyDb::open(&db_path).expect("open");
     let stored = db.get_identity().expect("get").expect("identity");
     assert_eq!(stored.device_id, device_id_b);
     assert!(stored
         .key_label
-        .starts_with("move-party-device-signing-key-"));
+        .starts_with("movie-party-device-signing-key-"));
 
     let _ = std::fs::remove_dir_all(db_path.parent().expect("parent"));
 }
@@ -104,7 +104,7 @@ fn appruntime_identity_is_created_exactly_once() {
     }
 
     assert_eq!(id1, id2, "init_db must never replace an existing identity");
-    let db = MovePartyDb::open(&db_path).expect("open");
+    let db = MoviePartyDb::open(&db_path).expect("open");
     assert_eq!(db.list_schedules().expect("schedules").len(), 0);
     assert!(db.get_identity().expect("get").is_some());
 
@@ -117,8 +117,8 @@ fn appruntime_identity_rotates_coherently_when_key_missing() {
     let db_path = temp_db_path("identity_rotate");
 
     let first_id;
-    let first_key_store: std::sync::Arc<dyn move_party_lib::secure::SecureKeyStore> =
-        std::sync::Arc::new(move_party_lib::secure::FakeKeyStore::new());
+    let first_key_store: std::sync::Arc<dyn movie_party_lib::secure::SecureKeyStore> =
+        std::sync::Arc::new(movie_party_lib::secure::FakeKeyStore::new());
     {
         let runtime = AppRuntime::new_with_key_store_for_test(first_key_store.clone());
         runtime.init_db_at_path(&db_path);
@@ -129,8 +129,8 @@ fn appruntime_identity_rotates_coherently_when_key_missing() {
     // a fresh runtime on the same DB must perform an explicit coherent
     // rotation — new device id + new keypair — never reuse the old device
     // id with unrelated key material.
-    let empty_key_store: std::sync::Arc<dyn move_party_lib::secure::SecureKeyStore> =
-        std::sync::Arc::new(move_party_lib::secure::FakeKeyStore::new());
+    let empty_key_store: std::sync::Arc<dyn movie_party_lib::secure::SecureKeyStore> =
+        std::sync::Arc::new(movie_party_lib::secure::FakeKeyStore::new());
     let rotated_id;
     {
         let runtime = AppRuntime::new_with_key_store_for_test(empty_key_store.clone());
@@ -142,7 +142,7 @@ fn appruntime_identity_rotates_coherently_when_key_missing() {
         first_id, rotated_id,
         "lost private key must rotate to a coherent NEW device id"
     );
-    let db = MovePartyDb::open(&db_path).expect("open");
+    let db = MoviePartyDb::open(&db_path).expect("open");
     let stored = db.get_identity().expect("get").expect("identity");
     assert_eq!(stored.device_id, rotated_id, "rotation must be persisted");
 
@@ -174,7 +174,7 @@ fn appruntime_identity_store_read_failure_is_surfaced_not_rotated() {
 /// Key store whose reads always fail.
 #[derive(Debug)]
 struct ErroringKeyStore;
-impl move_party_lib::secure::SecureKeyStore for ErroringKeyStore {
+impl movie_party_lib::secure::SecureKeyStore for ErroringKeyStore {
     fn store_seed(&self, _label: &str, _seed: &[u8; 32]) -> Result<(), String> {
         Err("MP-SECURE-001 injected store failure".to_string())
     }
@@ -317,7 +317,7 @@ async fn scheduler_due_schedule_executes_once() {
     runtime.init_db_at_path(&db_path);
 
     let fake_executor =
-        std::sync::Arc::new(move_party_lib::scheduling::preload::FakePreloadExecutor::default());
+        std::sync::Arc::new(movie_party_lib::scheduling::preload::FakePreloadExecutor::default());
     runtime.install_preload_executor_for_test(fake_executor.clone());
 
     let now_ms = now_utc_ms();
@@ -361,8 +361,8 @@ async fn scheduler_waiting_for_peer_persists_and_retries() {
     runtime.init_db_at_path(&db_path);
 
     let fake_executor = std::sync::Arc::new(
-        move_party_lib::scheduling::preload::FakePreloadExecutor::with_outcome(
-            move_party_lib::scheduling::preload::PreloadOutcome::WaitingForPrerequisites,
+        movie_party_lib::scheduling::preload::FakePreloadExecutor::with_outcome(
+            movie_party_lib::scheduling::preload::PreloadOutcome::WaitingForPrerequisites,
         ),
     );
     runtime.install_preload_executor_for_test(fake_executor.clone());
@@ -386,7 +386,7 @@ async fn scheduler_waiting_for_peer_persists_and_retries() {
     );
 
     // Prerequisites now available → retry succeeds and starts real preload.
-    fake_executor.set_outcome(move_party_lib::scheduling::preload::PreloadOutcome::Started);
+    fake_executor.set_outcome(movie_party_lib::scheduling::preload::PreloadOutcome::Started);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let list = runtime.list_schedules().expect("list2");
     let s = list.iter().find(|s| s.schedule_id == id).expect("schedule");
@@ -408,7 +408,7 @@ async fn scheduler_executor_failure_is_recoverable() {
     runtime.init_db_at_path(&db_path);
 
     runtime.install_preload_executor_for_test(std::sync::Arc::new(
-        move_party_lib::scheduling::preload::FailingPreloadExecutor,
+        movie_party_lib::scheduling::preload::FailingPreloadExecutor,
     ));
 
     let now_ms = now_utc_ms();
@@ -464,7 +464,7 @@ async fn production_startup_executes_overdue_schedule_exactly_once() {
     let runtime = test_runtime();
     runtime.init_db_at_path(&db_path);
     let fake_executor =
-        std::sync::Arc::new(move_party_lib::scheduling::preload::FakePreloadExecutor::default());
+        std::sync::Arc::new(movie_party_lib::scheduling::preload::FakePreloadExecutor::default());
     runtime.install_preload_executor_for_test(fake_executor.clone());
     runtime.check_overdue_schedules();
     runtime.spawn_scheduler_worker_for_test(now_utc_ms(), 60);
@@ -580,7 +580,7 @@ fn scheduler_notifications_use_mock_and_recover_on_failure() {
     let _guard = env_lock().lock();
     let db_path = temp_db_path("notify");
 
-    let runtime = AppRuntime::new_with_notifier(move_party_lib::notifications::FakeNotifier::new());
+    let runtime = AppRuntime::new_with_notifier(movie_party_lib::notifications::FakeNotifier::new());
     runtime.init_db_at_path(&db_path);
     let now_ms = now_utc_ms();
     let id = runtime
@@ -599,7 +599,7 @@ fn scheduler_notifications_use_mock_and_recover_on_failure() {
 
     // A failing notifier must not crash the scheduler or the runtime.
     let failing_runtime =
-        AppRuntime::new_with_notifier(move_party_lib::notifications::FailingNotifier);
+        AppRuntime::new_with_notifier(movie_party_lib::notifications::FailingNotifier);
     failing_runtime.init_db_at_path(&db_path);
     let _ = failing_runtime.check_overdue_schedules_with_notifier();
     assert_eq!(
@@ -633,7 +633,7 @@ fn retention_runtime_keep_remove_save_as_preserve_host_source() {
     let cache_dir = root.join(media_id);
     std::fs::create_dir_all(&cache_dir).expect("cache dir");
     std::fs::write(
-        cache_dir.join(move_party_lib::media::cache::CACHE_DATA_FILE),
+        cache_dir.join(movie_party_lib::media::cache::CACHE_DATA_FILE),
         b"cached movie bytes",
     )
     .expect("cached data");
@@ -653,7 +653,7 @@ fn retention_runtime_keep_remove_save_as_preserve_host_source() {
     runtime.retention_remove(media_id).expect("remove");
     assert!(
         !cache_dir.exists(),
-        "Remove must delete only Move Party cache"
+        "Remove must delete only Movie Party cache"
     );
     assert!(
         host_source.exists(),
@@ -667,7 +667,7 @@ fn retention_runtime_keep_remove_save_as_preserve_host_source() {
     // Save As: cache copied to destination, host source untouched.
     std::fs::create_dir_all(&cache_dir).expect("cache dir 2");
     std::fs::write(
-        cache_dir.join(move_party_lib::media::cache::CACHE_DATA_FILE),
+        cache_dir.join(movie_party_lib::media::cache::CACHE_DATA_FILE),
         b"cached movie bytes",
     )
     .expect("cached data 2");

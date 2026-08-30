@@ -14,7 +14,7 @@ use std::sync::Mutex;
 
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 
-pub const DEFAULT_KEY_LABEL: &str = "move-party-device-signing-key";
+pub const DEFAULT_KEY_LABEL: &str = "movie-party-device-signing-key";
 
 pub trait SecureKeyStore: Send + Sync + std::fmt::Debug {
     /// Persist a 32-byte secret under `label`.
@@ -89,7 +89,7 @@ fn native_keychain_store(label: &str, seed: &[u8; 32]) -> Result<(), String> {
         .args([
             "add-generic-password",
             "-a",
-            "Move Party",
+            "Movie Party",
             "-s",
             label,
             "-w",
@@ -112,7 +112,7 @@ fn native_keychain_load(label: &str) -> Result<Option<[u8; 32]>, String> {
         .args([
             "find-generic-password",
             "-a",
-            "Move Party",
+            "Movie Party",
             "-s",
             label,
             "-w",
@@ -141,7 +141,7 @@ fn native_keychain_load(label: &str) -> Result<Option<[u8; 32]>, String> {
 #[cfg(target_os = "macos")]
 fn native_keychain_delete(label: &str) -> Result<(), String> {
     let status = std::process::Command::new("security")
-        .args(["delete-generic-password", "-a", "Move Party", "-s", label])
+        .args(["delete-generic-password", "-a", "Movie Party", "-s", label])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
@@ -161,9 +161,9 @@ fn native_credential_manager_store(label: &str, seed: &[u8; 32]) -> Result<(), S
         "Add-Type -AssemblyName System.Runtime.WindowsRuntime; \
          [Windows.Security.Credentials.PasswordVault, Windows.Security.Credentials, ContentType=WindowsRuntime] | Out-Null; \
          $vault = New-Object Windows.Security.Credentials.PasswordVault; \
-         $cred = $vault.RetrieveAll() | Where-Object {{ $_.Resource -eq 'Move Party' -and $_.UserName -eq '{0}' }}; \
+         $cred = $vault.RetrieveAll() | Where-Object {{ $_.Resource -eq 'Movie Party' -and $_.UserName -eq '{0}' }}; \
          if ($cred) {{ $vault.Remove($cred[0]) }}; \
-         $new = New-Object Windows.Security.Credentials.PasswordCredential('Move Party', '{0}', '{1}'); \
+         $new = New-Object Windows.Security.Credentials.PasswordCredential('Movie Party', '{0}', '{1}'); \
          $vault.Add($new)",
         label.replace('\'', "''"),
         encoded,
@@ -186,7 +186,7 @@ fn native_credential_manager_load(label: &str) -> Result<Option<[u8; 32]>, Strin
         "Add-Type -AssemblyName System.Runtime.WindowsRuntime; \
          [Windows.Security.Credentials.PasswordVault, Windows.Security.Credentials, ContentType=WindowsRuntime] | Out-Null; \
          $vault = New-Object Windows.Security.Credentials.PasswordVault; \
-         try {{ $cred = $vault.RetrieveAll() | Where-Object {{ $_.Resource -eq 'Move Party' -and $_.UserName -eq '{0}' }} }} catch {{ }}; \
+         try {{ $cred = $vault.RetrieveAll() | Where-Object {{ $_.Resource -eq 'Movie Party' -and $_.UserName -eq '{0}' }} }} catch {{ }}; \
          if ($cred -and $cred.Count -gt 0) {{ $cred[0].Password }} else {{ '' }}",
         label.replace('\'', "''"),
     );
@@ -218,7 +218,7 @@ fn native_credential_manager_delete(label: &str) -> Result<(), String> {
         "Add-Type -AssemblyName System.Runtime.WindowsRuntime; \
          [Windows.Security.Credentials.PasswordVault, Windows.Security.Credentials, ContentType=WindowsRuntime] | Out-Null; \
          $vault = New-Object Windows.Security.Credentials.PasswordVault; \
-         $cred = $vault.RetrieveAll() | Where-Object {{ $_.Resource -eq 'Move Party' -and $_.UserName -eq '{0}' }}; \
+         $cred = $vault.RetrieveAll() | Where-Object {{ $_.Resource -eq 'Movie Party' -and $_.UserName -eq '{0}' }}; \
          if ($cred) {{ $vault.Remove($cred[0]) }}",
         label.replace('\'', "''"),
     );

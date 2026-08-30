@@ -25,7 +25,7 @@ use crate::protocol::SequenceTracker;
 use crate::sync::clock::ClockSample;
 
 pub const QUIC_TRANSPORT_NAME: &str = "quic";
-pub const MOVE_PARTY_ALPN: &[&[u8]] = &[b"moveparty-v1"];
+pub const MOVIE_PARTY_ALPN: &[&[u8]] = &[b"movieparty-v1"];
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024; // 2 MB — large enough for control JSON
 const MAX_AUTH_NONCES: usize = 4_096;
 
@@ -1120,7 +1120,7 @@ fn configure_server() -> Result<(ServerConfig, CertificateDer<'static>), QuicErr
         .with_no_client_auth()
         .with_single_cert(vec![cert_der.clone()], priv_key.into())
         .map_err(|error| QuicError::Tls(error.to_string()))?;
-    crypto.alpn_protocols = MOVE_PARTY_ALPN.iter().map(|value| value.to_vec()).collect();
+    crypto.alpn_protocols = MOVIE_PARTY_ALPN.iter().map(|value| value.to_vec()).collect();
 
     let crypto =
         QuicServerConfig::try_from(crypto).map_err(|error| QuicError::Tls(error.to_string()))?;
@@ -1179,7 +1179,7 @@ fn make_client_endpoint(server_certificate_fingerprint: String) -> Result<Endpoi
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
-    crypto.alpn_protocols = MOVE_PARTY_ALPN.iter().map(|value| value.to_vec()).collect();
+    crypto.alpn_protocols = MOVIE_PARTY_ALPN.iter().map(|value| value.to_vec()).collect();
 
     let crypto =
         QuicClientConfig::try_from(crypto).map_err(|error| QuicError::Tls(error.to_string()))?;

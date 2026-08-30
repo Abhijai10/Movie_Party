@@ -1,4 +1,4 @@
-# Move Party Integration Status
+# Movie Party Integration Status
 
 Updated: 2026-08-21
 

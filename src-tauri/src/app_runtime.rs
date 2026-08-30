@@ -395,7 +395,7 @@ struct HostSession {
 struct AppRuntimeState {
     screen: String,
     credentials: Option<RoomCredentials>,
-    invite: Option<room::MovePartyInvite>,
+    invite: Option<room::MoviePartyInvite>,
     host_session: Option<HostSession>,
     client: Option<QuicClient>,
     room_state: RoomState,
@@ -502,8 +502,8 @@ struct AppRuntimeState {
     preload_wait_notified_at: HashMap<String, Instant>,
     // ── M4: Persistent storage ──────────────────────────────────────────
     /// SQLite database for identity, schedules, cache metadata, chat.
-    db: Option<Arc<crate::storage::sqlite::MovePartyDb>>,
-    /// Root directory for Move Party's own cache (guest Local Perfect data).
+    db: Option<Arc<crate::storage::sqlite::MoviePartyDb>>,
+    /// Root directory for Movie Party's own cache (guest Local Perfect data).
     cache_root: Option<PathBuf>,
     /// Background scheduler worker (M4.3). Owned so it can be aborted.
     scheduler_task: Option<tauri::async_runtime::JoinHandle<()>>,
@@ -736,7 +736,7 @@ impl AppRuntime {
 
     fn init_db_at(&self, db_path_override: Option<PathBuf>) {
         let db_path = db_path_override.unwrap_or_else(Self::default_db_path);
-        let db = match crate::storage::sqlite::MovePartyDb::open(&db_path) {
+        let db = match crate::storage::sqlite::MoviePartyDb::open(&db_path) {
             Ok(db) => db,
             Err(e) => {
                 self.lock().error = Some(format!("MP-STORE-001 failed to open database: {e}"));
@@ -764,7 +764,7 @@ impl AppRuntime {
     }
 
     fn key_label_for(device_id: &str) -> String {
-        format!("move-party-device-signing-key-{device_id}")
+        format!("movie-party-device-signing-key-{device_id}")
     }
 
     /// Restore an existing identity: private key from the OS-protected
@@ -774,7 +774,7 @@ impl AppRuntime {
     /// material.
     fn restore_identity(
         &self,
-        db: &crate::storage::sqlite::MovePartyDb,
+        db: &crate::storage::sqlite::MoviePartyDb,
         stored: &crate::storage::sqlite::StoredIdentity,
     ) {
         match self.inner.key_store.load_seed(&stored.key_label) {
@@ -804,7 +804,7 @@ impl AppRuntime {
     /// Create exactly one identity on first run: new keypair persisted to
     /// protected storage, metadata persisted to SQLite. Propagation of
     /// persistence failures is mandatory.
-    fn create_identity(&self, db: &crate::storage::sqlite::MovePartyDb, display_name: &str) {
+    fn create_identity(&self, db: &crate::storage::sqlite::MoviePartyDb, display_name: &str) {
         let identity = DeviceIdentity::new_ephemeral();
         let key_label = Self::key_label_for(&identity.device_id);
         if let Err(e) = self
@@ -824,7 +824,7 @@ impl AppRuntime {
     /// step fails, the error is surfaced and no half-state is claimed.
     fn rotate_identity(
         &self,
-        db: &crate::storage::sqlite::MovePartyDb,
+        db: &crate::storage::sqlite::MoviePartyDb,
         display_name: &str,
         old_key_label: Option<&str>,
     ) {
@@ -849,7 +849,7 @@ impl AppRuntime {
 
     fn persist_identity(
         &self,
-        db: &crate::storage::sqlite::MovePartyDb,
+        db: &crate::storage::sqlite::MoviePartyDb,
         identity: &DeviceIdentity,
         display_name: &str,
         key_label: &str,
@@ -1127,14 +1127,14 @@ impl AppRuntime {
         for schedule in &overdue {
             detected = true;
             let result = self.inner.notifier.notify(
-                "Move Party — Overdue Preload",
+                "Movie Party — Overdue Preload",
                 &format!(
                     "Scheduled session for '{}' needs preloading now.",
                     schedule.media_id
                 ),
             );
             if let Err(error) = result {
-                eprintln!("MoveParty: notification failed (recoverable): {error}");
+                eprintln!("MovieParty: notification failed (recoverable): {error}");
             }
             // IMPORTANT: this scan is notification-only. It must NEVER
             // change the schedule status — the scheduler worker is the only
@@ -1145,9 +1145,9 @@ impl AppRuntime {
     }
 
     fn default_db_path() -> PathBuf {
-        // Test / portable override: MOVE_PARTY_DB_PATH pins the database
+        // Test / portable override: MOVIE_PARTY_DB_PATH pins the database
         // location so AppRuntime restart tests can use a temp file.
-        if let Ok(path) = std::env::var("MOVE_PARTY_DB_PATH") {
+        if let Ok(path) = std::env::var("MOVIE_PARTY_DB_PATH") {
             if !path.is_empty() {
                 return PathBuf::from(path);
             }
@@ -1158,21 +1158,21 @@ impl AppRuntime {
             let base = std::env::var("HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("."));
-            base.join("Library/Application Support/Move Party/move_party.db")
+            base.join("Library/Application Support/Movie Party/movie_party.db")
         }
         #[cfg(target_os = "windows")]
         {
             let base = std::env::var("LOCALAPPDATA")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("."));
-            base.join("Move Party/move_party.db")
+            base.join("Movie Party/movie_party.db")
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let base = std::env::var("HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("."));
-            base.join(".local/share/move-party/move_party.db")
+            base.join(".local/share/movie-party/movie_party.db")
         }
     }
 
@@ -1188,7 +1188,7 @@ impl AppRuntime {
 
     /// Create a scheduled movie session. Validates the DTO, persists real
     /// room/media/guest/time data, and returns the generated schedule id.
-    /// Errors map to stable Move Party codes.
+    /// Errors map to stable Movie Party codes.
     pub fn create_schedule(
         &self,
         room_id: &str,
@@ -1366,14 +1366,14 @@ impl AppRuntime {
                 };
 
                 if let Err(error) = db.recover_claimed_schedules(now) {
-                    eprintln!("MoveParty: scheduler claimed-recovery failed: {error}");
+                    eprintln!("MovieParty: scheduler claimed-recovery failed: {error}");
                 }
 
                 // Execute every schedule whose preload deadline has arrived.
                 let due = match db.due_schedules(now) {
                     Ok(due) => due,
                     Err(error) => {
-                        eprintln!("MoveParty: scheduler due-scan failed (recoverable): {error}");
+                        eprintln!("MovieParty: scheduler due-scan failed (recoverable): {error}");
                         tokio::time::sleep(std::time::Duration::from_millis(poll_interval_ms))
                             .await;
                         continue;
@@ -1386,7 +1386,7 @@ impl AppRuntime {
                         Ok(true) => {}
                         Ok(false) => continue,
                         Err(error) => {
-                            eprintln!("MoveParty: scheduler claim failed: {error}");
+                            eprintln!("MovieParty: scheduler claim failed: {error}");
                             continue;
                         }
                     }
@@ -1402,14 +1402,14 @@ impl AppRuntime {
                             if let Err(error) =
                                 db.update_schedule_status(&schedule.schedule_id, "Transferring")
                             {
-                                eprintln!("MoveParty: scheduler status transition failed: {error}");
+                                eprintln!("MovieParty: scheduler status transition failed: {error}");
                                 continue;
                             }
                             inner
                                 .preload_executions
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             let _ = inner.notifier.notify(
-                                "Move Party — Preloading",
+                                "Movie Party — Preloading",
                                 &format!(
                                     "Preloading '{}' for the scheduled session.",
                                     schedule.media_id
@@ -1442,7 +1442,7 @@ impl AppRuntime {
                             };
                             if should_notify {
                                 let _ = inner.notifier.notify(
-                                    "Move Party — Preload Waiting",
+                                    "Movie Party — Preload Waiting",
                                     &format!(
                                         "Movie Party needs your device or partner online to prepare '{}'.",
                                         schedule.media_id
@@ -1453,7 +1453,7 @@ impl AppRuntime {
                         Err(error) => {
                             let _ =
                                 db.update_schedule_status(&schedule.schedule_id, "PreloadFailed");
-                            eprintln!("MoveParty: preload executor failed: {error}");
+                            eprintln!("MovieParty: preload executor failed: {error}");
                         }
                     }
                 }
@@ -1567,7 +1567,7 @@ impl AppRuntime {
             .map_err(|e| format!("MP-STORE-001 {e}"))
     }
 
-    /// Retention "Keep": retain Move Party's cache for this media.
+    /// Retention "Keep": retain Movie Party's cache for this media.
     pub fn retention_keep(&self, media_id: &str) -> Result<(), String> {
         let db = self
             .lock()
@@ -1578,7 +1578,7 @@ impl AppRuntime {
             .map_err(|e| format!("MP-STORE-001 {e}"))
     }
 
-    /// Retention "Remove": delete only Move Party's cache directory and the
+    /// Retention "Remove": delete only Movie Party's cache directory and the
     /// matching cache metadata. Never touches the host's original source.
     pub fn retention_remove(&self, media_id: &str) -> Result<(), String> {
         let db = self
@@ -1786,7 +1786,7 @@ impl AppRuntime {
             .unwrap_or_default()
             .as_millis() as i64;
 
-        let invite = room::MovePartyInvite {
+        let invite = room::MoviePartyInvite {
             v: room::INVITE_VERSION_V1,
             protocol_major: crate::PROTOCOL_MAJOR,
             protocol_minor: crate::PROTOCOL_MINOR,
@@ -4551,7 +4551,7 @@ impl AppRuntime {
             let mut state = self.lock();
             state
                 .cache_root
-                .get_or_insert_with(|| std::env::temp_dir().join("MovePartyCache"))
+                .get_or_insert_with(|| std::env::temp_dir().join("MoviePartyCache"))
                 .clone()
         };
         let mut cache = SparseCache::open(&cache_root, manifest.clone())
@@ -5056,13 +5056,13 @@ mod tests {
     use crate::call::{CallSignal, CallSignalType};
     use crate::network::quic::QuicError;
     use crate::resilience::{FailureEvent, RecoveryAction};
-    use crate::room::MovePartyInvite;
+    use crate::room::MoviePartyInvite;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Mutex;
 
     /// Serializes tests that read or write the process-global
-    /// `MOVE_PARTY_DEV_LOOPBACK` env var so Rust's parallel test runner never
+    /// `MOVIE_PARTY_DEV_LOOPBACK` env var so Rust's parallel test runner never
     /// races two loopback-bind scenarios against each other.
     static LOOPBACK_ENV_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
         std::sync::OnceLock::new();
@@ -5143,7 +5143,7 @@ mod tests {
         {
             let mut state = runtime.lock();
             state.local_participant.role = "Guest".to_string();
-            state.invite = Some(MovePartyInvite {
+            state.invite = Some(MoviePartyInvite {
                 v: 1,
                 protocol_major: 1,
                 protocol_minor: 0,
@@ -5206,7 +5206,7 @@ mod tests {
             let mut state = runtime.lock();
             state.guest_cache = Some(cache);
             state.local_participant.role = "Guest".to_string();
-            state.invite = Some(MovePartyInvite {
+            state.invite = Some(MoviePartyInvite {
                 v: 1,
                 protocol_major: 1,
                 protocol_minor: 0,
@@ -5663,10 +5663,10 @@ mod tests {
         }
 
         // --- unset: falls through to Tailscale path ---
-        std::env::remove_var("MOVE_PARTY_DEV_LOOPBACK");
+        std::env::remove_var("MOVIE_PARTY_DEV_LOOPBACK");
         let _g0 = ScopedEnv {
-            key: "MOVE_PARTY_DEV_LOOPBACK",
-            prev: std::env::var_os("MOVE_PARTY_DEV_LOOPBACK"),
+            key: "MOVIE_PARTY_DEV_LOOPBACK",
+            prev: std::env::var_os("MOVIE_PARTY_DEV_LOOPBACK"),
         };
         let r0 = AppRuntime::new();
         assert_not_dev_loopback(r0.create_local_party(None).await);
@@ -5675,10 +5675,10 @@ mod tests {
 
         // --- =0: same Tailscale path ---
         let _g1 = ScopedEnv {
-            key: "MOVE_PARTY_DEV_LOOPBACK",
-            prev: std::env::var_os("MOVE_PARTY_DEV_LOOPBACK"),
+            key: "MOVIE_PARTY_DEV_LOOPBACK",
+            prev: std::env::var_os("MOVIE_PARTY_DEV_LOOPBACK"),
         };
-        std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "0");
+        std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "0");
         let r1 = AppRuntime::new();
         assert_not_dev_loopback(r1.create_local_party(None).await);
         r1.leave_party();
@@ -5686,10 +5686,10 @@ mod tests {
 
         // --- =1: loopback path, QUIC server on 127.0.0.1 ---
         let _g2 = ScopedEnv {
-            key: "MOVE_PARTY_DEV_LOOPBACK",
-            prev: std::env::var_os("MOVE_PARTY_DEV_LOOPBACK"),
+            key: "MOVIE_PARTY_DEV_LOOPBACK",
+            prev: std::env::var_os("MOVIE_PARTY_DEV_LOOPBACK"),
         };
-        std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+        std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
         let r2 = AppRuntime::new();
         let snap = r2
             .create_local_party(None)
@@ -5707,7 +5707,7 @@ mod tests {
             .invite_code
             .as_ref()
             .unwrap()
-            .starts_with("moveparty://join/"));
+            .starts_with("movieparty://join/"));
         r2.leave_party();
 
         // --- =1 with local media: host room reaches Lobby with manifest ---
@@ -5738,7 +5738,7 @@ mod tests {
             if let Ok(snapshot) = result {
                 assert!(
                     !snapshot.network.path.starts_with("Listening on 127.0.0.1:"),
-                    "production mode must not use loopback bind without MOVE_PARTY_DEV_LOOPBACK=1"
+                    "production mode must not use loopback bind without MOVIE_PARTY_DEV_LOOPBACK=1"
                 );
             }
         }
@@ -5828,10 +5828,10 @@ mod tests {
             }
         }
         let _env = ScopedEnv(
-            "MOVE_PARTY_DEV_LOOPBACK",
-            std::env::var_os("MOVE_PARTY_DEV_LOOPBACK"),
+            "MOVIE_PARTY_DEV_LOOPBACK",
+            std::env::var_os("MOVIE_PARTY_DEV_LOOPBACK"),
         );
-        std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+        std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
         let runtime = AppRuntime::new();
         let first = runtime
             .create_local_party(None)
@@ -5877,10 +5877,10 @@ mod tests {
             }
         }
         let _env = ScopedEnv(
-            "MOVE_PARTY_DEV_LOOPBACK",
-            std::env::var_os("MOVE_PARTY_DEV_LOOPBACK"),
+            "MOVIE_PARTY_DEV_LOOPBACK",
+            std::env::var_os("MOVIE_PARTY_DEV_LOOPBACK"),
         );
-        std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+        std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
 
         let runtime = AppRuntime::new();
         let first = runtime

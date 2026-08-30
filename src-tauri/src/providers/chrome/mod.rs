@@ -271,7 +271,7 @@ impl CdpPageSession {
         stream
             .set_write_timeout(Some(Duration::from_secs(20)))
             .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
-        let key = STANDARD.encode(*b"MovePartyCdpKey!");
+        let key = STANDARD.encode(*b"MoviePartyCdpKey!");
         let request = format!(
             "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
         );
@@ -519,17 +519,17 @@ mod tests {
 
     #[test]
     fn builds_dedicated_provider_profile_path() {
-        let root = Path::new("/tmp/MovePartyProfiles");
+        let root = Path::new("/tmp/MoviePartyProfiles");
 
         assert_eq!(
             provider_profile_path(root, "netflix"),
-            Ok(PathBuf::from("/tmp/MovePartyProfiles/netflix"))
+            Ok(PathBuf::from("/tmp/MoviePartyProfiles/netflix"))
         );
     }
 
     #[test]
     fn rejects_profile_path_traversal() {
-        let root = Path::new("/tmp/MovePartyProfiles");
+        let root = Path::new("/tmp/MoviePartyProfiles");
 
         assert_eq!(
             provider_profile_path(root, "../netflix"),
@@ -545,7 +545,7 @@ mod tests {
     fn launch_args_use_non_default_profile_and_local_cdp() {
         let plan = build_launch_plan(
             PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-            Path::new("/tmp/MovePartyProfiles"),
+            Path::new("/tmp/MoviePartyProfiles"),
             "prime",
             DEFAULT_CDP_PORT,
             "https://www.primevideo.com/",
@@ -559,7 +559,7 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "--remote-debugging-port=9222"));
         assert!(args
             .iter()
-            .any(|arg| arg == "--user-data-dir=/tmp/MovePartyProfiles/prime"));
+            .any(|arg| arg == "--user-data-dir=/tmp/MoviePartyProfiles/prime"));
         assert!(!args
             .iter()
             .any(|arg| arg.to_ascii_lowercase().contains("cookie")));
@@ -569,7 +569,7 @@ mod tests {
     fn launch_plan_rejects_ephemeral_cdp_port_zero() {
         let plan = build_launch_plan(
             PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-            Path::new("/tmp/MovePartyProfiles"),
+            Path::new("/tmp/MoviePartyProfiles"),
             "youtube",
             0,
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
@@ -584,7 +584,7 @@ mod tests {
             PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
         let plan = build_launch_plan(
             executable.clone(),
-            Path::new("/tmp/MovePartyProfiles"),
+            Path::new("/tmp/MoviePartyProfiles"),
             "youtube",
             DEFAULT_CDP_PORT,
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
@@ -622,7 +622,7 @@ mod tests {
     #[ignore = "launches real Chrome and opens a localhost CDP session"]
     fn real_chrome_launches_and_evaluates_cdp() {
         let executable = find_chrome(&default_chrome_candidates()).expect("Chrome installed");
-        let root = std::env::temp_dir().join(format!("move-party-chrome-{}", uuid::Uuid::now_v7()));
+        let root = std::env::temp_dir().join(format!("movie-party-chrome-{}", uuid::Uuid::now_v7()));
         let plan = build_launch_plan(executable, &root, "youtube", 9333, "about:blank")
             .expect("launch plan");
         let session = launch_managed_chrome(plan).expect("launch Chrome");
@@ -632,12 +632,12 @@ mod tests {
         let mut page = session.connect_page().expect("page websocket");
         let result = page.evaluate("(() => 1 + 1)()").expect("evaluate");
         assert_eq!(result["result"]["value"].as_i64(), Some(2));
-        page.navigate("data:text/html,<title>Move Party CDP</title><video></video>")
+        page.navigate("data:text/html,<title>Movie Party CDP</title><video></video>")
             .expect("navigate");
         // Allow Chrome a moment to process the navigation
         std::thread::sleep(Duration::from_millis(500));
         let title = page.evaluate("document.title").expect("title evaluation");
-        assert_eq!(title["result"]["value"].as_str(), Some("Move Party CDP"));
+        assert_eq!(title["result"]["value"].as_str(), Some("Movie Party CDP"));
 
         session.close().expect("close");
         let _ = std::fs::remove_dir_all(root);
@@ -650,7 +650,7 @@ mod tests {
         assert!(is_youtube_url(url));
         let executable = find_chrome(&default_chrome_candidates()).expect("Chrome installed");
         let root =
-            std::env::temp_dir().join(format!("move-party-youtube-{}", uuid::Uuid::now_v7()));
+            std::env::temp_dir().join(format!("movie-party-youtube-{}", uuid::Uuid::now_v7()));
         let plan = build_launch_plan(executable, &root, "youtube", 9336, "about:blank")
             .expect("launch plan");
         let session = launch_managed_chrome(plan).expect("launch Chrome");

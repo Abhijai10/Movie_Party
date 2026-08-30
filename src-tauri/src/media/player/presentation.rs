@@ -39,7 +39,7 @@ impl PlayerPresentationStatus {
             resize_managed: false,
             ipc_managed: true,
             lifecycle_managed: true,
-            message: "Playback is controlled by Move Party, but video is not embedded in the app window yet."
+            message: "Playback is controlled by Movie Party, but video is not embedded in the app window yet."
                 .to_string(),
         }
     }
@@ -65,7 +65,7 @@ impl PlayerPresentationStatus {
             resize_managed: true,
             ipc_managed: true,
             lifecycle_managed: true,
-            message: "Playback is hosted inside the Move Party cinema surface.".to_string(),
+            message: "Playback is hosted inside the Movie Party cinema surface.".to_string(),
         }
     }
 }

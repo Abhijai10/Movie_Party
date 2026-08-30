@@ -44,9 +44,9 @@ No change. 22 M2 integration tests prove real QUIC sync.
 
 | Gate | Status | Evidence |
 |------|--------|----------|
-| COMPONENT EXISTS | YES | storage/sqlite.rs — MovePartyDb with 11 tests |
+| COMPONENT EXISTS | YES | storage/sqlite.rs — MoviePartyDb with 11 tests |
 | LIVE APPRUNTIME WIRED | YES | init_db() called on Tauri setup, DB opened, identity persisted |
-| PRODUCTION DB PATH | YES | Platform data dirs: ~/Library/Application Support/Move Party/ on macOS |
+| PRODUCTION DB PATH | YES | Platform data dirs: ~/Library/Application Support/Movie Party/ on macOS |
 | PRELOAD CALCULATION | YES | calculate_preload_start with locked PRD formula, tested |
 | OVERDUE DETECTION | YES | overdue_schedules query, tested |
 | CACHE RETENTION | YES | retention_keep + retention_remove, tested |
@@ -102,7 +102,7 @@ No change. 22 M2 integration tests prove real QUIC sync.
 | DISCONNECT WATCHER | YES | apply_disconnect → recovery_plan → last_recovery |
 | TRANSFER STALL WATCHER | YES | Background task polls every 5s, fires TransferInterrupted after 30s |
 | ERROR SURFACING | YES | last_recovery set, surfaced in snapshot |
-| PACKAGING | YES | `pnpm tauri build` produces Move Party.app |
+| PACKAGING | YES | `pnpm tauri build` produces Movie Party.app |
 | TELEMTRY SANITIZATION | YES | redact_log_line exists with tests |
 | CHROME CRASH WATCHER | NO | Not yet wired |
 | PLAYER FAILURE WATCHER | NO | Not yet wired |
@@ -121,7 +121,7 @@ npx tsc --noEmit                                      ✅ PASS
 pnpm lint                                             ✅ PASS (0 errors)
 pnpm test                                             ✅ 3/3 PASS
 pnpm build                                            ✅ PASS
-npx tauri build                                       ✅ Move Party.app
+npx tauri build                                       ✅ Movie Party.app
 real_chrome_launches_and_evaluates_cdp (ignored)      ✅ PASS (manually run)
 ```
 

@@ -25,7 +25,7 @@ import {
   type TailscaleReadiness,
 } from "../backend/appRuntime";
 import { useAppSnapshot } from "../hooks/useAppSnapshot";
-import { parseMovePartyInvite } from "../invites/deepLinks";
+import { parseMoviePartyInvite } from "../invites/deepLinks";
 import { CinemaView } from "../views/CinemaView";
 import { CreatePartyView, type CreatePartyRequest } from "../views/CreatePartyView";
 import { EndPartyConfirmView } from "../views/EndPartyConfirmView";
@@ -90,7 +90,7 @@ export function AppShell() {
 
   const openJoinWithInvite = useCallback(
     (rawInvite: string) => {
-      const parsed = parseMovePartyInvite(rawInvite);
+      const parsed = parseMoviePartyInvite(rawInvite);
       setDevScreen(null);
       setLocalScreen(null);
       setCallTileSession(createCallTileSessionState());
@@ -194,14 +194,14 @@ export function AppShell() {
         const partySnapshot = await createLocalParty(null);
         if (partySnapshot?.screen !== "LOBBY") {
           applySnapshot(partySnapshot);
-          setCreateError(partySnapshot?.error ?? "Move Party could not create the room.");
+          setCreateError(partySnapshot?.error ?? "Movie Party could not create the room.");
           return false;
         }
 
         const providerSnapshot = await launchProvider(request.providerId, source, request.mode);
         if (!providerSnapshot || providerSnapshot.error) {
           applySnapshot(partySnapshot);
-          setCreateError(providerSnapshot?.error ?? "Move Party could not prepare that provider.");
+          setCreateError(providerSnapshot?.error ?? "Movie Party could not prepare that provider.");
           return false;
         }
 
@@ -214,14 +214,14 @@ export function AppShell() {
         const partySnapshot = await createLocalParty(null);
         if (partySnapshot?.screen !== "LOBBY") {
           applySnapshot(partySnapshot);
-          setCreateError(partySnapshot?.error ?? "Move Party could not create the room.");
+          setCreateError(partySnapshot?.error ?? "Movie Party could not create the room.");
           return false;
         }
 
         const linkSnapshot = await launchGenericLink(source);
         if (!linkSnapshot || linkSnapshot.error) {
           applySnapshot(partySnapshot);
-          setCreateError(linkSnapshot?.error ?? "Move Party could not prepare that link.");
+          setCreateError(linkSnapshot?.error ?? "Movie Party could not prepare that link.");
           return false;
         }
 
@@ -233,7 +233,7 @@ export function AppShell() {
       const next = await createLocalParty(source);
       if (next?.screen !== "LOBBY") {
         applySnapshot(next);
-        setCreateError(next?.error ?? "Move Party could not create the room.");
+        setCreateError(next?.error ?? "Movie Party could not create the room.");
         return false;
       }
 
@@ -253,7 +253,7 @@ export function AppShell() {
     try {
       const next = await openProviderBrowser(providerId);
       if (!next || next.error) {
-        setCreateError(next?.error ?? "Move Party could not open that provider.");
+        setCreateError(next?.error ?? "Movie Party could not open that provider.");
         return false;
       }
       applySnapshot(next);
@@ -269,7 +269,7 @@ export function AppShell() {
     try {
       const next = await checkProviderStatus(providerId);
       if (!next || next.error) {
-        setCreateError(next?.error ?? "Move Party could not check that provider.");
+        setCreateError(next?.error ?? "Movie Party could not check that provider.");
         return false;
       }
       applySnapshot(next);
@@ -288,7 +288,7 @@ export function AppShell() {
     try {
       const next = await navigateProviderTitle(providerId, title);
       if (!next || next.error) {
-        setCreateError(next?.error ?? "Move Party could not open that title.");
+        setCreateError(next?.error ?? "Movie Party could not open that title.");
         return false;
       }
       applySnapshot(next);
@@ -310,7 +310,7 @@ export function AppShell() {
   };
 
   const submitJoin = async (inviteCode: string): Promise<boolean> => {
-    const parsed = parseMovePartyInvite(inviteCode);
+    const parsed = parseMoviePartyInvite(inviteCode);
     if (!parsed.ok) {
       setJoinError(parsed.message);
       setJoinFailureCode(null);
@@ -325,7 +325,7 @@ export function AppShell() {
       const next = await joinParty(parsed.invite);
       if (next?.screen !== "LOBBY") {
         applySnapshot(next);
-        setJoinError(next?.error ?? "Move Party could not join that invite.");
+        setJoinError(next?.error ?? "Movie Party could not join that invite.");
         return false;
       }
 
@@ -365,7 +365,7 @@ export function AppShell() {
 
   if (!snapshot) {
     return (
-      <LoadingState title="Starting Move Party" message="Connecting to the local app runtime." />
+      <LoadingState title="Starting Movie Party" message="Connecting to the local app runtime." />
     );
   }
 
@@ -471,7 +471,7 @@ export function AppShell() {
 }
 
 function createRoomErrorMessage(error: unknown): string {
-  const fallback = "Move Party could not create the room.";
+  const fallback = "Movie Party could not create the room.";
   if (error instanceof BackendCommandError) {
     if (error.code === "MP-NET-TS-001") return "Install Tailscale before creating a private cinema.";
     if (error.code === "MP-NET-TS-002") return "Sign in to Tailscale before creating a private cinema.";
@@ -495,10 +495,10 @@ function joinFailureMessage(error: unknown): string {
       if (error.code === "MP-NET-TS-005") {
         return "MP-NET-TS-005 host is not reachable through Tailscale";
       }
-      return "Move Party could not reach the host. Check that both devices are online and connected to Tailscale.";
+      return "Movie Party could not reach the host. Check that both devices are online and connected to Tailscale.";
     }
-    return "Move Party could not join that room right now.";
+    return "Movie Party could not join that room right now.";
   }
 
-  return "Move Party could not join that invite.";
+  return "Movie Party could not join that invite.";
 }

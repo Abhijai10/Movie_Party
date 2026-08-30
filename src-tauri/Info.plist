@@ -8,10 +8,10 @@
         <key>CFBundleTypeRole</key>
         <string>Viewer</string>
         <key>CFBundleURLName</key>
-        <string>app.moveparty.desktop.invite</string>
+        <string>app.movieparty.desktop.invite</string>
         <key>CFBundleURLSchemes</key>
         <array>
-          <string>moveparty</string>
+          <string>movieparty</string>
         </array>
       </dict>
     </array>

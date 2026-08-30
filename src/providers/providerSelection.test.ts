@@ -53,7 +53,7 @@ describe("provider source selection", () => {
 
   it("keeps generic links separate from provider selection", () => {
     expect(isGenericLink("https://example.com/movie.mp4")).toBe(true);
-    expect(isGenericLink("moveparty://join/room")).toBe(false);
+    expect(isGenericLink("movieparty://join/room")).toBe(false);
   });
 
   it("exposes provider home URLs", () => {

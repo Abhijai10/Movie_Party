@@ -10,6 +10,9 @@ build/
 # Tauri
 src-tauri/target/
 src-tauri/gen/
+# Bundled mpv runtime DLL for Windows (CI populates this, never commit 120MB DLL)
+src-tauri/mpv_runtime/*
+!src-tauri/mpv_runtime/.gitkeep
 
 # Environment
 .env

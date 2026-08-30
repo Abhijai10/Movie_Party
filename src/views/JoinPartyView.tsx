@@ -108,7 +108,7 @@ export function JoinPartyView({
 
           <div className="mt-10 max-w-md">
             <label className="text-[11px] tracking-[0.24em] uppercase text-white/45">
-              Move Party invite link
+              Movie Party invite link
             </label>
 
             <div className="mt-3 relative flex items-center rounded-xl border border-white/10 bg-white/[0.03] focus-within:border-[#9F7AEA]/50 transition">
@@ -118,7 +118,7 @@ export function JoinPartyView({
                 onChange={(e) => {
                   setCode(e.target.value);
                 }}
-                placeholder="moveparty://join/..."
+                placeholder="movieparty://join/..."
                 maxLength={4096}
                 className="min-w-0 flex-1 bg-transparent px-4 py-3.5 text-white text-sm tracking-[0.04em] font-mono-mp placeholder:text-white/25 focus:outline-none"
                 data-testid="join-code-input"

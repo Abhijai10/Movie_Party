@@ -9,7 +9,7 @@ export function EndPartyConfirmView({ onCancel, onConfirm }: EndPartyConfirmView
   return (
     <main className="centered-shell">
       <section className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="end-title">
-        <h1 id="end-title">End Move Party for everyone?</h1>
+        <h1 id="end-title">End Movie Party for everyone?</h1>
         <div className="modal-body">
           <p>
             The movie will stop for both participants and the cached file choice will be shown next.

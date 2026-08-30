@@ -309,6 +309,18 @@ impl MpvPlayer {
             candidates.push("mpv-2.dll".to_string());
             candidates.push(r"C:\Program Files\mpv\mpv-2.dll".to_string());
             candidates.push(r"C:\Program Files (x86)\mpv\mpv-2.dll".to_string());
+            // Tauri NSIS/MSI bundles resources into the same directory as the
+            // executable, so a self-contained installer ships mpv_runtime/mpv-2.dll
+            // next to Movie Party.exe and must be found without the user installing
+            // mpv separately.
+            if let Some(parent) = std::env::current_exe()
+                .ok()
+                .as_ref()
+                .and_then(|p| p.parent())
+            {
+                let bundled = parent.join("mpv_runtime").join("mpv-2.dll");
+                candidates.push(bundled.to_string_lossy().to_string());
+            }
         }
 
         #[cfg(target_os = "linux")]

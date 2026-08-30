@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { Film } from "lucide-react";
+import logoMark from "../../assets/logo_mark.png";
 
 type MovieTicketProps = {
   code?: string;
@@ -40,13 +40,13 @@ export function MovieTicket({ code = "— — — — — —" }: MovieTicketPro
         <div className="ticket-notch right" style={{ top: "62%" }} />
 
         <div className="relative h-[62%] p-6 flex flex-col">
-          <div className="flex items-center justify-between text-white/60">
-            <div className="flex items-center gap-2">
-              <Film className="w-4 h-4" strokeWidth={1.5} />
-              <span className="text-[10px] tracking-[0.28em] uppercase">Move Party</span>
+            <div className="flex items-center justify-between text-white/60">
+              <div className="flex items-center gap-2">
+                <img src={logoMark} alt="" className="w-5 h-5 rounded-full object-cover" />
+                <span className="text-[10px] tracking-[0.28em] uppercase">Movie Party</span>
+              </div>
+              <span className="text-[10px] tracking-[0.28em] uppercase">Admit One</span>
             </div>
-            <span className="text-[10px] tracking-[0.28em] uppercase">Admit One</span>
-          </div>
 
           <div className="flex-1 flex flex-col items-start justify-end pb-1">
             <span className="text-[10px] tracking-[0.28em] uppercase text-white/50 mb-3">

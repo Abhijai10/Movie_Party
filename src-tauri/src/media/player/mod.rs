@@ -152,6 +152,13 @@ fn candidate_libmpv_paths() -> Vec<PathBuf> {
     {
         paths.push(PathBuf::from("mpv-2.dll"));
         paths.push(PathBuf::from(r"C:\Program Files\mpv\mpv-2.dll"));
+        if let Some(parent) = std::env::current_exe()
+            .ok()
+            .as_ref()
+            .and_then(|p| p.parent())
+        {
+            paths.push(parent.join("mpv_runtime").join("mpv-2.dll"));
+        }
     }
 
     paths

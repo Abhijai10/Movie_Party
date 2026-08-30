@@ -168,7 +168,7 @@ fn host_from_url(url: &str) -> Option<&str> {
 
 /// Official landing page opened in the managed provider browser before any
 /// Movie Party navigation. This is where the user authenticates on the
-/// provider's own page; Move Party never collects provider credentials.
+/// provider's own page; Movie Party never collects provider credentials.
 pub fn provider_home_url(provider: ProviderId) -> &'static str {
     match provider {
         ProviderId::YouTube => "https://www.youtube.com/",
@@ -505,7 +505,7 @@ mod tests {
     fn generic_links_require_an_http_url_with_a_host() {
         assert!(generic_link_accepts_url("https://example.com/movie.mp4"));
         assert!(generic_link_accepts_url("http://media.example/movie.m3u8"));
-        assert!(!generic_link_accepts_url("moveparty://join/room"));
+        assert!(!generic_link_accepts_url("movieparty://join/room"));
         assert!(!generic_link_accepts_url("not-a-url"));
     }
 

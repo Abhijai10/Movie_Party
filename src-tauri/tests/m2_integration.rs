@@ -3,11 +3,11 @@
 // All use real loopback QUIC and real AppRuntime paths.
 // ──────────────────────────────────────────────────────────────────────────────
 
-use move_party_lib::app_runtime::AppRuntime;
+use movie_party_lib::app_runtime::AppRuntime;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-/// Serializes all access to the process-global `MOVE_PARTY_DEV_LOOPBACK` env
+/// Serializes all access to the process-global `MOVIE_PARTY_DEV_LOOPBACK` env
 /// var. Tests run in parallel (tokio multi-thread), and `create_local_party`
 /// reads the var, so the env_tests module and every `setup_host_guest` must
 /// hold this lock while touching the var or calling `create_local_party`.
@@ -29,8 +29,8 @@ fn write_temp_media(path: &std::path::PathBuf) {
 fn poll_host(
     host: &AppRuntime,
     deadline: std::time::Duration,
-    mut predicate: impl FnMut(&move_party_lib::app_runtime::AppSnapshot) -> bool,
-) -> move_party_lib::app_runtime::AppSnapshot {
+    mut predicate: impl FnMut(&movie_party_lib::app_runtime::AppSnapshot) -> bool,
+) -> movie_party_lib::app_runtime::AppSnapshot {
     let start = std::time::Instant::now();
     loop {
         let snap = host.snapshot();
@@ -49,8 +49,8 @@ fn poll_host(
 fn poll_guest(
     guest: &AppRuntime,
     deadline: std::time::Duration,
-    mut predicate: impl FnMut(&move_party_lib::app_runtime::AppSnapshot) -> bool,
-) -> move_party_lib::app_runtime::AppSnapshot {
+    mut predicate: impl FnMut(&movie_party_lib::app_runtime::AppSnapshot) -> bool,
+) -> movie_party_lib::app_runtime::AppSnapshot {
     let start = std::time::Instant::now();
     loop {
         let snap = guest.snapshot();
@@ -67,7 +67,7 @@ fn poll_guest(
 /// Set up host + guest on loopback QUIC. Returns (host, guest, invite_code).
 async fn setup_host_guest() -> (AppRuntime, AppRuntime, String) {
     let _env_guard = env_lock().lock().await;
-    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+    std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
 
     let host = AppRuntime::new();
     let guest = AppRuntime::new();
@@ -81,7 +81,7 @@ async fn setup_host_guest() -> (AppRuntime, AppRuntime, String) {
         .expect("host create_local_party");
 
     let invite = host_snap.room.invite_code.clone().expect("invite code");
-    assert!(invite.starts_with("moveparty://join/"));
+    assert!(invite.starts_with("movieparty://join/"));
 
     guest
         .join_party(invite.clone())
@@ -878,7 +878,7 @@ async fn test_t_seek_waits_for_guest_and_resumes_together() {
 #[cfg(test)]
 mod env_tests {
     use super::*;
-    use move_party_lib::app_runtime::AppRuntime;
+    use movie_party_lib::app_runtime::AppRuntime;
 
     struct ScopedEnv {
         key: &'static str,
@@ -903,8 +903,8 @@ mod env_tests {
     async fn dev_loopback_mode_selects_correct_bind_addr() {
         let _env_guard = env_lock().lock().await;
         // No env var → Tailscale path (err expected locally)
-        let _g0 = scoped("MOVE_PARTY_DEV_LOOPBACK", "");
-        std::env::remove_var("MOVE_PARTY_DEV_LOOPBACK");
+        let _g0 = scoped("MOVIE_PARTY_DEV_LOOPBACK", "");
+        std::env::remove_var("MOVIE_PARTY_DEV_LOOPBACK");
         let r0 = AppRuntime::new();
         assert!(
             r0.create_local_party(None).await.is_err(),
@@ -913,7 +913,7 @@ mod env_tests {
         drop(_g0);
 
         // 0 → Tailscale (error locally)
-        let _g1 = scoped("MOVE_PARTY_DEV_LOOPBACK", "0");
+        let _g1 = scoped("MOVIE_PARTY_DEV_LOOPBACK", "0");
         let r1 = AppRuntime::new();
         assert!(
             r1.create_local_party(None).await.is_err(),
@@ -922,7 +922,7 @@ mod env_tests {
         drop(_g1);
 
         // 1 → loopback
-        let _g2 = scoped("MOVE_PARTY_DEV_LOOPBACK", "1");
+        let _g2 = scoped("MOVIE_PARTY_DEV_LOOPBACK", "1");
         let r2 = AppRuntime::new();
         let snap = r2
             .create_local_party(None)
@@ -940,7 +940,7 @@ mod env_tests {
             .invite_code
             .as_ref()
             .unwrap()
-            .starts_with("moveparty://join/"));
+            .starts_with("movieparty://join/"));
         r2.leave_party();
     }
 }
@@ -950,12 +950,12 @@ mod env_tests {
 // authenticated QUIC room transport and arrive at the peer.
 // ──────────────────────────────────────────────────────────────────────────────
 
-use move_party_lib::call::{CallSignal, CallSignalType};
+use movie_party_lib::call::{CallSignal, CallSignalType};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn m5_call_signal_offer_arrives_at_guest() {
     let _env_guard = env_lock().lock().await;
-    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+    std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
 
     let host = AppRuntime::new();
     let guest = AppRuntime::new();
@@ -988,7 +988,7 @@ async fn m5_call_signal_offer_arrives_at_guest() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn m5_call_signal_answer_arrives_at_host() {
     let _env_guard = env_lock().lock().await;
-    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+    std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
 
     let host = AppRuntime::new();
     let guest = AppRuntime::new();
@@ -1022,7 +1022,7 @@ async fn m5_call_signal_answer_arrives_at_host() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn m5_call_signal_ice_arrives_bidirectional() {
     let _env_guard = env_lock().lock().await;
-    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+    std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
 
     let host = AppRuntime::new();
     let guest = AppRuntime::new();
@@ -1073,7 +1073,7 @@ async fn m5_call_signal_ice_arrives_bidirectional() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_w_guest_joins_second_room_cleanly_from_running_app() {
     let _env_guard = env_lock().lock().await;
-    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+    std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
 
     let host_a = AppRuntime::new();
     let host_b = AppRuntime::new();

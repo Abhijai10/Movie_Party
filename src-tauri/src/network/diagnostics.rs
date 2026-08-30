@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::{telemetry::beta, APP_NAME, PROTOCOL_MAJOR, PROTOCOL_MINOR};
 
 pub const UNKNOWN_PATH: &str = "UNKNOWN";
-pub const DIAGNOSTIC_BUNDLE_FILE_EXTENSION: &str = "move-party-diagnostics.json";
+pub const DIAGNOSTIC_BUNDLE_FILE_EXTENSION: &str = "movie-party-diagnostics.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DiagnosticExport {
@@ -156,11 +156,11 @@ mod tests {
 
     #[test]
     fn writes_diagnostic_bundle_as_json_file() {
-        let destination = temp_json_path("move-party-diagnostics");
+        let destination = temp_json_path("movie-party-diagnostics");
         let written = export_diagnostic_bundle(&request(destination.clone())).expect("write");
 
         let contents = fs::read_to_string(&written).expect("read");
-        assert!(contents.contains("\"app_name\": \"Move Party\""));
+        assert!(contents.contains("\"app_name\": \"Movie Party\""));
         assert!(contents.contains("[REDACTED]"));
         assert!(!contents.contains("token=secret"));
 
