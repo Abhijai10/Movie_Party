@@ -51,6 +51,20 @@ export type TransferProgress = {
 
 export type ProviderMode = "PROVIDER_SYNC" | "PROVIDER_SHARED";
 
+export type ProviderReadiness =
+  | "NOT_STARTED"
+  | "LAUNCHING"
+  | "LOGIN_REQUIRED"
+  | "READY"
+  | "NAVIGATING"
+  | "PLAYBACK_READY"
+  | "UNAVAILABLE"
+  | "ERROR";
+
+export type ProviderSupportLevel = "SUPPORTED" | "PARTIAL" | "UNAVAILABLE";
+
+export type ProviderTitleResolution = "DIRECT_URL" | "PROVIDER_SEARCH";
+
 export type TailscaleState = "NOT_INSTALLED" | "SIGNED_OUT" | "CONNECTED" | "UNAVAILABLE";
 
 export type TailscaleReadiness = {
@@ -64,6 +78,8 @@ export type TailscaleReadiness = {
 export type ProviderCapability = {
   id: string;
   displayName: string;
+  supportLevel: ProviderSupportLevel;
+  titleResolution: ProviderTitleResolution;
   syncAvailable: boolean;
   sharedAvailable: boolean;
   sharedReason: string;
@@ -126,6 +142,7 @@ export type AppSnapshot = {
     providerId: string | null;
     url: string | null;
     state: string;
+    readiness: ProviderReadiness;
   };
   chat: Array<{
     id: string;
@@ -256,6 +273,28 @@ export async function launchProvider(
   mode: ProviderMode,
 ): Promise<AppSnapshot | null> {
   return invokeSnapshotOrThrow("launch_provider", { providerId, url, mode });
+}
+
+export async function openProviderBrowser(
+  providerId: string,
+): Promise<AppSnapshot | null> {
+  return invokeSnapshotOrThrow("open_provider_browser", { providerId });
+}
+
+export async function checkProviderStatus(
+  providerId: string,
+): Promise<AppSnapshot | null> {
+  return invokeSnapshotOrThrow("check_provider_status", { providerId });
+}
+
+export async function navigateProviderTitle(
+  providerId: string,
+  title: string,
+): Promise<AppSnapshot | null> {
+  return invokeSnapshotOrThrow("navigate_provider_title", {
+    providerId,
+    title,
+  });
 }
 
 export async function launchGenericLink(url: string): Promise<AppSnapshot | null> {

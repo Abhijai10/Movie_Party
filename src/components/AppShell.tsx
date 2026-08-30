@@ -1,5 +1,6 @@
 import {
   BackendCommandError,
+  checkProviderStatus,
   commandErrorMessage,
   createLocalParty,
   enterCinema,
@@ -10,6 +11,8 @@ import {
   launchProvider,
   leaveParty,
   markReady,
+  navigateProviderTitle,
+  openProviderBrowser,
   openTailscaleSetup,
   requestEndParty,
   setSharedControls,
@@ -244,6 +247,57 @@ export function AppShell() {
     }
   };
 
+  const openProvider = async (providerId: string): Promise<boolean> => {
+    setCreateError(null);
+    try {
+      const next = await openProviderBrowser(providerId);
+      if (!next || next.error) {
+        setCreateError(next?.error ?? "Move Party could not open that provider.");
+        return false;
+      }
+      applySnapshot(next);
+      return true;
+    } catch (error) {
+      setCreateError(createRoomErrorMessage(error));
+      return false;
+    }
+  };
+
+  const checkProvider = async (providerId: string): Promise<boolean> => {
+    setCreateError(null);
+    try {
+      const next = await checkProviderStatus(providerId);
+      if (!next || next.error) {
+        setCreateError(next?.error ?? "Move Party could not check that provider.");
+        return false;
+      }
+      applySnapshot(next);
+      return true;
+    } catch (error) {
+      setCreateError(createRoomErrorMessage(error));
+      return false;
+    }
+  };
+
+  const openProviderTitle = async (
+    providerId: string,
+    title: string,
+  ): Promise<boolean> => {
+    setCreateError(null);
+    try {
+      const next = await navigateProviderTitle(providerId, title);
+      if (!next || next.error) {
+        setCreateError(next?.error ?? "Move Party could not open that title.");
+        return false;
+      }
+      applySnapshot(next);
+      return true;
+    } catch (error) {
+      setCreateError(createRoomErrorMessage(error));
+      return false;
+    }
+  };
+
   const goJoinParty = () => {
     setDevScreen(null);
     setLocalScreen(null);
@@ -355,8 +409,12 @@ export function AppShell() {
         isCreating={isCreating}
         error={createError ?? snapshot.error}
         providerCapabilities={providerCapabilities}
+        provider={snapshot.provider}
         onBack={goHome}
         onCreateParty={createParty}
+        onOpenProvider={openProvider}
+        onCheckProviderStatus={checkProvider}
+        onNavigateProviderTitle={openProviderTitle}
       />
     );
   }

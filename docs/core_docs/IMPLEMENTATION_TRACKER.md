@@ -14,10 +14,10 @@ It must be updated continuously.
 
 ```text
 Project State:
-🟨 M6 PRODUCTION CLOSURE — local provider/Chrome hardening implemented, external verification pending
+🟨 BATCH 5 PROVIDER PLAYBACK PRODUCTION PATH — provider flow wired; real provider login/playback requires manual verification
 
 Current Phase:
-M6 PRODUCTION CLOSURE
+BATCH 5 PROVIDER PLAYBACK PRODUCTION PATH
 
 Current Release:
 V1 Development
@@ -2600,3 +2600,69 @@ Verification:
   this pass.
 - Real authenticated reconnect, two-device recovery, libmpv headroom, and OS
   notification delivery remain manual/external verification.
+
+---
+
+## 2026-08-30 — Batch 5 Provider Playback Production Path
+
+### Implemented at code level
+
+- **Provider capability model reflects reality**: the native provider registry
+  now reports `supportLevel` (SUPPORTED) and `titleResolution`
+  (`DIRECT_URL` for YouTube, `PROVIDER_SEARCH` for Netflix/Prime/JioHotstar).
+  All providers keep `verification: EXTERNAL_VERIFICATION_PENDING`; Provider
+  Shared stays `sharedAvailable: false` until capture is verified.
+- **Provider readiness state machine**: new `ProviderReadiness`
+  (`NOT_STARTED`, `LAUNCHING`, `LOGIN_REQUIRED`, `READY`, `NAVIGATING`,
+  `PLAYBACK_READY`, `UNAVAILABLE`, `ERROR`) is serialized into the provider
+  snapshot. `readiness_from_detection` maps real CDP signals (login page vs
+  media element) to state; `READY`/`PLAYBACK_READY` are never derived from
+  Chrome launch alone.
+- **Managed browser/session lifecycle**: `open_provider_browser` reuses the
+  existing session for the same provider via `session_matches_provider`
+  (alive + same provider id) and never spawns a duplicate browser process.
+  Provider switch closes the old session and launches a clean one, so stale
+  provider state is not reused.
+- **Provider authentication stays on the provider's own page**: Movie Party
+  never collects passwords, tokens, cookies, or session secrets. The UI only
+  opens the provider's official page, observes readiness, and offers an
+  "I've signed in — Check status" action. No email/password form exists.
+- **Movie/title navigation**: `navigate_provider_title` navigates the managed
+  browser to the provider's own search URL for the user-entered title using
+  the existing adapter/CDP boundary. Empty titles are rejected; the provider
+  remains authoritative for catalogue results (no scraping).
+- **Playback preparation**: `check_provider_status` runs the provider adapter's
+  login/media detection over CDP and updates truthful readiness. Room creation
+  is gated so Provider Sync starts only when provider readiness is valid
+  (`validate_provider_ready_for_room` requires READY or PLAYBACK_READY).
+- **Room handoff**: `launch_provider` reuses the authenticated session when one
+  exists and only attaches it to a created room after readiness validation;
+  otherwise it launches a fresh browser. `store_launched_provider` no longer
+  claims media readiness while login is unverified.
+- **Provider Shared status**: kept explicitly unavailable/experimental
+  (`MP-CAPTURE-001`) with no capture pipeline enabled.
+
+### Verification
+
+- `cargo check` ✅ using a clean temporary target directory.
+- `cargo test --lib` ✅ 242 passed, 0 failed, 2 ignored (includes new provider
+  capability/readiness/session tests; the existing leave-party worker abort
+  test was hardened with a poll window to avoid a parallel-suite timing flake).
+- `cargo test --lib providers::sync::tests` ✅ (14 tests).
+- `cargo test --lib` filter `provider` ✅ (38 tests, includes app-runtime
+  readiness/session tests).
+- `npm run lint` ✅
+- `npm run test` ✅ (6 files, 27 tests)
+- `npm run build` ✅
+
+### External / manual verification pending
+
+- Real provider login, session persistence, and reuse in the dedicated managed
+  profile on macOS and Windows (Netflix, Prime, JioHotstar, YouTube).
+- Provider search/navigation opens the intended title and playback readiness is
+  detected (media element present after user starts playback on the provider).
+- Provider switch replaces the previous provider's browser session cleanly.
+- CDP status checks, title navigation, and playback detection on live provider
+  pages (requires installed Chrome and a real provider account).
+- `--test m2_integration` keeps the four pre-existing timing predicate failures
+  noted in the Batch 4 pass.

@@ -129,6 +129,9 @@ pub fn run() {
             pick_media_file,
             launch_provider,
             launch_generic_link,
+            open_provider_browser,
+            check_provider_status,
+            navigate_provider_title,
             create_schedule,
             list_schedules,
             update_schedule_media,
@@ -432,10 +435,6 @@ fn launch_provider(
     mode: String,
     runtime: tauri::State<'_, app_runtime::AppRuntime>,
 ) -> Result<app_runtime::AppSnapshot, String> {
-    use crate::providers::chrome::{
-        allocate_local_cdp_port, build_launch_plan, default_chrome_candidates, find_chrome,
-        launch_managed_chrome,
-    };
     use crate::providers::sync::{provider_accepts_url, provider_id_from_str};
 
     if mode == "PROVIDER_SHARED" {
@@ -450,30 +449,116 @@ fn launch_provider(
 
     let provider = provider_id_from_str(&provider_id)
         .ok_or_else(|| "MP-PROVIDER-002 unsupported provider".to_string())?;
+
+    // Reuse an existing managed session for the same provider when the
+    // browser is already open and ready; otherwise launch a fresh one.
+    if runtime.session_matches_provider(&provider_id) {
+        runtime.validate_provider_ready_for_room()?;
+        let snapshot = runtime.attach_launched_provider(provider_id.clone(), url);
+        return Ok(snapshot);
+    }
+
     if !provider_accepts_url(provider, &url) {
         return Err("MP-PROVIDER-002 provider URL mismatch".to_string());
     }
-    let candidates = default_chrome_candidates();
-    let chrome_path = match find_chrome(&candidates) {
-        Ok(path) => path,
-        Err(error) => return Ok(runtime.provider_unavailable(provider_id, url, error.to_string())),
-    };
-    let profiles_root = std::env::temp_dir().join("MovePartyProfiles");
-    let cdp_port = match allocate_local_cdp_port() {
-        Ok(port) => port,
-        Err(error) => return Ok(runtime.provider_unavailable(provider_id, url, error.to_string())),
-    };
-    let plan = match build_launch_plan(chrome_path, &profiles_root, &provider_id, cdp_port, &url) {
-        Ok(plan) => plan,
-        Err(error) => return Ok(runtime.provider_unavailable(provider_id, url, error.to_string())),
-    };
-    runtime.close_provider_session();
-    let session = match launch_managed_chrome(plan) {
-        Ok(session) => session,
-        Err(error) => return Ok(runtime.provider_unavailable(provider_id, url, error.to_string())),
+    let session = launch_provider_chrome(&runtime, &provider_id, &url)?;
+    Ok(runtime.store_launched_provider(provider_id, url, session))
+}
+
+/// Finds Chrome, allocates a local CDP port, and launches a fresh managed
+/// browser session for a provider URL. Closes any previous provider session.
+fn launch_provider_chrome(
+    runtime: &app_runtime::AppRuntime,
+    provider_id: &str,
+    url: &str,
+) -> Result<crate::providers::chrome::ManagedChromeSession, String> {
+    use crate::providers::chrome::{
+        allocate_local_cdp_port, build_launch_plan, default_chrome_candidates, find_chrome,
+        launch_managed_chrome,
     };
 
-    Ok(runtime.store_launched_provider(provider_id, url, session))
+    let chrome_path = find_chrome(&default_chrome_candidates())
+        .map_err(|e| e.to_string())?;
+    let profiles_root = std::env::temp_dir().join("MovePartyProfiles");
+    let cdp_port = allocate_local_cdp_port().map_err(|e| e.to_string())?;
+    let plan = build_launch_plan(chrome_path, &profiles_root, provider_id, cdp_port, url)
+        .map_err(|e| e.to_string())?;
+    runtime.close_provider_session();
+    launch_managed_chrome(plan).map_err(|e| e.to_string())
+}
+
+/// Opens the selected provider's home page in the managed browser so the user
+/// can authenticate on the provider's own page. Reuses an existing session
+/// for the same provider instead of spawning a duplicate browser process.
+#[tauri::command]
+fn open_provider_browser(
+    provider_id: String,
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<app_runtime::AppSnapshot, String> {
+    use crate::providers::sync::{provider_home_url, provider_id_from_str};
+
+    let provider = provider_id_from_str(&provider_id)
+        .ok_or_else(|| "MP-PROVIDER-002 unsupported provider".to_string())?;
+    let url = provider_home_url(provider).to_string();
+
+    // Reuse the existing session when the browser is already running for this
+    // provider; never spawn a duplicate browser process for the same session.
+    if runtime.session_matches_provider(&provider_id) {
+        let (login_required, media_detected) = runtime.detect_provider_session_status(&provider_id)?;
+        let readiness = crate::providers::sync::readiness_from_detection(
+            login_required,
+            media_detected,
+        );
+        return Ok(runtime.update_provider_readiness(readiness));
+    }
+
+    let session = launch_provider_chrome(&runtime, &provider_id, &url)?;
+    Ok(runtime.open_provider_browser(provider_id, session))
+}
+
+/// Checks the current provider session's login and media state over CDP and
+/// updates the truthful readiness. Never inspects or exposes credentials.
+#[tauri::command]
+fn check_provider_status(
+    provider_id: String,
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<app_runtime::AppSnapshot, String> {
+    if !runtime.session_matches_provider(&provider_id) {
+        return Ok(runtime.update_provider_readiness(
+            crate::providers::sync::ProviderReadiness::NotStarted,
+        ));
+    }
+    let (login_required, media_detected) = runtime.detect_provider_session_status(&provider_id)?;
+    let readiness = crate::providers::sync::readiness_from_detection(
+        login_required,
+        media_detected,
+    );
+    Ok(runtime.update_provider_readiness(readiness))
+}
+
+/// Navigates the managed provider browser to the provider's own search page
+/// for a user-entered title. The provider remains authoritative for catalogue
+/// results; Movie Party never scrapes the catalogue.
+#[tauri::command]
+fn navigate_provider_title(
+    provider_id: String,
+    title: String,
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<app_runtime::AppSnapshot, String> {
+    use crate::providers::sync::{provider_id_from_str, provider_search_url};
+
+    let provider = provider_id_from_str(&provider_id)
+        .ok_or_else(|| "MP-PROVIDER-002 unsupported provider".to_string())?;
+    if !runtime.session_matches_provider(&provider_id) {
+        return Err("MP-PROVIDER-003 open the provider browser before choosing a title".to_string());
+    }
+    let url = provider_search_url(provider, &title)
+        .ok_or_else(|| "MP-PROVIDER-003 enter a movie or show title".to_string())?;
+
+    runtime.navigate_provider_to(&provider_id, &url)?;
+    Ok(runtime.update_provider_readiness(
+        crate::providers::sync::ProviderReadiness::Navigating,
+    ))
 }
 
 #[tauri::command]

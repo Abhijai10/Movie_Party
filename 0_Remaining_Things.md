@@ -38,7 +38,7 @@ The current highest-value work is no longer broad feature creation. It is **clos
 6. 🧪 **Real local playback validation**
 7. 🧪 **Two-device macOS ↔ Windows validation**
 8. 🔮 **Scheduled Local Perfect preload completion**
-9. 🟡 **Provider Sync login/preparation UX**
+9. 🧪 **Provider Sync login/preparation real-account verification** (code path now wired through the provider readiness state machine)
 10. 🟡 **Provider Shared capture → encode → QUIC → guest presentation**
 11. 🔮 **Ghost Mode final implementation**
 12. 🎨 **Hero reel redesign by another AI**
@@ -161,6 +161,11 @@ These are considered implemented at the code level unless later manual testing d
 - ✅ Provider Shared is represented explicitly as Experimental.
 - ✅ Unsupported Shared mode is blocked rather than pretending to work.
 - ✅ Generic links no longer masquerade as named provider sessions.
+- ✅ Provider readiness states (`NOT_STARTED` → `LOGIN_REQUIRED` → `READY` →
+  `NAVIGATING` → `PLAYBACK_READY`) drive the Create-Party provider wizard.
+- ✅ Login happens on the provider's own page; Movie Party never asks for or
+  stores provider passwords/tokens/cookies.
+- ✅ Provider Sync room creation is gated on valid provider readiness.
 - 🧪 Real provider login/navigation/control remains to be verified manually.
 
 ---
@@ -519,7 +524,23 @@ Use truthful statuses such as:
 
 ## Status
 
-🟡 Code-level wiring exists; real provider operation is not yet production-proven.
+🟡 Code-level production path wired; real provider operation is not yet production-proven.
+
+Batch 5 added the Provider Playback Production Path at the code level:
+
+- A `ProviderReadiness` state machine (`NOT_STARTED`, `LAUNCHING`,
+  `LOGIN_REQUIRED`, `READY`, `NAVIGATING`, `PLAYBACK_READY`, `UNAVAILABLE`,
+  `ERROR`) is serialized into the provider snapshot and driven by the UI.
+- The managed browser is opened/reused per provider; provider switch replaces
+  the old session so stale state is never reused.
+- Login happens only on the provider's own page; Movie Party never collects
+  or exposes credentials.
+- Title entry navigates the provider's own search page via the existing
+  adapter/CDP boundary (YouTube = DIRECT_URL, others = PROVIDER_SEARCH).
+- Playback readiness requires a real media-element detection over CDP, not
+  Chrome launch alone.
+- Room creation / Provider Sync start is gated on valid readiness
+  (`validate_provider_ready_for_room`).
 
 ## Required behavior
 
@@ -1415,11 +1436,11 @@ Verify:
 
 ## Phase 6 — Provider Sync UX
 
-32. 🟡 provider sign-in via managed browser
-33. 🟡 provider session status
-34. 🟡 browse/select title on provider
-35. 🟡 prepare provider party
-36. 🧪 provider-specific compatibility tests
+32. 🟡 provider sign-in via managed browser — code-level readiness flow completed in Batch 5
+33. 🟡 provider session status — readiness state machine completed in Batch 5
+34. 🟡 browse/select title on provider — provider-search navigation completed in Batch 5
+35. 🟡 prepare provider party — room creation gated on valid readiness in Batch 5
+36. 🧪 provider-specific compatibility tests — real-account verification pending
 
 ## Phase 7 — Scheduling / preload
 

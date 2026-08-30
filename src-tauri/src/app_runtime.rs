@@ -153,6 +153,7 @@ impl Default for AppSnapshot {
                 provider_id: None,
                 url: None,
                 state: "Idle".to_string(),
+                readiness: crate::providers::sync::ProviderReadiness::NotStarted,
             },
             chat: vec![],
             reactions: vec![],
@@ -233,6 +234,7 @@ pub struct ProviderSnapshot {
     pub provider_id: Option<String>,
     pub url: Option<String>,
     pub state: String,
+    pub readiness: crate::providers::sync::ProviderReadiness,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -646,6 +648,7 @@ impl AppRuntime {
                         provider_id: None,
                         url: None,
                         state: "Idle".to_string(),
+                        readiness: crate::providers::sync::ProviderReadiness::NotStarted,
                     },
                     chat: Vec::new(),
                     reactions: Vec::new(),
@@ -890,10 +893,11 @@ impl AppRuntime {
         state.chrome_session = Some(session);
         state.provider.mode = "PROVIDER_SYNC".to_string();
         state.provider.provider_id = Some(provider_id);
-        state.provider.url = Some(url);
-        state.provider.state = format!("Chrome launched on CDP port {cdp_port}");
+        state.provider.url = Some(url.clone());
+        state.provider.readiness = crate::providers::sync::ProviderReadiness::LoginRequired;
+        state.provider.state = format!("Login required · Chrome launched on CDP port {cdp_port}");
         state.screen = "LOBBY".to_string();
-        state.local_participant.media_ready = true;
+        state.local_participant.media_ready = false;
         state.error = None;
         snapshot_from_state(&state)
     }
@@ -908,6 +912,7 @@ impl AppRuntime {
         state.provider.mode = "PROVIDER_SYNC".to_string();
         state.provider.provider_id = Some(provider_id);
         state.provider.url = Some(url);
+        state.provider.readiness = crate::providers::sync::ProviderReadiness::Unavailable;
         state.provider.state = format!("Unavailable: {reason}");
         state.screen = "LOBBY".to_string();
         state.error = Some(reason);
@@ -925,6 +930,7 @@ impl AppRuntime {
         state.provider.mode = "GENERIC_LINK".to_string();
         state.provider.provider_id = None;
         state.provider.url = Some(url);
+        state.provider.readiness = crate::providers::sync::ProviderReadiness::Ready;
         state.provider.state =
             format!("Chrome launched on CDP port {cdp_port}; waiting for media detection");
         state.screen = "LOBBY".to_string();
@@ -938,10 +944,165 @@ impl AppRuntime {
         state.provider.mode = "GENERIC_LINK".to_string();
         state.provider.provider_id = None;
         state.provider.url = Some(url);
+        state.provider.readiness = crate::providers::sync::ProviderReadiness::Unavailable;
         state.provider.state = format!("Unavailable: {reason}");
         state.screen = "LOBBY".to_string();
         state.error = Some(reason);
         snapshot_from_state(&state)
+    }
+
+    /// Opens the provider's home page in the managed browser (or reuses an
+    /// existing session for the same provider). Does not create a room or
+    /// change the current screen; the caller creates the room separately.
+    pub fn open_provider_browser(
+        &self,
+        provider_id: String,
+        session: crate::providers::chrome::ManagedChromeSession,
+    ) -> AppSnapshot {
+        let url = session.plan.url.clone();
+        let mut state = self.lock();
+        state.chrome_session = Some(session);
+        state.provider.mode = "PROVIDER_SYNC".to_string();
+        state.provider.provider_id = Some(provider_id);
+        state.provider.url = Some(url);
+        state.provider.readiness = crate::providers::sync::ProviderReadiness::LoginRequired;
+        state.provider.state = "Chrome launched; sign in on the provider's own page".to_string();
+        state.error = None;
+        snapshot_from_state(&state)
+    }
+
+    /// Updates the provider readiness after a CDP status check. Returns the
+    /// snapshot so the frontend can reflect the new state without a room
+    /// transition.
+    pub fn update_provider_readiness(
+        &self,
+        readiness: crate::providers::sync::ProviderReadiness,
+    ) -> AppSnapshot {
+        let mut state = self.lock();
+        state.provider.readiness = readiness;
+        state.provider.state =
+            crate::providers::sync::readiness_description(readiness).to_string();
+        state.error = None;
+        snapshot_from_state(&state)
+    }
+
+    /// Validates that the current provider session is ready for room creation.
+    /// Returns an error string if the check fails.
+    pub fn validate_provider_ready_for_room(&self) -> Result<(), String> {
+        let state = self.lock();
+        match state.provider.readiness {
+            crate::providers::sync::ProviderReadiness::PlaybackReady => Ok(()),
+            crate::providers::sync::ProviderReadiness::Ready => Ok(()),
+            crate::providers::sync::ProviderReadiness::LoginRequired => {
+                Err("MP-PROVIDER-004 sign in to the provider before creating the room".to_string())
+            }
+            crate::providers::sync::ProviderReadiness::NotStarted => {
+                Err("MP-PROVIDER-004 open the provider browser first".to_string())
+            }
+            crate::providers::sync::ProviderReadiness::Launching => {
+                Err("MP-PROVIDER-004 provider browser is still launching".to_string())
+            }
+            crate::providers::sync::ProviderReadiness::Navigating => {
+                Err("MP-PROVIDER-004 wait for the title to open in the provider".to_string())
+            }
+            crate::providers::sync::ProviderReadiness::Unavailable | crate::providers::sync::ProviderReadiness::Error => {
+                Err("MP-PROVIDER-004 provider is unavailable or in an error state".to_string())
+            }
+        }
+    }
+
+    /// Runs CDP commands against the current provider session to detect login
+    /// and media status. Returns (login_required, media_detected) or an error.
+    pub fn detect_provider_session_status(
+        &self,
+        provider_id: &str,
+    ) -> Result<(bool, bool), String> {
+        use crate::providers::sync::{detect_media_command, login_required_command, provider_id_from_str};
+
+        let provider = provider_id_from_str(provider_id)
+            .ok_or_else(|| "MP-PROVIDER-002 unsupported provider".to_string())?;
+
+        let mut state = self.lock();
+        let session = state
+            .chrome_session
+            .as_mut()
+            .ok_or_else(|| "MP-PROVIDER-003 browser not launched".to_string())?;
+
+        let mut page = session
+            .connect_page()
+            .map_err(|e| format!("MP-PROVIDER-003 CDP unavailable: {e}"))?;
+
+        let login_result = page
+            .execute(&login_required_command(provider, 1))
+            .map_err(|e| format!("MP-PROVIDER-003 CDP login check failed: {e}"))?;
+        let login_required = login_result["result"]["value"].as_bool().unwrap_or(false);
+
+        let detect_result = page
+            .execute(&detect_media_command(provider, 2))
+            .map_err(|e| format!("MP-PROVIDER-003 CDP media detection failed: {e}"))?;
+        let media_detected = detect_result["result"]["value"].as_bool().unwrap_or(false);
+
+        Ok((login_required, media_detected))
+    }
+
+    /// Returns true when the current provider session matches the requested
+    /// provider ID and the browser process is still alive.
+    pub fn session_matches_provider(&self, provider_id: &str) -> bool {
+        let mut state = self.lock();
+        let same_id = state.provider.provider_id.as_deref() == Some(provider_id);
+        let alive = state
+            .chrome_session
+            .as_mut()
+            .map(|session| session.is_alive())
+            .unwrap_or(false);
+        same_id && alive
+    }
+
+    /// Attaches the current provider session to a newly created room without
+    /// launching a new browser. Validates readiness before allowing the
+    /// transition. The caller must have already created the room.
+    pub fn attach_launched_provider(
+        &self,
+        provider_id: String,
+        url: String,
+    ) -> AppSnapshot {
+        let mut state = self.lock();
+        state.provider.mode = "PROVIDER_SYNC".to_string();
+        state.provider.provider_id = Some(provider_id);
+        state.provider.url = Some(url);
+        state.screen = "LOBBY".to_string();
+        state.local_participant.media_ready = true;
+        state.error = None;
+        snapshot_from_state(&state)
+    }
+
+    /// Navigates the managed provider browser's current page to a new URL
+    /// using CDP. Used for provider search navigation.
+    pub fn navigate_provider_to(
+        &self,
+        provider_id: &str,
+        url: &str,
+    ) -> Result<(), String> {
+        use crate::providers::sync::provider_id_from_str;
+
+        let _provider = provider_id_from_str(provider_id)
+            .ok_or_else(|| "MP-PROVIDER-002 unsupported provider".to_string())?;
+
+        let mut state = self.lock();
+        let session = state
+            .chrome_session
+            .as_mut()
+            .ok_or_else(|| "MP-PROVIDER-003 browser not launched".to_string())?;
+
+        let mut page = session
+            .connect_page()
+            .map_err(|e| format!("MP-PROVIDER-003 CDP unavailable: {e}"))?;
+
+        page.navigate(url)
+            .map_err(|e| format!("MP-PROVIDER-003 provider navigation failed: {e}"))?;
+
+        state.provider.url = Some(url.to_string());
+        Ok(())
     }
 
     /// M4: Detect overdue preload schedules and send local notifications.
@@ -1502,6 +1663,7 @@ impl AppRuntime {
             provider_id: None,
             url: None,
             state: "Idle".to_string(),
+            readiness: crate::providers::sync::ProviderReadiness::NotStarted,
         };
         state.chat.clear();
         state.reactions.clear();
@@ -4887,7 +5049,14 @@ mod tests {
             state.transfer_stall_watcher_task = Some(spawn_long(cancelled.clone()));
         }
         runtime.leave_party();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Poll for up to 2s for the Drop guards to run; under full-suite
+        // parallel load the tokio abort may be deferred.
+        for _ in 0..20 {
+            if cancelled.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         let state = runtime.lock();
         assert!(state.reconnect_task.is_none());
         assert!(state.heartbeat_task.is_none());
@@ -4982,9 +5151,96 @@ mod tests {
             .state
             .contains("Chrome executable unavailable"));
         assert_eq!(
+            snapshot.provider.readiness,
+            crate::providers::sync::ProviderReadiness::Unavailable
+        );
+        assert_eq!(
             snapshot.error.as_deref(),
             Some("MP-PROVIDER-001 Chrome executable unavailable")
         );
+    }
+
+    #[test]
+    fn provider_readiness_defaults_to_not_started() {
+        let runtime = AppRuntime::new();
+        let snapshot = runtime.snapshot();
+
+        assert_eq!(
+            snapshot.provider.readiness,
+            crate::providers::sync::ProviderReadiness::NotStarted
+        );
+    }
+
+    #[test]
+    fn provider_validate_readiness_rejects_login_required() {
+        let runtime = AppRuntime::new();
+        // Initially NotStarted — should fail
+        assert!(runtime.validate_provider_ready_for_room().is_err());
+
+        // Set readiness to LoginRequired via update
+        let _snap = runtime.update_provider_readiness(
+            crate::providers::sync::ProviderReadiness::LoginRequired,
+        );
+        assert!(runtime.validate_provider_ready_for_room().is_err());
+
+        // Set to Ready — should pass
+        let _snap = runtime.update_provider_readiness(
+            crate::providers::sync::ProviderReadiness::Ready,
+        );
+        assert!(runtime.validate_provider_ready_for_room().is_ok());
+
+        // Set to PlaybackReady — should pass
+        let _snap = runtime.update_provider_readiness(
+            crate::providers::sync::ProviderReadiness::PlaybackReady,
+        );
+        assert!(runtime.validate_provider_ready_for_room().is_ok());
+    }
+
+    #[test]
+    fn provider_status_returns_error_when_chrome_not_launched() {
+        let runtime = AppRuntime::new();
+        let result = runtime.detect_provider_session_status("youtube");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("browser not launched"));
+    }
+
+    #[test]
+    fn provider_switching_replaces_stale_state() {
+        let runtime = AppRuntime::new();
+        let _snap = runtime.update_provider_readiness(
+            crate::providers::sync::ProviderReadiness::Ready,
+        );
+
+        assert_eq!(
+            runtime.snapshot().provider.readiness,
+            crate::providers::sync::ProviderReadiness::Ready
+        );
+
+        // return_home resets to NotStarted
+        let _home = runtime.return_home();
+        assert_eq!(
+            runtime.snapshot().provider.readiness,
+            crate::providers::sync::ProviderReadiness::NotStarted
+        );
+    }
+
+    #[test]
+    fn readiness_descriptions_map_to_non_empty_state_text() {
+        let runtime = AppRuntime::new();
+        for variant in [
+            crate::providers::sync::ProviderReadiness::NotStarted,
+            crate::providers::sync::ProviderReadiness::Launching,
+            crate::providers::sync::ProviderReadiness::LoginRequired,
+            crate::providers::sync::ProviderReadiness::Ready,
+            crate::providers::sync::ProviderReadiness::Navigating,
+            crate::providers::sync::ProviderReadiness::PlaybackReady,
+            crate::providers::sync::ProviderReadiness::Unavailable,
+            crate::providers::sync::ProviderReadiness::Error,
+        ] {
+            let _snap = runtime.update_provider_readiness(variant);
+            let desc = runtime.snapshot().provider.state;
+            assert!(!desc.is_empty(), "state for {variant:?} must not be empty");
+        }
     }
 
     #[test]
