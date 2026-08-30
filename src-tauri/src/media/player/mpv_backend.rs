@@ -154,6 +154,12 @@ pub struct MpvPlayer {
     loaded_path: Option<std::path::PathBuf>,
     snapshot: PlayerSnapshot,
     surface_handle: Option<usize>,
+    /// Set once a native surface attach attempt fails because libmpv could
+    /// not be loaded. After this the player must never report Playing/Paused
+    /// or accept play/pause/seek as successful — commands return
+    /// `LibMpvUnavailable` instead so the app never claims playback that is
+    /// not actually happening.
+    unavailable: bool,
 }
 
 impl MpvPlayer {
@@ -166,6 +172,7 @@ impl MpvPlayer {
             loaded_path: None,
             snapshot: PlayerSnapshot::default(),
             surface_handle: None,
+            unavailable: false,
         }
     }
 
@@ -430,6 +437,9 @@ impl Drop for MpvPlayer {
 
 impl LocalPlayer for MpvPlayer {
     fn open(&mut self, path: &Path) -> Result<(), PlayerError> {
+        if self.unavailable {
+            return Err(PlayerError::LibMpvUnavailable);
+        }
         if !is_streaming_media_source(path) && !path.exists() {
             return Err(PlayerError::MissingMedia {
                 path: path.display().to_string(),
@@ -445,6 +455,9 @@ impl LocalPlayer for MpvPlayer {
     }
 
     fn play(&mut self) -> Result<(), PlayerError> {
+        if self.unavailable {
+            return Err(PlayerError::LibMpvUnavailable);
+        }
         if self.handle.is_none() && self.loaded_path.is_some() {
             self.snapshot.state = PlayerState::Playing;
             return Ok(());
@@ -471,6 +484,9 @@ impl LocalPlayer for MpvPlayer {
     }
 
     fn pause(&mut self) -> Result<(), PlayerError> {
+        if self.unavailable {
+            return Err(PlayerError::LibMpvUnavailable);
+        }
         if self.handle.is_none() && self.loaded_path.is_some() {
             self.snapshot.state = PlayerState::Paused;
             return Ok(());
@@ -496,6 +512,9 @@ impl LocalPlayer for MpvPlayer {
     }
 
     fn seek(&mut self, position_ms: u64) -> Result<(), PlayerError> {
+        if self.unavailable {
+            return Err(PlayerError::LibMpvUnavailable);
+        }
         if self.handle.is_none() && self.loaded_path.is_some() {
             self.snapshot.position_ms = position_ms;
             return Ok(());
@@ -645,7 +664,18 @@ impl LocalPlayer for MpvPlayer {
             });
         }
         let desired = self.snapshot.clone();
-        let (handle, fns) = Self::load_library(surface_handle)?;
+        let (handle, fns) = match Self::load_library(surface_handle) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                // A failed attach means no real decoder is (or will be)
+                // available for this session. Mark the player unavailable so
+                // play/pause/seek can never silently report success.
+                self.unavailable = true;
+                self.snapshot.state = PlayerState::Error;
+                self.snapshot.error_message = Some(error.to_string());
+                return Err(error);
+            }
+        };
         self.handle = Some(handle);
         self.fns = Some(fns);
         self.surface_handle = Some(surface_handle);
@@ -674,11 +704,43 @@ impl LocalPlayer for MpvPlayer {
 
 #[cfg(test)]
 mod tests {
-    use super::MpvPlayer;
+    use super::{MpvPlayer, PlayerError, PlayerState};
+    use crate::media::player::LocalPlayer;
 
     #[test]
     fn mpv_player_creation_does_not_panic() {
         let _player = MpvPlayer::new();
         // Creation should never panic even if mpv is unavailable
+    }
+
+    #[test]
+    fn unavailable_player_cannot_claim_playing() {
+        // Simulate a failed native-surface attach: the player is marked
+        // unavailable because libmpv could not be loaded. Every playback
+        // command must fail loudly instead of silently claiming success.
+        let mut player = MpvPlayer::new();
+        player.unavailable = true;
+        player.snapshot.state = PlayerState::Error;
+        player.snapshot.error_message = Some("libmpv could not be loaded".to_string());
+        player.loaded_path = Some(std::path::PathBuf::from("/fake/movie.mp4"));
+
+        assert!(matches!(player.play(), Err(PlayerError::LibMpvUnavailable)));
+        assert!(matches!(
+            player.pause(),
+            Err(PlayerError::LibMpvUnavailable)
+        ));
+        assert!(matches!(
+            player.seek(10_000),
+            Err(PlayerError::LibMpvUnavailable)
+        ));
+        assert!(matches!(
+            player.open(std::path::Path::new("/fake/movie.mp4")),
+            Err(PlayerError::LibMpvUnavailable)
+        ));
+        assert_eq!(player.snapshot().state, PlayerState::Error);
+        assert_eq!(
+            player.snapshot().error_message.as_deref(),
+            Some("libmpv could not be loaded")
+        );
     }
 }
