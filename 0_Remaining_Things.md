@@ -76,7 +76,7 @@ verification** plus the long-pending native libmpv presentation fix.
 11. 🔮 **Ghost Mode final implementation**
 12. 🎨 **Hero reel redesign by another AI**
 13. 🎨 **Cinema curtain/countdown visual polish by another AI**
-14. ⚠️ **Re-check unresolved audit/security/reliability findings against the current branch**
+14. ✅ **Audit/security/reliability findings revalidated against the current branch (Batch 7)**: deep-link lifecycle, Tailscale boundary, Local Perfect / Cinema / Provider Sync / Call / Ghost / Privacy lifecycles, worker duplication, error/recovery consistency, and security items were all revalidated; only concrete current defects were fixed (worker-duplication fixes + call-tile reset on deep link). Remaining items (CSP, reconnect media rebuild, crash watchers, release packaging) are documented as release-hardening/manual items, not silent production claims.
 15. 🔮 **Packaging/release hardening**
 
 ## Batch 7 readiness-honesty status (2026-08-30)
@@ -96,6 +96,44 @@ audit against the V1 correctness rules was run instead. Results:
   READYCHECK → Cinema) still requires physical verification.
 - 🧪 Real-player buffer reporting through the player event loop →
   `report_buffer_status` still requires physical verification.
+
+## Batch 7 release-hardening audit status (2026-08-30)
+
+The current branch was revalidated against the remaining V1 release risks.
+Old audit findings were revalidated against current code, not blindly applied.
+Results:
+
+- ✅ **Running-app deep-link join is safe**: `join_party` validates the invite
+  before any teardown (an invalid deep link cannot destroy the current room),
+  then aborts every owned worker and clears stale media/provider/player/chat
+  state before connecting. New m2 test proves a guest already in room A joins
+  room B cleanly with no stale state.
+- ✅ **Worker duplication fix**: `spawn_player_event_loop` now aborts the
+  previous task on replacement (it was the only worker spawn that did not),
+  and `create_local_party`'s duplicate-create hygiene block now aborts all
+  owned background workers and closes the stale player instead of leaking them.
+- ✅ **Call tile session reset on deep link**: `openJoinWithInvite` now resets
+  the call tile session like `goJoinParty`, so a join from a deep link cannot
+  carry the previous room's call tile UI state into the new room.
+- ✅ **Tailscale boundary confirmed**: NOT_INSTALLED / SIGNED_OUT / CONNECTED /
+  UNAVAILABLE plus host-create-requires-only-own-readiness and guest
+  own-readiness + reachability all confirmed; setup surface is not a permanent
+  gate; no rendezvous server / API credentials added.
+- ✅ **Local Perfect / Cinema / Provider Sync / Call / Ghost / Privacy
+  lifecycles confirmed** with no newly confirmed release blocker at the code
+  level (details in IMPLEMENTATION_TRACKER Batch 7 section).
+- ✅ **Security revalidation**: QUIC request bounds, range-server bounds,
+  malformed-UUID rejection, secret-safe error sanitization, AppleDouble
+  hygiene (`.gitignore` covers `._*`/`.DS_Store`; working tree cleaned) all
+  confirmed.
+- ⚠️ **Reconnect scope (documented)**: reconnect restores transport/peer/clock/
+  heartbeat but does not rebuild a fresh media session; the sparse cache and
+  transfer worker survive, so reconnect continues the existing transfer. A
+  fresh manifest/cache session requires an explicit rejoin.
+- ⚠️ **CSP (documented)**: still no explicit CSP; treated as release-hardening,
+  not silently applied because it risks breaking the running app.
+- 🧪 Everything requiring real devices/accounts/network remains
+  MANUAL VERIFICATION REQUIRED; nothing above is PRODUCTION VERIFIED.
 
 ---
 

@@ -93,6 +93,7 @@ export function AppShell() {
       const parsed = parseMovePartyInvite(rawInvite);
       setDevScreen(null);
       setLocalScreen(null);
+      setCallTileSession(createCallTileSessionState());
 
       if (!parsed.ok) {
         setPendingInvite(rawInvite.trim());

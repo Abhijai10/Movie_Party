@@ -1063,3 +1063,84 @@ async fn m5_call_signal_ice_arrives_bidirectional() {
     host.leave_party();
     guest.leave_party();
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// TEST W — Running-app deep-link join: a guest already inside a room joins a
+// second room from a fresh invite. The old room's session must be torn down
+// (fresh invite, no stale media/chat/provider state), never a duplicate worker.
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_w_guest_joins_second_room_cleanly_from_running_app() {
+    let _env_guard = env_lock().lock().await;
+    std::env::set_var("MOVE_PARTY_DEV_LOOPBACK", "1");
+
+    let host_a = AppRuntime::new();
+    let host_b = AppRuntime::new();
+    let guest = AppRuntime::new();
+
+    let media_a = temp_media_path();
+    write_temp_media(&media_a);
+    let snap_a = host_a
+        .create_local_party(Some(media_a.to_string_lossy().to_string()))
+        .await
+        .expect("host A create");
+    let invite_a = snap_a.room.invite_code.clone().expect("invite A");
+
+    // Guest joins room A first (the "already inside a party" state).
+    guest.join_party(invite_a.clone()).await.expect("guest join A");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let snap = guest.snapshot();
+    assert_eq!(snap.room.role, "Guest");
+    assert_eq!(
+        snap.room.invite_code.as_deref(),
+        Some(invite_a.as_str()),
+        "guest must be in room A"
+    );
+
+    // Host B starts a separate room and hands out a fresh invite.
+    let media_b = temp_media_path();
+    write_temp_media(&media_b);
+    let snap_b = host_b
+        .create_local_party(Some(media_b.to_string_lossy().to_string()))
+        .await
+        .expect("host B create");
+    let invite_b = snap_b.room.invite_code.clone().expect("invite B");
+    assert_ne!(invite_a, invite_b, "second room must be a distinct invite");
+
+    // Running-app deep link: the guest joins room B while still in room A.
+    guest.join_party(invite_b.clone()).await.expect("guest join B");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    drop(_env_guard);
+
+    let snap = poll_guest(&guest, std::time::Duration::from_secs(5), |s| {
+        s.room.state == "LOBBY" && s.media.is_some()
+    });
+    assert_eq!(
+        snap.room.invite_code.as_deref(),
+        Some(invite_b.as_str()),
+        "guest must now be in room B"
+    );
+    assert_eq!(snap.room.role, "Guest");
+    assert!(
+        snap.chat.is_empty(),
+        "joining a new room must clear the previous room's chat"
+    );
+    assert!(snap.reactions.is_empty());
+    assert_eq!(
+        snap.sync.position_ms, 0,
+        "joining a new room must reset canonical position"
+    );
+    assert!(
+        snap.provider.provider_id.is_none(),
+        "joining a new room must clear stale provider state"
+    );
+    assert_eq!(
+        snap.media.as_ref().map(|m| m.filename.as_str()),
+        Some("m2_test.mp4")
+    );
+
+    host_a.leave_party();
+    host_b.leave_party();
+    guest.leave_party();
+}

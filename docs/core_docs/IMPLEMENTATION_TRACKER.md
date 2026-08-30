@@ -14,13 +14,14 @@ It must be updated continuously.
 
 ```text
 Project State:
-🟨 BATCH 7 V1 READINESS HONESTY AUDIT COMPLETE — no real-device failure
-    observations were supplied, so a code-level audit against the V1
-    correctness rules was performed; fake media/peer readiness paths were
-    removed. Real two-device V1 verification remains pending.
+🟨 BATCH 7 V1 RELEASE HARDENING + CURRENT-BRANCH RELIABILITY AUDIT COMPLETE
+    (code-level). The current branch was revalidated against the remaining
+    V1 release risks; old audit findings were revalidated rather than blindly
+    implemented; only concrete current-branch defects were fixed. Real
+    two-device V1 verification remains pending.
 
 Current Phase:
-BATCH 7 V1 REAL-DEVICE VALIDATION FIXES (code-audit mode)
+BATCH 7 V1 RELEASE HARDENING + RELIABILITY AUDIT (code-level)
 
 Current Release:
 V1 Development
@@ -35,7 +36,200 @@ M5: Real two-device WebRTC call needs physical devices and OS permission prompts
 M6: Real Chrome/provider login and media playback require external verification
 M7: ScreenCaptureKit needs macOS permission dialog
 M8: Chrome/player crash watchers not wired
-````
+```
+
+---
+
+# BATCH 7 — V1 RELEASE HARDENING + CURRENT-BRANCH RELIABILITY AUDIT (2026-08-30)
+
+## Mode
+
+The user supplied a Batch 7 template focused on revalidating the current branch
+against the remaining V1 release risks (deep-link lifecycle, Tailscale boundary,
+Local Perfect / Cinema / Provider Sync / Call / Ghost / Privacy lifecycle,
+worker safety, error/recovery consistency, security revalidation, focused
+deterministic tests, tracker documentation). Old audit findings were treated as
+a **revalidation backlog**: each was checked against the current code, and only
+concrete current-branch defects were fixed.
+
+## Concrete defects found and fixed
+
+### D1 — `spawn_player_event_loop` did not abort the previous task handle
+
+**Location**: `app_runtime.rs`, `spawn_player_event_loop()`
+
+**Defect**: Every other background worker spawn in `app_runtime.rs`
+(`spawn_clock_calibration`, `spawn_guest_peer_event_listener`,
+`spawn_guest_heartbeat`, `spawn_transfer_stall_watcher`, `spawn_scheduler_worker`)
+stores its handle with `replace(...)` + `old.abort()`, so a second spawn aborts
+the first. `spawn_player_event_loop` was the only outlier: it assigned
+`state.player_event_task = Some(task)` without aborting a previously running
+loop. A duplicate create (double-tap / stale UI on `create_local_party`, or a
+repeated call) could leave **two player event loops** polling the same player,
+causing duplicate position/buffer emissions and duplicate
+`report_buffer_status` calls.
+
+**Fix**: `spawn_player_event_loop` now uses `replace(...)` + `old.abort()`,
+matching every other worker spawn. A focused regression test
+`player_event_loop_is_replaced_not_duplicated` proves the old loop is aborted on
+replacement.
+
+### D2 — `create_local_party` hygiene block only aborted the host server
+
+**Location**: `app_runtime.rs`, `create_local_party()`
+
+**Defect**: On a duplicate create (double-tap / stale UI) the hygiene block
+aborted `host_session` and `host_event_task` and dropped the client, but it did
+not abort the player event loop, transfer stall watcher, heartbeat, reconnect,
+peer-event, calibration, or preload workers, and it did not close a stale player
+or clear stale media/provider/chat/player-snapshot state. A previous room's
+workers/state could survive into a newly created room.
+
+**Fix**: The hygiene block now aborts every owned background worker
+(`player_event_task`, `transfer_stall_watcher_task`, `heartbeat_task`,
+`reconnect_task`, `peer_event_task`, `calibration_task`, `preload_task`), shuts
+down the range server, closes the stale player, and clears stale
+media/transfer/player-snapshot/chrome-session/chat/reactions state before
+binding a fresh session. This mirrors the `join_party` teardown and the
+`leave_party` cleanup.
+
+### D3 — `openJoinWithInvite` did not reset the call tile session
+
+**Location**: `src/components/AppShell.tsx`, `openJoinWithInvite()`
+
+**Defect**: When a deep link (or cold-start pending link) arrived, the call tile
+session (position / hidden / minimized state from a previous room) was left
+untouched, so a join triggered from a deep link could carry the previous room's
+call tile UI state into the new room. `goJoinParty()` already reset it;
+`openJoinWithInvite()` did not.
+
+**Fix**: `openJoinWithInvite()` now resets the call tile session via
+`createCallTileSessionState()`, consistent with `goHome()` and `goJoinParty()`.
+
+## Audit findings revalidated and resolved (no change needed)
+
+The following old audit items were inspected against the current branch and
+found already resolved or not currently real:
+
+- **Running-app deep-link join while inside a party**: `join_party` validates
+  the invite (`room::parse_invite`, socket-address validation) **before** any
+  teardown, so an invalid deep link cannot destroy the current room (covered by
+  `invalid_invite_does_not_destroy_existing_room`). After validation it aborts
+  every owned worker and clears stale media/provider/player/chat state before
+  connecting. The new m2 test
+  `test_w_guest_joins_second_room_cleanly_from_running_app` verifies a guest
+  already inside room A can join room B cleanly (fresh invite, cleared chat /
+  reactions / position / provider state, media re-fetched, no stale room).
+- **Deep-link parsing**: `src/invites/deepLinks.ts` rejects missing room codes,
+  missing descriptors, query params, whitespace/control chars, oversized links,
+  and non-`moveparty://` schemes; duplicate deliveries are idempotent.
+- **Tailscale boundary**: `network/tailscale.rs` covers NOT_INSTALLED, SIGNED_OUT,
+  CONNECTED, UNAVAILABLE, missing/invalid IPv4 (100.64/10 CGNAT range), host
+  create requiring only the host's own readiness (`required_ipv4`), guest join
+  requiring own readiness + host reachability (`MP-NET-TS-005` on connect
+  failure), with stable `MP-NET-TS-00x` codes. No rendezvous server, no Tailscale
+  API credentials, no cross-device pre-connection requirement. First-run setup
+  surface (`TailscaleSetupView`) stays reachable and is not a permanent gate once
+  `CONNECTED`.
+- **Local Perfect lifecycle**: manifest validation, strong media identity, first
+  chunk verification, sparse cache, runtime-owned cache root, bounded range
+  server (`MAX_RANGE_CONNECTIONS=8`, token auth, 503 on unavailable bytes),
+  host-authoritative position, buffer-low/buffer-recovered through
+  `report_buffer_status`, drift correction (`correction_for_drift`), transfer
+  progress, leave cleanup, worker cancellation, reconnect transport resume all
+  confirmed present.
+- **Cinema / native player**: native surface attaches once (`CinemaView` effect),
+  resizes via `ResizeObserver`, detaches on unmount; `leave_party` clears the
+  player and player snapshot; no detached mpv window is created
+  (`vo=libmpv`); player state cannot falsely remain `PLAYING` on error
+  (`enter_cinema` sets `ERROR` + strict-sync pause when the player has an error).
+- **Provider Sync lifecycle**: readiness state machine, managed Chrome
+  session reuse/replacement, login-required vs playback-ready states, room
+  creation gated on `validate_provider_ready_for_room`, Chrome cleanup on
+  leave/replacement, provider→Local and Local→provider transitions clear stale
+  state. No concrete lifecycle bug found.
+- **Call / Chat / Ghost / Privacy**: local vs remote participant state is kept
+  separate; Ghost Mode hides local social UI without touching outgoing device
+  state; Privacy Mode disables camera/mic and never auto-reactivates on exit;
+  leaving/replacing a room clears chat, reactions, call signals.
+- **Worker/task safety**: scheduler, preload, QUIC connection, media transfer,
+  range server, drift, heartbeat, reconnect workers are duplicate-safe
+  (`replace` + abort or in-flight guard) and aborted on leave/join/create
+  replacement.
+- **Error/recovery consistency**: stable `MP-*` codes (`MP-MEDIA-001`,
+  `MP-NET-TS-*`, `MP-ROOM-001`, `MP-PROVIDER-*`, `MP-STORE-001`) are used;
+  errors are truthful, recoverable where possible, and do not leak secrets
+  (frontend `sanitizeErrorDetail` scrubs paths).
+- **Security revalidation**: QUIC control requests bounded (`MAX_REQUEST_BYTES`
+  2 MB, `MAX_AUTH_NONCES`); range-server bounds present; malformed UUIDs
+  rejected (UUIDv7 validation); no raw internal error leakage to production UI;
+  AppleDouble (`._*`) and `.DS_Store` are gitignored and were cleaned from the
+  working tree; no tracked AppleDouble artifacts.
+
+## Known limitations (documented, not silently "fixed")
+
+- **Reconnect media resume**: the reconnect worker restores the QUIC transport,
+  peer snapshot, clock calibration, and heartbeat, but does **not** re-trigger a
+  full `guest_fetch_media` for a partially-cached media. The sparse cache and
+  transfer worker survive disconnect (`apply_disconnect_preserves_guest_cache`),
+  and the transfer worker picks up the replacement client, so a reconnect
+  continues the existing transfer; a fresh manifest/cache session is only built
+  by an explicit rejoin. This is the documented, bounded reconnect scope.
+- **CSP**: `tauri.conf.json` / `index.html` still ship without an explicit CSP.
+  Adding one risks breaking the running app and needs runtime verification, so it
+  is tracked as release-hardening, not silently applied here.
+- **m2_integration environment failures**: `test_a_ready_reaches_host`,
+  `test_d_seek_sets_canonical_position_on_both`,
+  `test_l_ready_does_not_bypass_play_protocol`,
+  `test_t_seek_waits_for_guest_and_resumes_together` fail on this machine both
+  with and without this batch's changes (verified against the clean baseline) and
+  match the previously documented "4 pre-existing environment failures". They
+  are timing/sandbox related, not introduced by Batch 7.
+
+## Verification
+
+- `cargo check --lib` ✅ (temporary target directory due to external-drive
+  AppleDouble artifacts)
+- `cargo test --lib app_runtime::tests` ✅ (35 tests, incl. new
+  `player_event_loop_is_replaced_not_duplicated`)
+- `cargo test --test m2_integration test_w_guest_joins_second_room_cleanly_from_running_app` ✅
+- `cargo test --test m2_integration` ✅ 22 pass + 4 pre-existing environment
+  failures (verified identical on the clean baseline)
+- `cargo test --test host_guest_wiring` ✅ (2)
+- `cargo test --test m3_closure` ✅ (7)
+- `cargo test --test m4_closure` ✅ (15)
+- `cargo test --test m3_m4_e2e` ✅ (9)
+- `pnpm lint` ✅
+- `pnpm test` ✅ (27)
+- `pnpm build` ✅
+
+## Regression tests added
+
+1. `player_event_loop_is_replaced_not_duplicated` — proves a second
+   `spawn_player_event_loop` aborts the first (workers cannot duplicate).
+2. `test_w_guest_joins_second_room_cleanly_from_running_app` (m2_integration) —
+   proves a guest already inside a room can join a fresh room cleanly with no
+   stale chat/reactions/position/provider state (running-app deep-link join).
+
+## Platform affected
+
+Code-level only — macOS and Windows both benefit; no platform-specific change.
+
+## Status
+
+Batch 7 is **CODE COMPLETE** at the code/test level. The following remain
+**MANUAL VERIFICATION REQUIRED** on physical devices:
+
+- Two-device READY consensus and real-player buffer reporting
+- Real deep-link activation (installed/bundled macOS + Windows, cold + running)
+- Real Tailscale install/sign-in/partner-reachability across devices
+- Real Local Perfect playback / range / buffer / reconnect on macOS and Windows
+- Real Chrome provider login and Provider Sync operation
+- Real native libmpv presentation inside the Cinema surface
+- Real call camera/microphone behavior (permissions, Ghost/Privacy)
+- Windows native video presentation host
+
+No item above is marked PRODUCTION VERIFIED by these automated tests.
 
 ---
 

@@ -1687,9 +1687,46 @@ impl AppRuntime {
             if let Some(task) = state.host_event_task.take() {
                 task.abort();
             }
+            if let Some(task) = state.player_event_task.take() {
+                task.abort();
+            }
+            if let Some(task) = state.transfer_stall_watcher_task.take() {
+                task.abort();
+            }
+            if let Some(task) = state.heartbeat_task.take() {
+                task.abort();
+            }
+            if let Some(task) = state.reconnect_task.take() {
+                task.abort();
+            }
+            if let Some(task) = state.peer_event_task.take() {
+                task.abort();
+            }
+            if let Some(task) = state.calibration_task.take() {
+                task.abort();
+            }
+            if let Some(task) = state.preload_task.take() {
+                task.abort();
+            }
             if let Some(client) = state.client.take() {
                 let _ = client;
             }
+            if let Some(range) = state.range_server_handle.take() {
+                range.shutdown();
+            }
+            if let Some(player) = state.player.take() {
+                player
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .close();
+            }
+            state.guest_cache = None;
+            state.media = None;
+            state.transfer = None;
+            state.player_snapshot = PlayerSnapshot::default();
+            state.chrome_session = None;
+            state.chat.clear();
+            state.reactions.clear();
             state.invite = None;
             state.credentials = None;
         }
@@ -3840,8 +3877,14 @@ impl AppRuntime {
                 }
             }
         });
-        // Store the handle so it is aborted on leave_party
-        self.lock().player_event_task = Some(task);
+        // Store the handle so it is aborted on leave_party, and abort any
+        // previously running player event loop so a repeated spawn (duplicate
+        // create, reconnect, provider→local replacement) never runs two loops
+        // polling the same player.
+        let mut state = self.lock();
+        if let Some(old) = state.player_event_task.replace(task) {
+            old.abort();
+        }
     }
 
     /// M8: Spawn a background watcher that monitors transfer progress and
@@ -5293,6 +5336,58 @@ mod tests {
         assert!(
             runtime.lock().heartbeat_task.is_some(),
             "new heartbeat worker must be present"
+        );
+        runtime.leave_party();
+    }
+
+    #[tokio::test]
+    async fn player_event_loop_is_replaced_not_duplicated() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let runtime = AppRuntime::new();
+        let old_aborted = Arc::new(AtomicBool::new(false));
+        let old_started = Arc::new(AtomicBool::new(false));
+        let old = tokio::spawn({
+            let flag = old_aborted.clone();
+            let started = old_started.clone();
+            async move {
+                struct Guard(Arc<AtomicBool>);
+                impl Drop for Guard {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::SeqCst);
+                    }
+                }
+                let _guard = Guard(flag);
+                started.store(true, Ordering::SeqCst);
+                loop {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
+            }
+        });
+        {
+            let mut state = runtime.lock();
+            state.player_event_task = Some(old);
+        }
+        for _ in 0..50 {
+            if old_started.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(old_started.load(Ordering::SeqCst), "old loop must start");
+        // Second spawn replaces (aborts) the first so duplicate creates never
+        // run two loops polling the same player.
+        runtime.spawn_player_event_loop();
+        let mut aborted = false;
+        for _ in 0..50 {
+            if old_aborted.load(Ordering::SeqCst) {
+                aborted = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            aborted,
+            "old player event loop must be aborted on replacement"
         );
         runtime.leave_party();
     }
