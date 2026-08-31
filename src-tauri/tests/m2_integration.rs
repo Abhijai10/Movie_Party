@@ -1040,6 +1040,43 @@ mod env_tests {
         host.leave_party();
         guest.leave_party();
     }
+
+    /// Joining a party whose host has already left (or is unreachable) must
+    /// produce a stable MP-NET-TS-005 error code so the frontend can show the
+    /// PartnerConnectView instead of a generic failure.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn join_party_unreachable_host_returns_ts005() {
+        let _env_guard = env_lock().lock().await;
+        std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
+
+        let host = AppRuntime::new();
+        let guest = AppRuntime::new();
+
+        let snap = host
+            .create_local_party(None)
+            .await
+            .expect("host create loopback");
+        let invite = snap.room.invite_code.expect("invite code");
+
+        // Host leaves — aborts the QUIC server so the port is freed.
+        host.leave_party();
+
+        // Give the server a moment to shut down.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Guest tries to join the now-stale invite.
+        let err = guest
+            .join_party(invite)
+            .await
+            .expect_err("join to stale host must fail");
+
+        assert!(
+            err.contains("MP-NET-TS-005"),
+            "unreachable host must produce MP-NET-TS-005, got: {err}"
+        );
+
+        std::env::remove_var("MOVIE_PARTY_DEV_LOOPBACK");
+    }
 }
 
 // ─── M5: Call Signal Integration ──────────────────────────────────────────────
