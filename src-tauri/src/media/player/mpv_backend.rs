@@ -306,6 +306,18 @@ impl MpvPlayer {
         #[cfg(target_os = "macos")]
         {
             candidates.push("libmpv.dylib".to_string());
+            // Bundled resource: Tauri places `bundle.resources` at
+            // Contents/Resources/mpv_runtime/ inside the .app. Resolve it
+            // relative to the executable so a packaged app never depends on a
+            // developer-machine Homebrew install.
+            if let Some(parent) = std::env::current_exe()
+                .ok()
+                .as_ref()
+                .and_then(|p| p.parent())
+            {
+                let bundled = parent.join("../Resources/mpv_runtime/libmpv.dylib");
+                candidates.push(bundled.to_string_lossy().to_string());
+            }
             candidates.push("/opt/homebrew/lib/libmpv.dylib".to_string());
             candidates.push("/usr/local/lib/libmpv.dylib".to_string());
             candidates.push("/Applications/mpv.app/Contents/MacOS/libmpv.dylib".to_string());

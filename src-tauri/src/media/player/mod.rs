@@ -141,6 +141,15 @@ fn candidate_libmpv_paths() -> Vec<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
+        paths.push(PathBuf::from("libmpv.dylib"));
+        // Inside a Tauri .app bundle: Contents/Resources/mpv_runtime/libmpv.dylib
+        if let Some(parent) = std::env::current_exe()
+            .ok()
+            .as_ref()
+            .and_then(|p| p.parent())
+        {
+            paths.push(parent.join("../Resources/mpv_runtime/libmpv.dylib"));
+        }
         paths.push(PathBuf::from("/opt/homebrew/lib/libmpv.dylib"));
         paths.push(PathBuf::from("/usr/local/lib/libmpv.dylib"));
         paths.push(PathBuf::from(

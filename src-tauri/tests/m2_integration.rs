@@ -892,26 +892,60 @@ mod env_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dev_loopback_mode_selects_correct_bind_addr() {
         let _env_guard = env_lock().lock().await;
-        // No env var → Tailscale path (err expected locally)
+        // No env var → Tailscale path. On a machine where Tailscale is
+        // Running/Online with a usable CGNAT IPv4 this must SUCCEED and bind
+        // to the Tailscale address; when Tailscale is unavailable it must
+        // fail with a stable Tailscale error. localhost is never used.
         let _g0 = scoped("MOVIE_PARTY_DEV_LOOPBACK", "");
         std::env::remove_var("MOVIE_PARTY_DEV_LOOPBACK");
         let r0 = AppRuntime::new();
-        assert!(
-            r0.create_local_party(None).await.is_err(),
-            "no env → Tailscale path (err expected locally)"
-        );
+        match r0.create_local_party(None).await {
+            Ok(snap) => {
+                assert_eq!(snap.network.transport, "quic");
+                assert!(
+                    snap.network.path.starts_with("Listening on 100."),
+                    "Tailscale path must advertise a CGNAT IPv4, got: {}",
+                    snap.network.path
+                );
+                let invite = snap.room.invite_code.expect("invite code");
+                let parsed = movie_party_lib::room::parse_invite(&invite).expect("valid invite");
+                assert!(
+                    parsed.host_ip.starts_with("100."),
+                    "invite must advertise the Tailscale IPv4, got host_ip={}",
+                    parsed.host_ip
+                );
+                assert_ne!(parsed.host_ip, "127.0.0.1");
+                r0.leave_party();
+            }
+            Err(e) => {
+                assert!(
+                    e.starts_with("MP-NET-TS-"),
+                    "Tailscale-unavailable error must be a stable MP-NET-TS code, got: {e}"
+                );
+            }
+        }
         drop(_g0);
 
-        // 0 → Tailscale (error locally)
+        // 0 → Tailscale path (same behavior as no env var).
         let _g1 = scoped("MOVIE_PARTY_DEV_LOOPBACK", "0");
         let r1 = AppRuntime::new();
-        assert!(
-            r1.create_local_party(None).await.is_err(),
-            "DEV_LOOPBACK=0 → Tailscale path (err expected locally)"
-        );
+        match r1.create_local_party(None).await {
+            Ok(snap) => {
+                assert!(
+                    snap.network.path.starts_with("Listening on 100."),
+                    "DEV_LOOPBACK=0 → Tailscale path, got: {}",
+                    snap.network.path
+                );
+                r1.leave_party();
+            }
+            Err(e) => assert!(
+                e.starts_with("MP-NET-TS-"),
+                "Tailscale-unavailable error must be stable MP-NET-TS code, got: {e}"
+            ),
+        }
         drop(_g1);
 
-        // 1 → loopback
+        // 1 → loopback always, regardless of Tailscale availability.
         let _g2 = scoped("MOVIE_PARTY_DEV_LOOPBACK", "1");
         let r2 = AppRuntime::new();
         let snap = r2
@@ -932,6 +966,79 @@ mod env_tests {
             .unwrap()
             .starts_with("movieparty://join/"));
         r2.leave_party();
+    }
+
+    /// Real Tailscale validation: when the development machine is Running/
+    /// Online on a Tailscale network with a usable CGNAT IPv4, the host
+    /// server must bind to the real Tailscale address (never localhost) and a
+    /// guest runtime must be able to join over that real Tailscale endpoint.
+    ///
+    /// When Tailscale is not usable, the test skips with a clear message — it
+    /// never manufactures a fake pass.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_tailscale_party_binds_cgnat_and_guest_joins() {
+        let _env_guard = env_lock().lock().await;
+        std::env::remove_var("MOVIE_PARTY_DEV_LOOPBACK");
+
+        let readiness = movie_party_lib::network::tailscale::local_readiness().await;
+        if !readiness.is_usable() {
+            eprintln!(
+                "SKIP real_tailscale_party_binds_cgnat_and_guest_joins: \
+                 Tailscale is not usable on this machine ({:?})",
+                readiness.state
+            );
+            return;
+        }
+        let tailscale_ip = readiness.ip.expect("ready implies an ip");
+        assert!(
+            tailscale_ip.starts_with("100."),
+            "Tailscale IPv4 must be in CGNAT range, got: {tailscale_ip}"
+        );
+
+        // Now test the full AppRuntime create+join over the real Tailscale IP.
+        let host = AppRuntime::new();
+        let guest = AppRuntime::new();
+
+        let host_snap = host
+            .create_local_party(None)
+            .await
+            .expect("host create_local_party over real Tailscale");
+        assert!(
+            host_snap.network.path.starts_with("Listening on 100."),
+            "host must bind the Tailscale address, got: {}",
+            host_snap.network.path
+        );
+
+        let invite = host_snap.room.invite_code.expect("invite code");
+        assert!(invite.starts_with("movieparty://join/"));
+        let parsed = movie_party_lib::room::parse_invite(&invite).expect("valid invite");
+        assert_eq!(parsed.host_ip, tailscale_ip);
+        assert_ne!(parsed.host_ip, "127.0.0.1");
+        assert!(!parsed.host_ip.starts_with("192.168."));
+
+        let guest_snap = guest
+            .join_party(invite.clone())
+            .await
+            .expect("guest join over real Tailscale");
+        assert_eq!(guest_snap.network.transport, "quic");
+        assert!(
+            guest_snap.network.connected,
+            "guest must be connected over QUIC after joining"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // The host must observe the authenticated guest.
+        let host_snap = poll_host(&host, std::time::Duration::from_secs(5), |s| {
+            s.network.connected
+                && s.participants
+                    .iter()
+                    .any(|p| p.role == "Guest" && p.connected)
+        });
+        assert!(host_snap.network.connected);
+
+        host.leave_party();
+        guest.leave_party();
     }
 }
 

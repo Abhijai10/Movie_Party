@@ -1072,6 +1072,19 @@ pub fn loopback_bind_addr() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
 }
 
+/// Local bind address for a QUIC client endpoint.
+///
+/// The client must NOT pin its source socket to the loopback address: macOS
+/// refuses to send UDP from a `127.0.0.1`-bound socket to a destination that
+/// is routed through a non-loopback interface, and a real guest's destination
+/// is the host's Tailscale CGNAT IPv4. Binding to the unspecified address lets
+/// the OS choose the correct source interface per destination (Tailscale's
+/// utun for remote CGNAT hosts, loopback for dev-loopback hosts). This is what
+/// makes a genuine two-device Tailscale join work.
+pub fn client_bind_addr() -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
+}
+
 pub fn tailscale_bind_addr(local_ipv4: Ipv4Addr) -> Result<SocketAddr, QuicError> {
     let addr = SocketAddr::new(
         IpAddr::V4(local_ipv4),
@@ -1189,7 +1202,7 @@ fn make_client_endpoint(server_certificate_fingerprint: String) -> Result<Endpoi
     let crypto =
         QuicClientConfig::try_from(crypto).map_err(|error| QuicError::Tls(error.to_string()))?;
     let client_config = ClientConfig::new(Arc::new(crypto));
-    let mut endpoint = Endpoint::client(loopback_bind_addr())?;
+    let mut endpoint = Endpoint::client(client_bind_addr())?;
     endpoint.set_default_client_config(client_config);
     Ok(endpoint)
 }
