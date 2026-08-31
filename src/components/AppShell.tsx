@@ -37,7 +37,7 @@ import { PartnerConnectView } from "../views/PartnerConnectView";
 import { TailscaleSetupView } from "../views/TailscaleSetupView";
 import { createCallTileSessionState, type CallTileSessionState } from "../overlays/callTileState";
 import { LoadingState } from "./LoadingState";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 type LocalScreen = "CREATE_PARTY" | null;
 type DevScreen = "HOME" | "CREATE" | "JOIN" | "LOBBY" | "READY" | "CINEMA" | null;
@@ -58,6 +58,7 @@ export function AppShell() {
   const [devScreen, setDevScreen] = useState<DevScreen>(null);
   const [tailscaleReadiness, setTailscaleReadiness] = useState<TailscaleReadiness | null>(null);
   const [isRefreshingConnectivity, setIsRefreshingConnectivity] = useState(false);
+  const connectivityInFlight = useRef(false);
   const [callTileSession, setCallTileSession] = useState<CallTileSessionState>(() =>
     createCallTileSessionState(),
   );
@@ -82,11 +83,14 @@ export function AppShell() {
     };
   }, []);
 
-  const applySnapshot = useCallback((next: AppSnapshot | null) => {
-    if (next) {
-      setSnapshot(next);
-    }
-  }, [setSnapshot]);
+  const applySnapshot = useCallback(
+    (next: AppSnapshot | null) => {
+      if (next) {
+        setSnapshot(next);
+      }
+    },
+    [setSnapshot],
+  );
 
   const openJoinWithInvite = useCallback(
     (rawInvite: string) => {
@@ -143,10 +147,13 @@ export function AppShell() {
   }, []);
 
   const refreshConnectivity = useCallback(async () => {
+    if (connectivityInFlight.current) return;
+    connectivityInFlight.current = true;
     setIsRefreshingConnectivity(true);
     try {
       setTailscaleReadiness(await getTailscaleReadiness());
     } finally {
+      connectivityInFlight.current = false;
       setIsRefreshingConnectivity(false);
     }
   }, []);
@@ -154,6 +161,18 @@ export function AppShell() {
   useEffect(() => {
     void refreshConnectivity();
   }, [refreshConnectivity]);
+
+  const isTailscaleReady = tailscaleReadiness?.state === "READY";
+
+  useEffect(() => {
+    if (isTailscaleReady) return;
+    const interval = setInterval(() => {
+      void refreshConnectivity();
+    }, 4000);
+    return () => {
+      clearInterval(interval);
+    };
+  }, [isTailscaleReady, refreshConnectivity]);
 
   const goHome = () => {
     setDevScreen(null);
@@ -174,7 +193,8 @@ export function AppShell() {
   };
 
   const createParty = async (request: CreatePartyRequest): Promise<boolean> => {
-    const source = request.source === "local" ? request.mediaPath?.trim() ?? "" : request.url.trim();
+    const source =
+      request.source === "local" ? (request.mediaPath?.trim() ?? "") : request.url.trim();
     if (!source) {
       setCreateError("Select a movie file, provider page, or direct link.");
       return false;
@@ -280,10 +300,7 @@ export function AppShell() {
     }
   };
 
-  const openProviderTitle = async (
-    providerId: string,
-    title: string,
-  ): Promise<boolean> => {
+  const openProviderTitle = async (providerId: string, title: string): Promise<boolean> => {
     setCreateError(null);
     try {
       const next = await navigateProviderTitle(providerId, title);
@@ -370,10 +387,15 @@ export function AppShell() {
   }
 
   if (!tailscaleReadiness) {
-    return <LoadingState title="Checking private connection" message="Verifying Tailscale on this device." />;
+    return (
+      <LoadingState
+        title="Checking private connection"
+        message="Verifying Tailscale on this device."
+      />
+    );
   }
 
-  if (tailscaleReadiness.state !== "CONNECTED") {
+  if (tailscaleReadiness.state !== "READY") {
     return (
       <TailscaleSetupView
         readiness={tailscaleReadiness}
@@ -473,11 +495,16 @@ export function AppShell() {
 function createRoomErrorMessage(error: unknown): string {
   const fallback = "Movie Party could not create the room.";
   if (error instanceof BackendCommandError) {
-    if (error.code === "MP-NET-TS-001") return "Install Tailscale before creating a private cinema.";
-    if (error.code === "MP-NET-TS-002") return "Sign in to Tailscale before creating a private cinema.";
-    if (error.code === "MP-NET-TS-003" || error.code === "MP-NET-TS-004") {
-      return "Tailscale is not ready on this device. Check its connection and try again.";
-    }
+    if (error.code === "MP-NET-TS-001")
+      return "Install Tailscale before creating a private cinema.";
+    if (error.code === "MP-NET-TS-002")
+      return "Sign in to Tailscale before creating a private cinema.";
+    if (error.code === "MP-NET-TS-003")
+      return "Tailscale is not running on this device. Open the Tailscale app and start it.";
+    if (error.code === "MP-NET-TS-004")
+      return "Tailscale is connected but has no private address Movie Party can use. Check its network.";
+    if (error.code === "MP-NET-TS-006")
+      return "Tailscale is off. Open the Tailscale app and turn it on.";
   }
   if (!developmentPreviewEnabled) {
     return fallback;

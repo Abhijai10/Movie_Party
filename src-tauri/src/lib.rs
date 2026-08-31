@@ -32,7 +32,7 @@ const DEEP_LINK_OPENED_EVENT: &str = "deep_link_opened";
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum TailscaleSetupAction {
     Install,
-    SignIn,
+    OpenApp,
     PartnerHelp,
 }
 
@@ -200,9 +200,9 @@ async fn get_tailscale_readiness() -> crate::network::tailscale::TailscaleReadin
 #[tauri::command]
 async fn open_tailscale_setup(action: TailscaleSetupAction) -> Result<(), String> {
     match action {
-        TailscaleSetupAction::SignIn => crate::network::tailscale::begin_sign_in()
-            .await
-            .map_err(|error| error.to_string()),
+        TailscaleSetupAction::OpenApp => {
+            crate::network::tailscale::open_tailscale_app().map_err(|error| error.to_string())
+        }
         TailscaleSetupAction::Install => open_external_url("https://tailscale.com/download"),
         TailscaleSetupAction::PartnerHelp => {
             open_external_url("https://tailscale.com/kb/1084/sharing")

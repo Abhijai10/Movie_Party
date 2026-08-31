@@ -65,7 +65,13 @@ export type ProviderSupportLevel = "SUPPORTED" | "PARTIAL" | "UNAVAILABLE";
 
 export type ProviderTitleResolution = "DIRECT_URL" | "PROVIDER_SEARCH";
 
-export type TailscaleState = "NOT_INSTALLED" | "SIGNED_OUT" | "CONNECTED" | "UNAVAILABLE";
+export type TailscaleState =
+  | "NOT_INSTALLED"
+  | "DAEMON_UNAVAILABLE"
+  | "NEEDS_LOGIN"
+  | "STOPPED"
+  | "NO_USABLE_ADDRESS"
+  | "READY";
 
 export type TailscaleReadiness = {
   state: TailscaleState;
@@ -211,7 +217,7 @@ export async function getTailscaleReadiness(): Promise<TailscaleReadiness> {
     return await invoke<TailscaleReadiness>("get_tailscale_readiness");
   } catch {
     return {
-      state: "UNAVAILABLE",
+      state: "DAEMON_UNAVAILABLE",
       code: "MP-NET-TS-003",
       ip: null,
       deviceName: null,
@@ -220,9 +226,9 @@ export async function getTailscaleReadiness(): Promise<TailscaleReadiness> {
   }
 }
 
-export async function openTailscaleSetup(
-  action: "INSTALL" | "SIGN_IN" | "PARTNER_HELP",
-): Promise<boolean> {
+export type TailscaleSetupAction = "INSTALL" | "OPEN_APP" | "PARTNER_HELP";
+
+export async function openTailscaleSetup(action: TailscaleSetupAction): Promise<boolean> {
   try {
     await invoke("open_tailscale_setup", { action });
     return true;
@@ -275,15 +281,11 @@ export async function launchProvider(
   return invokeSnapshotOrThrow("launch_provider", { providerId, url, mode });
 }
 
-export async function openProviderBrowser(
-  providerId: string,
-): Promise<AppSnapshot | null> {
+export async function openProviderBrowser(providerId: string): Promise<AppSnapshot | null> {
   return invokeSnapshotOrThrow("open_provider_browser", { providerId });
 }
 
-export async function checkProviderStatus(
-  providerId: string,
-): Promise<AppSnapshot | null> {
+export async function checkProviderStatus(providerId: string): Promise<AppSnapshot | null> {
   return invokeSnapshotOrThrow("check_provider_status", { providerId });
 }
 
@@ -314,9 +316,7 @@ export async function takePendingDeepLinks(): Promise<string[]> {
   }
 }
 
-export async function listenToDeepLinks(
-  onDeepLink: (url: string) => void,
-): Promise<UnlistenFn> {
+export async function listenToDeepLinks(onDeepLink: (url: string) => void): Promise<UnlistenFn> {
   return listen<string>("deep_link_opened", (event) => {
     onDeepLink(event.payload);
   });

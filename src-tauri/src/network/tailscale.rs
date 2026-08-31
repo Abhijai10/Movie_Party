@@ -25,7 +25,6 @@ pub struct TailscalePeer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TailscaleStatus {
     pub backend_state: Option<String>,
-    pub signed_in: bool,
     pub local_ipv4: Option<Ipv4Addr>,
     pub device_name: Option<String>,
     pub peers: Vec<TailscalePeer>,
@@ -35,9 +34,11 @@ pub struct TailscaleStatus {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TailscaleState {
     NotInstalled,
-    SignedOut,
-    Connected,
-    Unavailable,
+    DaemonUnavailable,
+    NeedsLogin,
+    Stopped,
+    NoUsableAddress,
+    Ready,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,7 +53,7 @@ pub struct TailscaleReadiness {
 
 impl TailscaleReadiness {
     pub fn is_usable(&self) -> bool {
-        self.state == TailscaleState::Connected
+        self.state == TailscaleState::Ready
     }
 
     pub fn stable_error(&self) -> Option<String> {
@@ -73,23 +74,26 @@ pub enum TailscaleError {
 }
 
 pub fn candidate_executables() -> Vec<PathBuf> {
-    let mut candidates = vec![PathBuf::from("tailscale")];
-
     #[cfg(target_os = "macos")]
     {
-        candidates.push(PathBuf::from(
-            "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-        ));
-        candidates.push(PathBuf::from("/opt/homebrew/bin/tailscale"));
-        candidates.push(PathBuf::from("/usr/local/bin/tailscale"));
+        vec![
+            PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale"),
+            PathBuf::from("/opt/homebrew/bin/tailscale"),
+            PathBuf::from("/usr/local/bin/tailscale"),
+            PathBuf::from("tailscale"),
+        ]
     }
-
     #[cfg(target_os = "windows")]
     {
-        candidates.push(PathBuf::from(r"C:\Program Files\Tailscale\tailscale.exe"));
+        vec![
+            PathBuf::from("tailscale.exe"),
+            PathBuf::from(r"C:\Program Files\Tailscale\tailscale.exe"),
+        ]
     }
-
-    candidates
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        vec![PathBuf::from("tailscale")]
+    }
 }
 
 pub async fn detect_status() -> Result<TailscaleStatus, TailscaleError> {
@@ -128,7 +132,7 @@ pub async fn detect_status() -> Result<TailscaleStatus, TailscaleError> {
 pub async fn local_readiness() -> TailscaleReadiness {
     if dev_loopback_enabled() {
         return TailscaleReadiness {
-            state: TailscaleState::Connected,
+            state: TailscaleState::Ready,
             code: None,
             ip: Some("127.0.0.1".to_string()),
             device_name: Some("Development loopback".to_string()),
@@ -152,50 +156,86 @@ pub fn readiness_from_error(error: TailscaleError) -> TailscaleReadiness {
             message: "Install Tailscale to create or join a private cinema.".to_string(),
         },
         TailscaleError::CommandFailed(_) | TailscaleError::InvalidStatus(_) => TailscaleReadiness {
-            state: TailscaleState::Unavailable,
+            state: TailscaleState::DaemonUnavailable,
             code: Some("MP-NET-TS-003".to_string()),
             ip: None,
             device_name: None,
-            message: "Tailscale is installed but unavailable. Check that its service is running."
+            message: "Tailscale is installed but its daemon is not responding. Make sure Tailscale is running."
                 .to_string(),
         },
     }
 }
 
 pub fn readiness_from_status(status: TailscaleStatus) -> TailscaleReadiness {
-    if !status.signed_in {
-        if !matches!(status.backend_state.as_deref(), Some("NeedsLogin")) {
-            return TailscaleReadiness {
-                state: TailscaleState::Unavailable,
-                code: Some("MP-NET-TS-003".to_string()),
+    match status.backend_state.as_deref() {
+        Some("NoState") | Some("NeedsLogin") | Some("NeedsMachineAuth") => {
+            TailscaleReadiness {
+                state: TailscaleState::NeedsLogin,
+                code: Some("MP-NET-TS-002".to_string()),
                 ip: None,
                 device_name: status.device_name,
-                message: "Tailscale is installed but its service is unavailable.".to_string(),
-            };
+                message: "Tailscale is installed but not signed in. Open Tailscale to sign in and connect."
+                    .to_string(),
+            }
         }
-        return TailscaleReadiness {
-            state: TailscaleState::SignedOut,
-            code: Some("MP-NET-TS-002".to_string()),
-            ip: None,
+        Some("Stopped") => {
+            let has_ip = status.local_ipv4.is_some();
+            TailscaleReadiness {
+                state: TailscaleState::Stopped,
+                code: Some("MP-NET-TS-006".to_string()),
+                ip: status.local_ipv4.map(|ip| ip.to_string()),
+                device_name: status.device_name,
+                message: if has_ip {
+                    "Tailscale is installed and authenticated, but the connection is stopped. Open Tailscale to connect."
+                        .to_string()
+                } else {
+                    "Tailscale connection is stopped. Open Tailscale to connect.".to_string()
+                },
+            }
+        }
+        Some("Starting") => TailscaleReadiness {
+            state: TailscaleState::Stopped,
+            code: Some("MP-NET-TS-006".to_string()),
+            ip: status.local_ipv4.map(|ip| ip.to_string()),
             device_name: status.device_name,
-            message: "Tailscale is installed but not signed in.".to_string(),
-        };
-    }
-
-    match status.local_ipv4 {
-        Some(ip) if is_usable_tailscale_ipv4(ip) => TailscaleReadiness {
-            state: TailscaleState::Connected,
-            code: None,
-            ip: Some(ip.to_string()),
-            device_name: status.device_name,
-            message: "Private connection ready.".to_string(),
+            message: "Tailscale is starting. Please wait and check again.".to_string(),
         },
-        _ => TailscaleReadiness {
-            state: TailscaleState::Unavailable,
-            code: Some("MP-NET-TS-004".to_string()),
+        Some("Running") => match status.local_ipv4 {
+            Some(ip) if is_usable_tailscale_ipv4(ip) => TailscaleReadiness {
+                state: TailscaleState::Ready,
+                code: None,
+                ip: Some(ip.to_string()),
+                device_name: status.device_name,
+                message: "Private connection ready.".to_string(),
+            },
+            _ => TailscaleReadiness {
+                state: TailscaleState::NoUsableAddress,
+                code: Some("MP-NET-TS-004".to_string()),
+                ip: None,
+                device_name: status.device_name,
+                message:
+                    "Tailscale is connected but has no usable private IPv4 address."
+                        .to_string(),
+            },
+        },
+        None => TailscaleReadiness {
+            state: TailscaleState::DaemonUnavailable,
+            code: Some("MP-NET-TS-003".to_string()),
             ip: None,
             device_name: status.device_name,
-            message: "Tailscale is connected but has no usable private IPv4 address.".to_string(),
+            message:
+                "Tailscale returned a status without a backend state. Check that Tailscale is running."
+                    .to_string(),
+        },
+        Some(other) => TailscaleReadiness {
+            state: TailscaleState::DaemonUnavailable,
+            code: Some("MP-NET-TS-003".to_string()),
+            ip: None,
+            device_name: status.device_name,
+            message: format!(
+                "Tailscale status is unknown ({}). Check that its service is running.",
+                other
+            ),
         },
     }
 }
@@ -220,25 +260,35 @@ pub fn dev_loopback_enabled() -> bool {
         .unwrap_or(false)
 }
 
-pub async fn begin_sign_in() -> Result<(), TailscaleError> {
-    for executable in candidate_executables() {
-        match Command::new(&executable).arg("up").spawn() {
-            Ok(_) => return Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(TailscaleError::CommandFailed(error.to_string())),
+pub fn open_tailscale_app() -> Result<(), TailscaleError> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("open")
+            .args(["-a", "Tailscale"])
+            .output()
+            .map_err(|e| TailscaleError::CommandFailed(e.to_string()))?;
+        if !output.status.success() {
+            return Err(TailscaleError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ));
         }
+        Ok(())
     }
-    Err(TailscaleError::ExecutableNotFound)
+    #[cfg(not(target_os = "macos"))]
+    {
+        for executable in candidate_executables() {
+            match std::process::Command::new(&executable).spawn() {
+                Ok(_) => return Ok(()),
+                Err(_) => continue,
+            }
+        }
+        Err(TailscaleError::ExecutableNotFound)
+    }
 }
 
 pub fn parse_status_json(bytes: &[u8]) -> Result<TailscaleStatus, TailscaleError> {
     let raw: RawStatus = serde_json::from_slice(bytes)
         .map_err(|error| TailscaleError::InvalidStatus(error.to_string()))?;
-
-    let signed_in = matches!(
-        raw.backend_state.as_deref(),
-        Some("Running" | "Starting" | "NeedsLogin")
-    ) && !matches!(raw.backend_state.as_deref(), Some("NeedsLogin"));
 
     let local_ipv4: Option<Ipv4Addr> = raw
         .self_node
@@ -268,7 +318,6 @@ pub fn parse_status_json(bytes: &[u8]) -> Result<TailscaleStatus, TailscaleError
 
     Ok(TailscaleStatus {
         backend_state: raw.backend_state,
-        signed_in,
         local_ipv4,
         device_name,
         peers,
@@ -369,7 +418,6 @@ mod tests {
         )
         .expect("valid Tailscale status");
 
-        assert!(status.signed_in);
         assert_eq!(status.local_ipv4.expect("ipv4").to_string(), "100.64.0.10");
         assert_eq!(status.peers[0].path, TailscalePath::Direct);
     }
@@ -384,10 +432,6 @@ mod tests {
             result.err()
         );
         let status = result.unwrap();
-        assert!(
-            status.signed_in,
-            "BackendState=Running means tailscale is signed in"
-        );
         assert!(status.local_ipv4.is_none(), "null IPs → None");
         assert!(status.peers.is_empty());
     }
@@ -411,27 +455,134 @@ mod tests {
     }
 
     #[test]
-    fn readiness_distinguishes_signed_out_from_connected() {
-        let signed_out = parse_status_json(
-            br#"{"BackendState":"NeedsLogin","Self":{"TailscaleIPs":["100.64.0.10"]}}"#,
-        )
-        .expect("valid signed-out status");
-        assert_eq!(
-            readiness_from_status(signed_out).state,
-            TailscaleState::SignedOut
-        );
-
-        let connected = parse_status_json(
+    fn running_with_usable_ip_is_ready() {
+        let status = parse_status_json(
             br#"{"BackendState":"Running","Self":{"DNSName":"cinema.tailnet.ts.net.","TailscaleIPs":["100.64.0.10"]}}"#,
         )
         .expect("valid connected status");
-        let readiness = readiness_from_status(connected);
-        assert_eq!(readiness.state, TailscaleState::Connected);
+        let readiness = readiness_from_status(status);
+        assert_eq!(readiness.state, TailscaleState::Ready);
         assert_eq!(readiness.ip.as_deref(), Some("100.64.0.10"));
         assert_eq!(
             readiness.device_name.as_deref(),
             Some("cinema.tailnet.ts.net.")
         );
+        assert!(readiness.code.is_none());
+    }
+
+    #[test]
+    fn needs_login_returns_needs_login_not_unavailable() {
+        let status = parse_status_json(
+            br#"{"BackendState":"NeedsLogin","Self":{"TailscaleIPs":["100.64.0.10"]}}"#,
+        )
+        .expect("valid NeedsLogin status");
+        let readiness = readiness_from_status(status);
+        assert_eq!(readiness.state, TailscaleState::NeedsLogin);
+        assert_eq!(readiness.code.as_deref(), Some("MP-NET-TS-002"));
+    }
+
+    #[test]
+    fn no_state_maps_to_needs_login() {
+        let status = parse_status_json(br#"{"BackendState":"NoState","Self":{"TailscaleIPs":[]}}"#)
+            .expect("valid NoState status");
+        let readiness = readiness_from_status(status);
+        assert_eq!(readiness.state, TailscaleState::NeedsLogin);
+    }
+
+    #[test]
+    fn needs_machine_auth_maps_to_needs_login() {
+        let status =
+            parse_status_json(br#"{"BackendState":"NeedsMachineAuth","Self":{"TailscaleIPs":[]}}"#)
+                .expect("valid NeedsMachineAuth status");
+        let readiness = readiness_from_status(status);
+        assert_eq!(readiness.state, TailscaleState::NeedsLogin);
+    }
+
+    #[test]
+    fn stopped_with_ips_is_stopped_not_unavailable() {
+        let status = parse_status_json(
+            br#"{"BackendState":"Stopped","Self":{"TailscaleIPs":["100.114.120.114"]}}"#,
+        )
+        .expect("valid stopped status with IPs");
+        let readiness = readiness_from_status(status);
+        assert_eq!(readiness.state, TailscaleState::Stopped);
+        assert_eq!(readiness.code.as_deref(), Some("MP-NET-TS-006"));
+        assert_eq!(readiness.ip.as_deref(), Some("100.114.120.114"));
+    }
+
+    #[test]
+    fn real_macos_machine_state_stopped_with_ip_is_not_unavailable() {
+        // Captured from `tailscale status --json` on a real macOS install where
+        // Tailscale.app is running but the tunnel is stopped. The machine is
+        // authenticated (HaveNodeKey, UserID, DNSName, TailscaleIPs all present).
+        let status = parse_status_json(
+            br#"{
+              "BackendState": "Stopped",
+              "HaveNodeKey": true,
+              "AuthURL": "",
+              "TailscaleIPs": ["100.114.120.114", "fd7a:115c:a1e0::3901:788a"],
+              "Self": {
+                "DNSName": "abhijais-macbook-air.tailc930b7.ts.net.",
+                "UserID": 7429568193493714,
+                "TailscaleIPs": ["100.114.120.114", "fd7a:115c:a1e0::3901:788a"],
+                "Online": false
+              },
+              "Peer": null
+            }"#,
+        )
+        .expect("real macOS status must parse");
+        assert_eq!(status.backend_state.as_deref(), Some("Stopped"));
+        assert_eq!(
+            status.local_ipv4.map(|ip| ip.to_string()).as_deref(),
+            Some("100.114.120.114")
+        );
+        assert_eq!(
+            status.device_name.as_deref(),
+            Some("abhijais-macbook-air.tailc930b7.ts.net.")
+        );
+
+        let readiness = readiness_from_status(status);
+        assert_eq!(
+            readiness.state,
+            TailscaleState::Stopped,
+            "a stopped-but-authenticated machine must NOT be reported as unavailable"
+        );
+        assert_eq!(readiness.code.as_deref(), Some("MP-NET-TS-006"));
+        assert!(!readiness.is_usable());
+    }
+
+    #[test]
+    fn ipv6_only_tailscale_address_is_no_usable_address() {
+        // An authenticated tailnet node whose only Tailscale address is IPv6 has
+        // no usable private IPv4 for the QUIC transport and must not be "ready".
+        let status = parse_status_json(
+            br#"{"BackendState":"Running","Self":{"TailscaleIPs":["fd7a:115c:a1e0::3901:788a"]}}"#,
+        )
+        .expect("valid status with only IPv6");
+        let readiness = readiness_from_status(status);
+        assert_eq!(readiness.state, TailscaleState::NoUsableAddress);
+        assert_eq!(readiness.code.as_deref(), Some("MP-NET-TS-004"));
+    }
+
+    #[test]
+    fn stopped_without_ips_is_stopped_not_unavailable() {
+        let status = parse_status_json(br#"{"BackendState":"Stopped","Self":{"TailscaleIPs":[]}}"#)
+            .expect("valid stopped status");
+        let readiness = readiness_from_status(status);
+        assert_eq!(readiness.state, TailscaleState::Stopped);
+        assert_eq!(readiness.code.as_deref(), Some("MP-NET-TS-006"));
+        assert!(readiness.ip.is_none());
+    }
+
+    #[test]
+    fn starting_is_stopped_with_check_again_message() {
+        let status = parse_status_json(
+            br#"{"BackendState":"Starting","Self":{"TailscaleIPs":["100.64.0.10"]}}"#,
+        )
+        .expect("valid Starting status");
+        let readiness = readiness_from_status(status);
+        assert_eq!(readiness.state, TailscaleState::Stopped);
+        assert!(readiness.message.contains("starting"));
     }
 
     #[test]
@@ -441,17 +592,16 @@ mod tests {
         )
         .expect("valid status without Tailscale IPv4");
         let readiness = readiness_from_status(status);
-        assert_eq!(readiness.state, TailscaleState::Unavailable);
+        assert_eq!(readiness.state, TailscaleState::NoUsableAddress);
         assert_eq!(readiness.code.as_deref(), Some("MP-NET-TS-004"));
     }
 
     #[test]
-    fn stopped_daemon_is_unavailable_not_signed_out() {
-        let status = parse_status_json(br#"{"BackendState":"Stopped","Self":{"TailscaleIPs":[]}}"#)
-            .expect("valid stopped status");
+    fn running_without_self_is_no_usable_address() {
+        let status = parse_status_json(br#"{"BackendState":"Running","Self":null}"#)
+            .expect("valid status with null Self");
         let readiness = readiness_from_status(status);
-        assert_eq!(readiness.state, TailscaleState::Unavailable);
-        assert_eq!(readiness.code.as_deref(), Some("MP-NET-TS-003"));
+        assert_eq!(readiness.state, TailscaleState::NoUsableAddress);
     }
 
     #[test]
@@ -460,31 +610,103 @@ mod tests {
     }
 
     #[test]
-    fn executable_missing_maps_to_not_installed() {
+    fn executable_not_found_maps_to_not_installed() {
         let readiness = readiness_from_error(TailscaleError::ExecutableNotFound);
         assert_eq!(readiness.state, TailscaleState::NotInstalled);
         assert_eq!(readiness.code.as_deref(), Some("MP-NET-TS-001"));
     }
 
     #[test]
-    fn create_precondition_requires_a_usable_private_address() {
-        let signed_out = readiness_from_status(
+    fn command_failed_maps_to_daemon_unavailable() {
+        let readiness = readiness_from_error(TailscaleError::CommandFailed(
+            "connection refused".to_string(),
+        ));
+        assert_eq!(readiness.state, TailscaleState::DaemonUnavailable);
+        assert_eq!(readiness.code.as_deref(), Some("MP-NET-TS-003"));
+    }
+
+    #[test]
+    fn invalid_status_maps_to_daemon_unavailable() {
+        let readiness = readiness_from_error(TailscaleError::InvalidStatus("bad json".to_string()));
+        assert_eq!(readiness.state, TailscaleState::DaemonUnavailable);
+    }
+
+    #[test]
+    fn unknown_backend_state_maps_to_daemon_unavailable() {
+        let status =
+            parse_status_json(br#"{"BackendState":"AwaitingKey","Self":{"TailscaleIPs":[]}}"#)
+                .expect("valid status with unknown state");
+        let readiness = readiness_from_status(status);
+        assert_eq!(readiness.state, TailscaleState::DaemonUnavailable);
+    }
+
+    #[test]
+    fn missing_backend_state_maps_to_daemon_unavailable() {
+        let status = parse_status_json(br#"{"Self":{"TailscaleIPs":["100.64.0.10"]}}"#)
+            .expect("valid status without BackendState");
+        let readiness = readiness_from_status(status);
+        assert_eq!(readiness.state, TailscaleState::DaemonUnavailable);
+        assert_eq!(readiness.code.as_deref(), Some("MP-NET-TS-003"));
+    }
+
+    #[test]
+    fn create_precondition_requires_usable_private_address() {
+        let needs_login = readiness_from_status(
             parse_status_json(br#"{"BackendState":"NeedsLogin","Self":{"TailscaleIPs":[]}}"#)
-                .expect("valid signed-out status"),
+                .expect("valid NeedsLogin status"),
         );
-        assert!(required_ipv4(&signed_out)
-            .expect_err("signed-out state must block create")
+        assert!(required_ipv4(&needs_login)
+            .expect_err("NeedsLogin must block create")
             .starts_with("MP-NET-TS-002"));
 
-        let connected = readiness_from_status(
+        let stopped = readiness_from_status(
+            parse_status_json(
+                br#"{"BackendState":"Stopped","Self":{"TailscaleIPs":["100.64.0.10"]}}"#,
+            )
+            .expect("valid Stopped status"),
+        );
+        assert!(required_ipv4(&stopped)
+            .expect_err("Stopped must block create")
+            .starts_with("MP-NET-TS-006"));
+
+        let ready = readiness_from_status(
             parse_status_json(
                 br#"{"BackendState":"Running","Self":{"TailscaleIPs":["100.64.0.10"]}}"#,
             )
-            .expect("valid connected status"),
+            .expect("valid ready status"),
         );
         assert_eq!(
-            required_ipv4(&connected).expect("usable IP"),
+            required_ipv4(&ready).expect("usable IP"),
             "100.64.0.10".parse::<std::net::Ipv4Addr>().unwrap()
         );
+    }
+
+    #[test]
+    fn is_usable_returns_true_only_for_ready() {
+        use super::TailscaleReadiness;
+        for state in &[
+            TailscaleState::NotInstalled,
+            TailscaleState::DaemonUnavailable,
+            TailscaleState::NeedsLogin,
+            TailscaleState::Stopped,
+            TailscaleState::NoUsableAddress,
+        ] {
+            let r = TailscaleReadiness {
+                state: state.clone(),
+                code: None,
+                ip: None,
+                device_name: None,
+                message: String::new(),
+            };
+            assert!(!r.is_usable(), "{:?} should not be usable", state);
+        }
+        let r = TailscaleReadiness {
+            state: TailscaleState::Ready,
+            code: None,
+            ip: Some("100.64.0.10".to_string()),
+            device_name: None,
+            message: String::new(),
+        };
+        assert!(r.is_usable());
     }
 }
