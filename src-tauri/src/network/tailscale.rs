@@ -22,6 +22,25 @@ pub struct TailscalePeer {
     pub path: TailscalePath,
 }
 
+impl TailscalePeer {
+    /// Returns the first usable Tailscale CGNAT IPv4 address, if any.
+    pub fn usable_ipv4(&self) -> Option<Ipv4Addr> {
+        self.tailscale_ips
+            .iter()
+            .copied()
+            .find(|&ip| is_usable_tailscale_ipv4(ip))
+    }
+}
+
+/// Returns the subset of peers that are online and have at least one usable
+/// Tailscale CGNAT IPv4 address. Non-Tailscale or offline peers are excluded.
+pub fn usable_peers<'a>(peers: &'a [TailscalePeer]) -> Vec<&'a TailscalePeer> {
+    peers
+        .iter()
+        .filter(|p| p.online && p.usable_ipv4().is_some())
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TailscaleStatus {
     pub backend_state: Option<String>,
@@ -310,6 +329,7 @@ pub fn parse_status_json(bytes: &[u8]) -> Result<TailscaleStatus, TailscaleError
                 .tailscale_ips
                 .iter()
                 .filter_map(|value| value.parse::<Ipv4Addr>().ok())
+                .filter(|&ip| is_usable_tailscale_ipv4(ip))
                 .collect(),
             online: peer.online.unwrap_or(false),
             path: classify_path(peer.cur_addr.as_deref(), peer.relay.as_deref(), peer.online),
@@ -331,9 +351,13 @@ fn first_usable_tailscale_ipv4(values: &[String]) -> Option<Ipv4Addr> {
         .find(|ip| is_usable_tailscale_ipv4(*ip))
 }
 
-fn is_usable_tailscale_ipv4(ip: Ipv4Addr) -> bool {
+pub fn is_usable_tailscale_ipv4(ip: Ipv4Addr) -> bool {
     let octets = ip.octets();
     octets[0] == 100 && (64..=127).contains(&octets[1])
+}
+
+pub fn is_allowed_party_ipv4(ip: Ipv4Addr) -> bool {
+    ip.is_loopback() || is_usable_tailscale_ipv4(ip)
 }
 
 fn classify_path(
@@ -396,8 +420,9 @@ struct RawNode {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_status_json, readiness_from_error, readiness_from_status, required_ipv4,
-        TailscaleError, TailscalePath, TailscaleState,
+        is_allowed_party_ipv4, is_usable_tailscale_ipv4, parse_status_json, readiness_from_error,
+        readiness_from_status, required_ipv4, usable_peers, TailscaleError, TailscalePath,
+        TailscalePeer, TailscaleState,
     };
 
     #[test]
@@ -708,5 +733,92 @@ mod tests {
             message: String::new(),
         };
         assert!(r.is_usable());
+    }
+
+    #[test]
+    fn usable_tailscale_ipv4_only_accepts_cgnat_range() {
+        assert!(is_usable_tailscale_ipv4("100.64.0.1".parse().unwrap()));
+        assert!(is_usable_tailscale_ipv4("100.127.255.254".parse().unwrap()));
+        assert!(!is_usable_tailscale_ipv4("100.63.255.255".parse().unwrap()));
+        assert!(!is_usable_tailscale_ipv4("100.128.0.1".parse().unwrap()));
+        assert!(!is_usable_tailscale_ipv4("127.0.0.1".parse().unwrap()));
+        assert!(!is_usable_tailscale_ipv4("192.168.1.12".parse().unwrap()));
+        assert!(!is_usable_tailscale_ipv4("10.0.0.5".parse().unwrap()));
+    }
+
+    #[test]
+    fn allowed_party_ipv4_is_loopback_or_tailscale_only() {
+        assert!(is_allowed_party_ipv4("127.0.0.1".parse().unwrap()));
+        assert!(is_allowed_party_ipv4("100.64.0.10".parse().unwrap()));
+        assert!(!is_allowed_party_ipv4("192.168.1.12".parse().unwrap()));
+        assert!(!is_allowed_party_ipv4("10.0.0.5".parse().unwrap()));
+        assert!(!is_allowed_party_ipv4("0.0.0.0".parse().unwrap()));
+    }
+
+    #[test]
+    fn peer_usable_ipv4_selects_first_cgnat_and_ignores_lan() {
+        let peer = TailscalePeer {
+            dns_name: "guest.tailnet.ts.net.".to_string(),
+            tailscale_ips: vec![
+                "127.0.0.1".parse().unwrap(),
+                "192.168.1.12".parse().unwrap(),
+                "100.64.0.42".parse().unwrap(),
+            ],
+            online: true,
+            path: TailscalePath::Direct,
+        };
+        assert_eq!(
+            peer.usable_ipv4().expect("usable ipv4").to_string(),
+            "100.64.0.42"
+        );
+    }
+
+    #[test]
+    fn peer_parse_filters_out_non_tailscale_ipv4() {
+        let status = parse_status_json(
+            br#"{
+              "BackendState": "Running",
+              "Self": {"TailscaleIPs": ["100.64.0.10"]},
+              "Peer": {
+                "g": {
+                  "DNSName": "guest.tailnet.ts.net.",
+                  "TailscaleIPs": ["100.64.0.42", "192.168.1.12", "fd7a:115c:a1e0::2"],
+                  "Online": true,
+                  "CurAddr": "100.64.0.42:47821"
+                }
+              }
+            }"#,
+        )
+        .expect("valid status");
+        let peer = &status.peers[0];
+        assert_eq!(peer.tailscale_ips.len(), 1);
+        assert_eq!(peer.tailscale_ips[0].to_string(), "100.64.0.42");
+        assert_eq!(peer.usable_ipv4().expect("ipv4").to_string(), "100.64.0.42");
+    }
+
+    #[test]
+    fn usable_peers_excludes_offline_and_peer_without_cgnat() {
+        let online = TailscalePeer {
+            dns_name: "a".to_string(),
+            tailscale_ips: vec!["100.64.0.10".parse().unwrap()],
+            online: true,
+            path: TailscalePath::Direct,
+        };
+        let offline = TailscalePeer {
+            dns_name: "b".to_string(),
+            tailscale_ips: vec!["100.64.0.11".parse().unwrap()],
+            online: false,
+            path: TailscalePath::Offline,
+        };
+        let lan_only = TailscalePeer {
+            dns_name: "c".to_string(),
+            tailscale_ips: vec!["192.168.1.12".parse().unwrap()],
+            online: true,
+            path: TailscalePath::Direct,
+        };
+        let all = [online.clone(), offline, lan_only];
+        let result = usable_peers(&all);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].dns_name, "a");
     }
 }

@@ -1089,8 +1089,7 @@ pub fn validate_quic_bind_addr(bind_addr: SocketAddr) -> Result<(), QuicError> {
 }
 
 fn is_tailscale_ipv4(ipv4: Ipv4Addr) -> bool {
-    let octets = ipv4.octets();
-    octets[0] == 100 && (64..=127).contains(&octets[1])
+    crate::network::tailscale::is_usable_tailscale_ipv4(ipv4)
 }
 
 pub fn certificate_fingerprint(certificate: &rustls::pki_types::CertificateDer<'_>) -> String {

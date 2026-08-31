@@ -144,10 +144,20 @@ fn validate_invite_shape(invite: &MoviePartyInvite) -> Result<(), InviteError> {
     if !is_base64url_256bit(&invite.server_certificate_fingerprint) {
         return Err(InviteError::InvalidFingerprintShape);
     }
-    invite
+    let host_ip = invite
         .host_ip
         .parse::<IpAddr>()
         .map_err(|_| InviteError::InvalidHostAddress(invite.host_ip.clone()))?;
+    // A Movie Party invite may only advertise a Tailscale CGNAT IPv4 or a
+    // loopback address (dev mode). LAN/public addresses are never valid party
+    // endpoints, so reject them at parse time with a precise error instead of
+    // letting a joiner connect to the wrong transport.
+    if !crate::network::tailscale::is_allowed_party_ipv4(match host_ip {
+        IpAddr::V4(ipv4) => ipv4,
+        IpAddr::V6(_) => return Err(InviteError::InvalidHostAddress(invite.host_ip.clone())),
+    }) {
+        return Err(InviteError::InvalidHostAddress(invite.host_ip.clone()));
+    }
     Ok(())
 }
 
@@ -188,6 +198,52 @@ mod tests {
     fn rejects_invalid_scheme() {
         let err = parse_invite("https://evil.example/").unwrap_err();
         assert!(matches!(err, InviteError::InvalidScheme));
+    }
+
+    #[test]
+    fn rejects_lan_or_public_host_ip_in_invite() {
+        let mut invite = MoviePartyInvite {
+            v: INVITE_VERSION_V1,
+            protocol_major: crate::PROTOCOL_MAJOR,
+            protocol_minor: crate::PROTOCOL_MINOR,
+            room_id: "EjRWeJCrze8BI0VniavN7w".to_string(),
+            join_secret: "mSncRHUcatB8mqTKA0jVJPmc0JaWJsm4u17SWO9M-q0".to_string(),
+            host_device_id: "device".to_string(),
+            host_ip: "192.168.1.50".to_string(),
+            host_port: 47_821,
+            server_certificate_fingerprint: "3VJR83iDjJSTGaBR8Ywkwm5e1eNRTLnDfdrIsEc2Plw"
+                .to_string(),
+            expires_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64
+                + 10000,
+        };
+
+        // A LAN address must be rejected at encode time so a party can never
+        // advertise an unrelated LAN transport when Tailscale is intended.
+        assert!(matches!(
+            encode_invite(&invite),
+            Err(InviteError::InvalidHostAddress(_))
+        ));
+
+        // A public IPv4 must also be rejected.
+        invite.host_ip = "203.0.113.10".to_string();
+        assert!(matches!(
+            encode_invite(&invite),
+            Err(InviteError::InvalidHostAddress(_))
+        ));
+
+        // IPv6 addresses are not usable by the QUIC transport.
+        invite.host_ip = "fd7a:115c:a1e0::3901:788a".to_string();
+        assert!(matches!(
+            encode_invite(&invite),
+            Err(InviteError::InvalidHostAddress(_))
+        ));
+
+        // Tailscale CGNAT is the only allowed production host.
+        invite.host_ip = "100.64.0.10".to_string();
+        assert!(encode_invite(&invite).is_ok());
     }
 
     #[test]

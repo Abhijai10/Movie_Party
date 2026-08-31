@@ -165,10 +165,16 @@ export function AppShell() {
   const isTailscaleReady = tailscaleReadiness?.state === "READY";
 
   useEffect(() => {
-    if (isTailscaleReady) return;
-    const interval = setInterval(() => {
-      void refreshConnectivity();
-    }, 4000);
+    // Poll connectivity continuously. A slower cadence while READY keeps the
+    // setup gate truthful for READY → STOPPED transitions without hammering
+    // the backend; a fast cadence while not READY lets the app unlock the
+    // moment Tailscale becomes usable.
+    const interval = setInterval(
+      () => {
+        void refreshConnectivity();
+      },
+      isTailscaleReady ? 15_000 : 4_000,
+    );
     return () => {
       clearInterval(interval);
     };
