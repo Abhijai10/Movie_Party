@@ -10,9 +10,14 @@ build/
 # Tauri
 src-tauri/target/
 src-tauri/gen/
-# Bundled mpv runtime DLL for Windows (CI populates this, never commit 120MB DLL)
+# Bundled mpv runtime for macOS/Windows (build script populates this; the
+# large dylib/dll binaries are never committed). License/attribution texts in
+# mpv_runtime/licenses/ ARE committed because LGPL distribution requires them.
 src-tauri/mpv_runtime/*
 !src-tauri/mpv_runtime/.gitkeep
+!src-tauri/mpv_runtime/licenses/
+!src-tauri/mpv_runtime/licenses/*
+!src-tauri/mpv_runtime/licenses/NOTICE.txt
 
 # Environment
 .env

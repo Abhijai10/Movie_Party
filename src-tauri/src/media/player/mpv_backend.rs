@@ -291,65 +291,13 @@ impl MpvPlayer {
     }
 
     fn open_mpv_library() -> Result<libloading::Library, PlayerError> {
-        let candidates = Self::mpv_library_candidates();
+        let candidates = super::candidate_libmpv_paths();
         for candidate in &candidates {
             if let Ok(lib) = unsafe { libloading::Library::new(candidate) } {
                 return Ok(lib);
             }
         }
         Err(PlayerError::LibMpvUnavailable)
-    }
-
-    fn mpv_library_candidates() -> Vec<String> {
-        let mut candidates = Vec::new();
-
-        #[cfg(target_os = "macos")]
-        {
-            candidates.push("libmpv.dylib".to_string());
-            // Bundled resource: Tauri places `bundle.resources` at
-            // Contents/Resources/mpv_runtime/ inside the .app. Resolve it
-            // relative to the executable so a packaged app never depends on a
-            // developer-machine Homebrew install.
-            if let Some(parent) = std::env::current_exe()
-                .ok()
-                .as_ref()
-                .and_then(|p| p.parent())
-            {
-                let bundled = parent.join("../Resources/mpv_runtime/libmpv.dylib");
-                candidates.push(bundled.to_string_lossy().to_string());
-            }
-            candidates.push("/opt/homebrew/lib/libmpv.dylib".to_string());
-            candidates.push("/usr/local/lib/libmpv.dylib".to_string());
-            candidates.push("/Applications/mpv.app/Contents/MacOS/libmpv.dylib".to_string());
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            candidates.push("mpv-2.dll".to_string());
-            candidates.push(r"C:\Program Files\mpv\mpv-2.dll".to_string());
-            candidates.push(r"C:\Program Files (x86)\mpv\mpv-2.dll".to_string());
-            // Tauri NSIS/MSI bundles resources into the same directory as the
-            // executable, so a self-contained installer ships mpv_runtime/mpv-2.dll
-            // next to Movie Party.exe and must be found without the user installing
-            // mpv separately.
-            if let Some(parent) = std::env::current_exe()
-                .ok()
-                .as_ref()
-                .and_then(|p| p.parent())
-            {
-                let bundled = parent.join("mpv_runtime").join("mpv-2.dll");
-                candidates.push(bundled.to_string_lossy().to_string());
-            }
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            candidates.push("libmpv.so".to_string());
-            candidates.push("/usr/lib/libmpv.so".to_string());
-            candidates.push("/usr/lib/x86_64-linux-gnu/libmpv.so".to_string());
-        }
-
-        candidates
     }
 
     fn ensure_ready(&self) -> Result<(MpvHandle, &MpvFns), PlayerError> {
@@ -718,11 +666,80 @@ impl LocalPlayer for MpvPlayer {
 mod tests {
     use super::{MpvPlayer, PlayerError, PlayerState};
     use crate::media::player::LocalPlayer;
+    use std::path::Path;
 
     #[test]
     fn mpv_player_creation_does_not_panic() {
         let _player = MpvPlayer::new();
         // Creation should never panic even if mpv is unavailable
+    }
+
+    #[test]
+    fn bundled_libmpv_path_resolves_correctly_inside_app_bundle() {
+        let exe_dir = Path::new("/Applications/Movie Party.app/Contents/MacOS");
+        let bundled = crate::media::player::bundled_libmpv_path(exe_dir);
+        // Normalize the `..` component so the comparison reflects what the
+        // filesystem resolves to at runtime.
+        let normalized: std::path::PathBuf =
+            bundled
+                .components()
+                .fold(std::path::PathBuf::new(), |mut acc, comp| {
+                    match comp {
+                        std::path::Component::ParentDir => {
+                            acc.pop();
+                        }
+                        _ => acc.push(comp.as_os_str()),
+                    }
+                    acc
+                });
+        assert_eq!(
+            normalized,
+            Path::new("/Applications/Movie Party.app/Contents/Resources/mpv_runtime/libmpv.dylib"),
+            "bundled path must resolve to Contents/Resources/mpv_runtime/"
+        );
+    }
+
+    #[test]
+    fn candidate_paths_include_bundled_before_homebrew() {
+        let candidates = crate::media::player::candidate_libmpv_paths();
+        let bundled_idx = candidates
+            .iter()
+            .position(|c| c.to_string_lossy().contains("mpv_runtime"));
+        let homebrew_idx = candidates
+            .iter()
+            .position(|c| c.to_string_lossy().contains("/opt/homebrew/"));
+        let usrlocal_idx = candidates
+            .iter()
+            .position(|c| c.to_string_lossy().contains("/usr/local/"));
+        if let (Some(b), Some(h)) = (bundled_idx, homebrew_idx) {
+            assert!(b < h, "bundled path must be checked before Homebrew path");
+        }
+        if let (Some(b), Some(u)) = (bundled_idx, usrlocal_idx) {
+            assert!(b < u, "bundled path must be checked before /usr/local path");
+        }
+    }
+
+    #[test]
+    fn bundled_runtime_is_loadable_when_present() {
+        // This test verifies that the BUNDLED runtime (staged by the build
+        // script into src-tauri/mpv_runtime/) can be opened via libloading
+        // and resolves the mpv client API symbols. It only runs when the
+        // runtime actually exists (e.g. after `scripts/stage-libmpv-macos.sh`).
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let bundled_path = manifest_dir.join("mpv_runtime/libmpv.dylib");
+        if !bundled_path.exists() {
+            eprintln!("no bundled libmpv at {bundled_path:?} — skipping test");
+            return;
+        }
+        let lib = unsafe { libloading::Library::new(&bundled_path) }
+            .expect("bundled libmpv.dylib must be loadable via dlopen");
+        let _fn: unsafe extern "C" fn() -> *mut std::ffi::c_void = unsafe {
+            *lib.get::<unsafe extern "C" fn() -> *mut std::ffi::c_void>(b"mpv_create\0")
+                .expect("mpv_create symbol must resolve from bundled libmpv")
+        };
+        // If we reach here, the library loaded and the symbol resolved.
+        // (mpv_create itself requires a real process — we just verify the
+        //  dylib object resolves correctly.)
     }
 
     #[test]

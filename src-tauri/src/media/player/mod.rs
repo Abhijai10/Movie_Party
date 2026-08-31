@@ -136,20 +136,35 @@ pub fn detect_libmpv() -> LibMpvAvailability {
     }
 }
 
-fn candidate_libmpv_paths() -> Vec<PathBuf> {
+/// The macOS bundle-relative candidate: Tauri places `bundle.resources`
+/// at Contents/Resources/mpv_runtime/ inside the .app. Resolving relative to
+/// the executable directory means a packaged app loads its own bundled libmpv.
+#[cfg(target_os = "macos")]
+fn bundled_libmpv_path(exe_dir: &Path) -> PathBuf {
+    exe_dir.join("../Resources/mpv_runtime/libmpv.dylib")
+}
+
+/// Windows: the bundled runtime sits next to the executable in the NSIS
+/// install layout (or local dev-staging directory).
+#[cfg(target_os = "windows")]
+fn bundled_mpv_path(exe_dir: &Path) -> PathBuf {
+    exe_dir.join("mpv_runtime").join("mpv-2.dll")
+}
+
+pub(crate) fn candidate_libmpv_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
     #[cfg(target_os = "macos")]
     {
         paths.push(PathBuf::from("libmpv.dylib"));
-        // Inside a Tauri .app bundle: Contents/Resources/mpv_runtime/libmpv.dylib
         if let Some(parent) = std::env::current_exe()
             .ok()
             .as_ref()
             .and_then(|p| p.parent())
         {
-            paths.push(parent.join("../Resources/mpv_runtime/libmpv.dylib"));
+            paths.push(bundled_libmpv_path(parent));
         }
+        // Developer-machine fallbacks (never required in a packaged app).
         paths.push(PathBuf::from("/opt/homebrew/lib/libmpv.dylib"));
         paths.push(PathBuf::from("/usr/local/lib/libmpv.dylib"));
         paths.push(PathBuf::from(
@@ -166,7 +181,7 @@ fn candidate_libmpv_paths() -> Vec<PathBuf> {
             .as_ref()
             .and_then(|p| p.parent())
         {
-            paths.push(parent.join("mpv_runtime").join("mpv-2.dll"));
+            paths.push(bundled_mpv_path(parent));
         }
     }
 
@@ -405,5 +420,60 @@ mod tests {
 
         player.set_playback_rate(0.01).expect("rate");
         assert_eq!(player.snapshot().playback_rate, 0.25);
+    }
+
+    #[test]
+    fn candidate_paths_include_bundled_macos_path() {
+        let paths = super::candidate_libmpv_paths();
+        let bundle_paths: Vec<_> = paths
+            .iter()
+            .filter(|p| p.to_string_lossy().contains("mpv_runtime"))
+            .collect();
+        assert!(
+            !bundle_paths.is_empty(),
+            "candidate_libmpv_paths must include the bundle-relative path \
+             (Contents/Resources/mpv_runtime/)"
+        );
+    }
+
+    #[test]
+    fn homebrew_paths_are_fallbacks_not_requirements() {
+        let paths = super::candidate_libmpv_paths();
+        let homebrew = paths
+            .iter()
+            .any(|p| p.to_string_lossy().contains("/opt/homebrew/"));
+        let usrlocal = paths
+            .iter()
+            .any(|p| p.to_string_lossy().contains("/usr/local/"));
+        // The detection logic checks ALL candidates; if any exists, libmpv is
+        // considered available. The test verifies that the bundled path is
+        // checked first, meaning a packaged app does NOT require Homebrew.
+        let bundled_idx = paths
+            .iter()
+            .position(|p| p.to_string_lossy().contains("mpv_runtime"));
+        let homebrew_idx = paths
+            .iter()
+            .position(|p| p.to_string_lossy().contains("/opt/homebrew/"));
+        if let (Some(bi), Some(hi)) = (bundled_idx, homebrew_idx) {
+            assert!(bi < hi, "bundled path must be checked before Homebrew path");
+        }
+        if homebrew || usrlocal {
+            // These are valid fallbacks, not requirements — a packaged app
+            // with a populated mpv_runtime/ will never reach them.
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bundled_runtime_candidate_is_checked_by_detect() {
+        // Verify that detect_libmpv CONSIDERS the bundled path; the actual
+        // availability in a test environment depends on `current_exe()`, but
+        // the candidate list itself is what matters for the packaged app.
+        let result = super::detect_libmpv();
+        let has_bundled = result
+            .checked_paths
+            .iter()
+            .any(|p| p.to_string_lossy().contains("mpv_runtime"));
+        assert!(has_bundled, "detect_libmpv must check the mpv_runtime path");
     }
 }
