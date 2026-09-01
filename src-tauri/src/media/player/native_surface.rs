@@ -1,8 +1,9 @@
 //! Platform-native video host management for the Cinema webview.
 //!
 //! The host is positioned behind the transparent Cinema webview. React stays
-//! above it for controls and overlays while libmpv receives the host's native
-//! handle through its `wid` option.
+//! above it for controls and overlays while libmpv renders decoded frames
+//! through its software render API into an RGBA buffer, which this module
+//! pushes onto the host's CALayer (`display_frame`).
 
 use std::sync::{Arc, Mutex};
 
@@ -127,6 +128,7 @@ impl NativeVideoSurfaceState {
 #[cfg(target_os = "macos")]
 struct PlatformSurface {
     view: *mut std::ffi::c_void,
+    layer: *mut std::ffi::c_void,
 }
 
 #[cfg(target_os = "macos")]
@@ -187,7 +189,14 @@ impl PlatformSurface {
                         webview_view,
                     );
                     msg_void_bool(webview_view, "setDrawsBackground:", false);
-                    *current = Some(Self { view });
+                    let layer = msg_id(view, "layer");
+                    if layer.is_null() {
+                        return Err(PlayerError::NativeSurfaceUnavailable {
+                            reason: "native video view has no layer".to_string(),
+                        });
+                    }
+                    msg_void(layer, "retain");
+                    *current = Some(Self { view, layer });
                     current
                         .as_mut()
                         .ok_or_else(|| PlayerError::NativeSurfaceUnavailable {
@@ -196,12 +205,13 @@ impl PlatformSurface {
                 }
             };
             msg_void_rect(surface.view, "setFrame:", native_frame);
-            Ok(surface.view as usize)
+            Ok(surface.layer as usize)
         }
     }
 
     fn detach(self, webview: tauri::webview::PlatformWebview) {
         unsafe {
+            msg_void(self.layer, "release");
             msg_void(self.view, "removeFromSuperview");
             msg_void_bool(webview.inner(), "setDrawsBackground:", true);
             msg_void(self.view, "release");
@@ -280,11 +290,11 @@ extern "C" {
 #[cfg(target_os = "macos")]
 fn display_frame_on_current_thread(frame: &DisplayFrame) {
     unsafe {
-        let view = frame.surface as *mut std::ffi::c_void;
-        if view.is_null() {
-            return;
-        }
-        let layer = msg_id(view, "layer");
+        // `surface` is the pre-captured, retained CALayer pointer established
+        // during attach on the main thread. CALayer property updates are
+        // documented thread-safe, so the render thread may set `contents`
+        // directly without touching the owning NSView.
+        let layer = frame.surface as *mut std::ffi::c_void;
         if layer.is_null() {
             return;
         }
