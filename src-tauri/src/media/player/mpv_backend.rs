@@ -47,9 +47,9 @@ struct MpvRenderParam {
     data: *mut c_void,
 }
 
+const MPV_FORMAT_FLAG: u64 = 3;
 const MPV_FORMAT_DOUBLE: u64 = 5;
-const MPV_FORMAT_INT64: u64 = 8;
-const MPV_FORMAT_STRING: u64 = 1;
+const MPV_FORMAT_INT64: u64 = 4;
 const MPV_ERROR_SUCCESS: c_int = 0;
 
 unsafe fn mpv_get_double(mpv: MpvHandle, fns: &MpvFns, name: &str) -> Option<f64> {
@@ -314,15 +314,15 @@ impl MpvPlayer {
         let c_path = CString::new(path_str).map_err(|_| PlayerError::LoadFailed {
             reason: "path contains null byte".to_string(),
         })?;
-        let pause_true = CString::new("true").unwrap();
+        let pause_true: i32 = 1;
         let pause_name = CString::new("pause").unwrap();
         unsafe {
             mpv_result(
                 (fns.mpv_set_property)(
                     handle,
                     pause_name.as_ptr(),
-                    MPV_FORMAT_STRING,
-                    pause_true.as_ptr() as *const c_void,
+                    MPV_FORMAT_FLAG,
+                    &pause_true as *const i32 as *const c_void,
                 ),
                 &fns,
                 "failed to prepare media paused",
@@ -426,15 +426,15 @@ impl LocalPlayer for MpvPlayer {
             return Ok(());
         }
         let (handle, fns) = self.ensure_ready()?;
-        let pause_false = CString::new("false").unwrap();
+        let pause_false: i32 = 0;
         let pause_name = CString::new("pause").unwrap();
         unsafe {
             mpv_result(
                 (fns.mpv_set_property)(
                     handle,
                     pause_name.as_ptr(),
-                    MPV_FORMAT_STRING,
-                    pause_false.as_ptr() as *const c_void,
+                    MPV_FORMAT_FLAG,
+                    &pause_false as *const i32 as *const c_void,
                 ),
                 &fns,
                 "failed to start playback",
@@ -453,15 +453,15 @@ impl LocalPlayer for MpvPlayer {
             return Ok(());
         }
         let (handle, fns) = self.ensure_ready()?;
-        let pause_true = CString::new("true").unwrap();
+        let pause_true: i32 = 1;
         let pause_name = CString::new("pause").unwrap();
         unsafe {
             mpv_result(
                 (fns.mpv_set_property)(
                     handle,
                     pause_name.as_ptr(),
-                    MPV_FORMAT_STRING,
-                    pause_true.as_ptr() as *const c_void,
+                    MPV_FORMAT_FLAG,
+                    &pause_true as *const i32 as *const c_void,
                 ),
                 &fns,
                 "failed to pause playback",
@@ -504,15 +504,15 @@ impl LocalPlayer for MpvPlayer {
     fn set_volume(&mut self, volume: f32) -> Result<(), PlayerError> {
         let (handle, fns) = self.ensure_ready()?;
         let clamped_volume = volume.clamp(0.0, 1.0);
-        let vol_str = CString::new(format!("{:.0}", clamped_volume * 100.0)).unwrap();
+        let vol_value: f64 = (clamped_volume * 100.0) as f64;
         let vol_name = CString::new("volume").unwrap();
         unsafe {
             mpv_result(
                 (fns.mpv_set_property)(
                     handle,
                     vol_name.as_ptr(),
-                    MPV_FORMAT_STRING,
-                    vol_str.as_ptr() as *const c_void,
+                    MPV_FORMAT_DOUBLE,
+                    &vol_value as *const f64 as *const c_void,
                 ),
                 &fns,
                 "failed to set volume",
@@ -525,15 +525,15 @@ impl LocalPlayer for MpvPlayer {
     fn set_playback_rate(&mut self, rate: f32) -> Result<(), PlayerError> {
         let (handle, fns) = self.ensure_ready()?;
         let rate = rate.clamp(0.25, 4.0);
-        let rate_str = CString::new(format!("{rate}")).unwrap();
+        let rate_value: f64 = rate as f64;
         let speed_name = CString::new("speed").unwrap();
         unsafe {
             mpv_result(
                 (fns.mpv_set_property)(
                     handle,
                     speed_name.as_ptr(),
-                    MPV_FORMAT_STRING,
-                    rate_str.as_ptr() as *const c_void,
+                    MPV_FORMAT_DOUBLE,
+                    &rate_value as *const f64 as *const c_void,
                 ),
                 &fns,
                 "failed to set rate",

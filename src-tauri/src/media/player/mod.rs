@@ -162,6 +162,15 @@ fn bundled_mpv_path(exe_dir: &Path) -> PathBuf {
 pub(crate) fn candidate_libmpv_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
+    // Optional explicit override (e.g. tests targeting the bundled runtime on
+    // a machine with no Homebrew/usr-local mpv). The packaged app never needs
+    // this: its bundle-relative path is resolved below.
+    if let Ok(override_path) = std::env::var("MOVIE_PARTY_LIBMPV_PATH") {
+        if !override_path.trim().is_empty() {
+            paths.push(PathBuf::from(override_path));
+        }
+    }
+
     #[cfg(target_os = "macos")]
     {
         paths.push(PathBuf::from("libmpv.dylib"));
