@@ -481,6 +481,8 @@ struct AppRuntimeState {
     player_snapshot: PlayerSnapshot,
     /// M3: Background task polling the live player for position/duration/buffering.
     player_event_task: Option<tokio::task::JoinHandle<()>>,
+    /// M3: Background task rendering libmpv frames onto the native surface.
+    player_render_task: Option<tokio::task::JoinHandle<()>>,
     /// M3: Demand-driven QUIC transfer worker (guest Local Perfect). Owned by
     /// the active session; aborted on leave/disconnect so old session tasks
     /// can never write to the cache afterwards.
@@ -682,6 +684,7 @@ impl AppRuntime {
                     guest_cache: None,
                     player_snapshot: PlayerSnapshot::default(),
                     player_event_task: None,
+                    player_render_task: None,
                     transfer_task: None,
                     old_transfer_task: None,
                     transfer_stall_watcher_task: None,
@@ -1686,6 +1689,9 @@ impl AppRuntime {
             if let Some(task) = state.player_event_task.take() {
                 task.abort();
             }
+            if let Some(task) = state.player_render_task.take() {
+                task.abort();
+            }
             if let Some(task) = state.transfer_stall_watcher_task.take() {
                 task.abort();
             }
@@ -1908,6 +1914,7 @@ impl AppRuntime {
         // buffering state flows from the live player to the frontend.
         if self.lock().player.is_some() {
             self.spawn_player_event_loop();
+            self.spawn_player_render_loop();
         }
 
         // M8: Start the transfer stall watcher — automatically detects when
@@ -1966,6 +1973,9 @@ impl AppRuntime {
                 task.abort();
             }
             if let Some(task) = state.player_event_task.take() {
+                task.abort();
+            }
+            if let Some(task) = state.player_render_task.take() {
                 task.abort();
             }
             if let Some(task) = state.transfer_task.take() {
@@ -3893,6 +3903,42 @@ impl AppRuntime {
         }
     }
 
+    /// M3: Spawn a background task that renders libmpv frames onto the
+    /// attached native surface at ~30 fps. Frames are produced by the real
+    /// player backend (mpv software renderer); the task only copies the latest
+    /// RGBA buffer into the native view's layer. Runs for as long as a player
+    /// exists and stops when no frame is available (e.g. paused or headless).
+    fn spawn_player_render_loop(&self) {
+        let inner = Arc::clone(&self.inner);
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                let player_arc = {
+                    let state = inner.lock();
+                    state.player.clone()
+                };
+                let Some(player_arc) = player_arc else {
+                    break; // No player — stop rendering
+                };
+                let frame = {
+                    let mut player = player_arc
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    player.render_next_frame()
+                };
+                if let Some((surface, data, width, height, stride)) = frame {
+                    crate::media::player::native_surface::display_frame(
+                        surface, width, height, stride, data,
+                    );
+                }
+            }
+        });
+        let mut state = self.lock();
+        if let Some(old) = state.player_render_task.replace(task) {
+            old.abort();
+        }
+    }
+
     /// M8: Spawn a background watcher that monitors transfer progress and
     /// automatically fires `TransferInterrupted` when no bytes are received
     /// for 30 seconds during an active transfer.
@@ -4137,6 +4183,9 @@ impl AppRuntime {
             task.abort();
         }
         if let Some(task) = state.player_event_task.take() {
+            task.abort();
+        }
+        if let Some(task) = state.player_render_task.take() {
             task.abort();
         }
         if let Some(task) = state.transfer_task.take() {
@@ -4527,6 +4576,9 @@ impl AppRuntime {
             if let Some(task) = state.player_event_task.take() {
                 task.abort();
             }
+            if let Some(task) = state.player_render_task.take() {
+                task.abort();
+            }
             if let Some(range) = state.range_server_handle.take() {
                 range.shutdown();
             }
@@ -4797,6 +4849,7 @@ impl AppRuntime {
 
         if self.lock().player.is_some() {
             self.spawn_player_event_loop();
+            self.spawn_player_render_loop();
         }
 
         let snapshot = self.snapshot();

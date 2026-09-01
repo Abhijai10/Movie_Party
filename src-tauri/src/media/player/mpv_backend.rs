@@ -1,64 +1,57 @@
-//! Real libmpv backend using dynamic loading (dlopen/dlsym).
+//! Real libmpv backend using dynamic loading (dlopen/dlsym) with the
+//! software renderer (`mpv_render_context` / `MPV_RENDER_API_TYPE_SW`).
 //!
 //! This module is only compiled when the `mpv` feature is enabled.
-//! At runtime, the libmpv shared library must be present on the system.
+//! At runtime, the bundled libmpv shared library must be present in the
+//! `.app` bundle at `Contents/Resources/mpv_runtime/`.
 //!
-//! The FFI bindings wrap the mpv client API:
-//! https://mpv.io/manual/stable/#command-interface
+//! GPU context embedding (`wid`) is NOT supported by this LGPL build of
+//! libmpv (the `gpu`/`gpu-next` VOs have no macOS GPU context).  Instead
+//! we use the `mpv_render_context` API with software rendering, which
+//! produces an RGBA buffer that the host pushes onto the native NSView's
+//! backing layer via `native_surface::display_frame`.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::Path;
 use std::ptr;
 
-use super::{is_streaming_media_source, LocalPlayer, PlayerError, PlayerSnapshot, PlayerState};
-
-// ── mpv FFI type aliases ─────────────────────────────────────────────────────
+use super::{
+    is_streaming_media_source, presentation, LocalPlayer, PlayerError, PlayerSnapshot, PlayerState,
+};
 
 type MpvHandle = *mut c_void;
 type MpvEvent = *const c_void;
 
-// ── mpv function signatures loaded via libloading ─────────────────────────────
-
+#[derive(Clone, Copy)]
 struct MpvFns {
     mpv_create: unsafe extern "C" fn() -> MpvHandle,
     mpv_initialize: unsafe extern "C" fn(MpvHandle) -> c_int,
-    #[allow(dead_code)]
-    mpv_destroy: unsafe extern "C" fn(MpvHandle),
     mpv_terminate_destroy: unsafe extern "C" fn(MpvHandle),
     mpv_command: unsafe extern "C" fn(MpvHandle, *const *const c_char) -> c_int,
     mpv_get_property: unsafe extern "C" fn(MpvHandle, *const c_char, u64, *mut c_void) -> c_int,
     mpv_set_property: unsafe extern "C" fn(MpvHandle, *const c_char, u64, *const c_void) -> c_int,
-    #[allow(dead_code)]
     mpv_set_option_string: unsafe extern "C" fn(MpvHandle, *const c_char, *const c_char) -> c_int,
     mpv_wait_event: unsafe extern "C" fn(MpvHandle, f64) -> MpvEvent,
     mpv_error_string: unsafe extern "C" fn(c_int) -> *const c_char,
+    mpv_render_context_create:
+        unsafe extern "C" fn(*mut *mut c_void, MpvHandle, *const MpvRenderParam) -> c_int,
+    mpv_render_context_render: unsafe extern "C" fn(*mut c_void, *const MpvRenderParam) -> c_int,
+    mpv_render_context_free: unsafe extern "C" fn(*mut c_void),
 }
 
-// mpv format constants
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MpvRenderParam {
+    type_: i32,
+    data: *mut c_void,
+}
+
 const MPV_FORMAT_DOUBLE: u64 = 5;
 const MPV_FORMAT_INT64: u64 = 8;
 const MPV_FORMAT_STRING: u64 = 1;
-
-// mpv error codes we care about
 const MPV_ERROR_SUCCESS: c_int = 0;
 
-// ── FFI helper functions ─────────────────────────────────────────────────────
-
-extern "C" {
-    #[allow(dead_code)]
-    fn free(ptr: *mut c_void);
-}
-
-/// SAFETY: `ptr` must have been returned by mpv (e.g. mpv_get_property with
-/// MPV_FORMAT_STRING). After this call the pointer is invalid.
-#[allow(dead_code)]
-unsafe fn libc_free(ptr: *mut c_void) {
-    free(ptr);
-}
-
-/// SAFETY: mpv handle must be valid and `name` must be a valid mpv property.
-/// Returns `None` on any mpv error.
 unsafe fn mpv_get_double(mpv: MpvHandle, fns: &MpvFns, name: &str) -> Option<f64> {
     let c_name = CString::new(name).ok()?;
     let mut out: f64 = 0.0;
@@ -75,8 +68,6 @@ unsafe fn mpv_get_double(mpv: MpvHandle, fns: &MpvFns, name: &str) -> Option<f64
     }
 }
 
-/// SAFETY: mpv handle must be valid and `name` must be a valid mpv property.
-/// Returns `None` on any mpv error.
 unsafe fn mpv_get_int64(mpv: MpvHandle, fns: &MpvFns, name: &str) -> Option<i64> {
     let c_name = CString::new(name).ok()?;
     let mut out: i64 = 0;
@@ -93,8 +84,6 @@ unsafe fn mpv_get_int64(mpv: MpvHandle, fns: &MpvFns, name: &str) -> Option<i64>
     }
 }
 
-/// SAFETY: mpv handle must be valid. Option name and value must be valid C strings.
-#[allow(dead_code)]
 unsafe fn mpv_set_option(
     mpv: MpvHandle,
     fns: &MpvFns,
@@ -111,27 +100,14 @@ unsafe fn mpv_set_option(
     if result == MPV_ERROR_SUCCESS {
         Ok(())
     } else {
-        let error_str = (fns.mpv_error_string)(result);
-        let msg = if error_str.is_null() {
-            "unknown mpv error".to_string()
-        } else {
-            CStr::from_ptr(error_str).to_string_lossy().into_owned()
-        };
-        Err(PlayerError::PlaybackError { message: msg })
+        mpv_result(result, fns, "option failed")
     }
 }
 
-/// Convert an mpv return code into the stable player error contract.
-///
-/// Runtime dependency note: this backend is compiled only with the `mpv`
-/// feature, but the libmpv shared library must still be present at runtime.
-/// Missing libraries map to `MP-MEDIA-001`; command/property failures map to
-/// `MP-MEDIA-006` instead of being silently ignored.
 unsafe fn mpv_result(result: c_int, fns: &MpvFns, fallback: &str) -> Result<(), PlayerError> {
     if result == MPV_ERROR_SUCCESS {
         return Ok(());
     }
-
     let error_str = (fns.mpv_error_string)(result);
     let message = if error_str.is_null() {
         fallback.to_string()
@@ -141,30 +117,21 @@ unsafe fn mpv_result(result: c_int, fns: &MpvFns, fallback: &str) -> Result<(), 
     Err(PlayerError::PlaybackError { message })
 }
 
-// ── MpvPlayer ────────────────────────────────────────────────────────────────
-
-/// Real libmpv player backend using dynamic loading.
-///
-/// Loads the mpv shared library at creation time. If the library cannot be
-/// loaded, the player remains in a disabled state and all commands return
-/// `PlayerError::LibMpvUnavailable`.
 pub struct MpvPlayer {
     handle: Option<MpvHandle>,
     fns: Option<MpvFns>,
     loaded_path: Option<std::path::PathBuf>,
     snapshot: PlayerSnapshot,
     surface_handle: Option<usize>,
-    /// Set once a native surface attach attempt fails because libmpv could
-    /// not be loaded. After this the player must never report Playing/Paused
-    /// or accept play/pause/seek as successful — commands return
-    /// `LibMpvUnavailable` instead so the app never claims playback that is
-    /// not actually happening.
     unavailable: bool,
+    render_ctx: Option<*mut c_void>,
+    render_w: usize,
+    render_h: usize,
+    render_stride: usize,
+    render_buf: Vec<u8>,
 }
 
 impl MpvPlayer {
-    /// Create a player whose libmpv context is initialized only once Cinema
-    /// supplies a native presentation host.
     pub fn new() -> Self {
         Self {
             handle: None,
@@ -173,11 +140,17 @@ impl MpvPlayer {
             snapshot: PlayerSnapshot::default(),
             surface_handle: None,
             unavailable: false,
+            render_ctx: None,
+            render_w: 640,
+            render_h: 480,
+            render_stride: 0,
+            render_buf: Vec::new(),
         }
     }
 
-    /// Attempt to load the mpv shared library and create an mpv context.
-    fn load_library(surface_handle: usize) -> Result<(MpvHandle, MpvFns), PlayerError> {
+    fn load_library(
+        _surface_handle: usize,
+    ) -> Result<(MpvHandle, MpvFns, *mut c_void), PlayerError> {
         let lib = Self::open_mpv_library()?;
         let fns = MpvFns {
             mpv_create: unsafe {
@@ -190,12 +163,6 @@ impl MpvPlayer {
                 *lib.get::<unsafe extern "C" fn(MpvHandle) -> c_int>(b"mpv_initialize\0")
                     .map_err(|e| PlayerError::InitFailed {
                         reason: format!("mpv_initialize symbol: {e}"),
-                    })?
-            },
-            mpv_destroy: unsafe {
-                *lib.get::<unsafe extern "C" fn(MpvHandle)>(b"mpv_destroy\0")
-                    .map_err(|e| PlayerError::InitFailed {
-                        reason: format!("mpv_destroy symbol: {e}"),
                     })?
             },
             mpv_terminate_destroy: unsafe {
@@ -213,26 +180,10 @@ impl MpvPlayer {
                 })?
             },
             mpv_get_property: unsafe {
-                *lib.get::<unsafe extern "C" fn(
-                    MpvHandle,
-                    *const c_char,
-                    u64,
-                    *mut c_void,
-                ) -> c_int>(b"mpv_get_property\0")
-                .map_err(|e| PlayerError::InitFailed {
-                    reason: format!("mpv_get_property symbol: {e}"),
-                })?
+                *lib.get::<unsafe extern "C" fn(MpvHandle, *const c_char, u64, *mut c_void) -> c_int>(b"mpv_get_property\0").map_err(|e| PlayerError::InitFailed { reason: format!("mpv_get_property symbol: {e}") })?
             },
             mpv_set_property: unsafe {
-                *lib.get::<unsafe extern "C" fn(
-                    MpvHandle,
-                    *const c_char,
-                    u64,
-                    *const c_void,
-                ) -> c_int>(b"mpv_set_property\0")
-                .map_err(|e| PlayerError::InitFailed {
-                    reason: format!("mpv_set_property symbol: {e}"),
-                })?
+                *lib.get::<unsafe extern "C" fn(MpvHandle, *const c_char, u64, *const c_void) -> c_int>(b"mpv_set_property\0").map_err(|e| PlayerError::InitFailed { reason: format!("mpv_set_property symbol: {e}") })?
             },
             mpv_set_option_string: unsafe {
                 *lib.get::<unsafe extern "C" fn(MpvHandle, *const c_char, *const c_char) -> c_int>(
@@ -254,40 +205,87 @@ impl MpvPlayer {
                         reason: format!("mpv_error_string symbol: {e}"),
                     })?
             },
+            mpv_render_context_create: unsafe {
+                *lib.get::<unsafe extern "C" fn(
+                    *mut *mut c_void,
+                    MpvHandle,
+                    *const MpvRenderParam,
+                ) -> c_int>(b"mpv_render_context_create\0")
+                    .map_err(|e| PlayerError::InitFailed {
+                        reason: format!("mpv_render_context_create symbol: {e}"),
+                    })?
+            },
+            mpv_render_context_render: unsafe {
+                *lib.get::<unsafe extern "C" fn(*mut c_void, *const MpvRenderParam) -> c_int>(
+                    b"mpv_render_context_render\0",
+                )
+                .map_err(|e| PlayerError::InitFailed {
+                    reason: format!("mpv_render_context_render symbol: {e}"),
+                })?
+            },
+            mpv_render_context_free: unsafe {
+                *lib.get::<unsafe extern "C" fn(*mut c_void)>(b"mpv_render_context_free\0")
+                    .map_err(|e| PlayerError::InitFailed {
+                        reason: format!("mpv_render_context_free symbol: {e}"),
+                    })?
+            },
         };
-
-        // Create mpv instance
         let mpv = unsafe { (fns.mpv_create)() };
         if mpv.is_null() {
             return Err(PlayerError::InitFailed {
                 reason: "mpv_create returned null".to_string(),
             });
         }
-
-        // `wid` must be configured before initialization. It makes libmpv
-        // render into our native child view instead of creating a second window.
         unsafe {
-            mpv_set_option(mpv, &fns, "wid", &surface_handle.to_string())?;
+            mpv_set_option(mpv, &fns, "msg-level", "all=status")?;
+            mpv_set_option(mpv, &fns, "quiet", "yes")?;
+            mpv_set_option(mpv, &fns, "terminal", "no")?;
         }
-
-        // Initialize the mpv context
         let result = unsafe { (fns.mpv_initialize)(mpv) };
         if result != MPV_ERROR_SUCCESS {
-            let error_str = unsafe { (fns.mpv_error_string)(result) };
-            let msg = if error_str.is_null() {
+            let err_str = unsafe { (fns.mpv_error_string)(result) };
+            let msg = if err_str.is_null() {
                 "mpv_initialize failed".to_string()
             } else {
-                unsafe { CStr::from_ptr(error_str).to_string_lossy().into_owned() }
+                unsafe { CStr::from_ptr(err_str).to_string_lossy().into_owned() }
             };
             unsafe { (fns.mpv_terminate_destroy)(mpv) };
             return Err(PlayerError::InitFailed { reason: msg });
         }
-
-        // Note: lib must stay loaded for the lifetime of the mpv handle.
-        // We use ManuallyDrop to keep it alive.
+        let sw_api = CString::new("sw").unwrap();
+        let mut render_ctx: *mut c_void = ptr::null_mut();
+        let create_params = [
+            MpvRenderParam {
+                type_: 1,
+                data: sw_api.as_ptr() as *mut c_void,
+            },
+            MpvRenderParam {
+                type_: 0,
+                data: ptr::null_mut(),
+            },
+        ];
+        let rc_create = unsafe {
+            (fns.mpv_render_context_create)(&mut render_ctx, mpv, create_params.as_ptr())
+        };
+        if rc_create != 0 {
+            let err_str = unsafe { (fns.mpv_error_string)(rc_create) };
+            unsafe { (fns.mpv_terminate_destroy)(mpv) };
+            return Err(PlayerError::InitFailed {
+                reason: if err_str.is_null() {
+                    "render context creation failed".to_string()
+                } else {
+                    unsafe { CStr::from_ptr(err_str).to_string_lossy().into_owned() }
+                },
+            });
+        }
+        if render_ctx.is_null() {
+            unsafe { (fns.mpv_terminate_destroy)(mpv) };
+            return Err(PlayerError::InitFailed {
+                reason: "render context is null".to_string(),
+            });
+        }
         let _lib = std::mem::ManuallyDrop::new(lib);
-
-        Ok((mpv, fns))
+        Ok((mpv, fns, render_ctx))
     }
 
     fn open_mpv_library() -> Result<libloading::Library, PlayerError> {
@@ -300,33 +298,24 @@ impl MpvPlayer {
         Err(PlayerError::LibMpvUnavailable)
     }
 
-    fn ensure_ready(&self) -> Result<(MpvHandle, &MpvFns), PlayerError> {
-        match (self.handle, &self.fns) {
-            (Some(h), Some(fns)) => {
-                if self.loaded_path.is_none() {
-                    return Err(PlayerError::NotReady);
-                }
-                Ok((h, fns))
-            }
+    fn ensure_ready(&self) -> Result<(MpvHandle, MpvFns), PlayerError> {
+        match (self.handle, self.fns) {
+            (Some(h), Some(fns)) => Ok((h, fns)),
             _ => Err(PlayerError::LibMpvUnavailable),
         }
     }
 
     fn load_current_media(&mut self) -> Result<(), PlayerError> {
         let (handle, fns) = self.ensure_ready()?;
-        let path = self.loaded_path.as_ref().ok_or(PlayerError::NotReady)?;
-        let path_str = path.to_str().ok_or_else(|| PlayerError::LoadFailed {
+        let local_path = self.loaded_path.clone().ok_or(PlayerError::NotReady)?;
+        let path_str = local_path.to_str().ok_or_else(|| PlayerError::LoadFailed {
             reason: "path contains invalid UTF-8".to_string(),
         })?;
         let c_path = CString::new(path_str).map_err(|_| PlayerError::LoadFailed {
             reason: "path contains null byte".to_string(),
         })?;
-        let pause_true = CString::new("true").map_err(|_| PlayerError::PlaybackError {
-            message: "invalid pause value".to_string(),
-        })?;
-        let pause_name = CString::new("pause").map_err(|_| PlayerError::PlaybackError {
-            message: "invalid pause property".to_string(),
-        })?;
+        let pause_true = CString::new("true").unwrap();
+        let pause_name = CString::new("pause").unwrap();
         unsafe {
             mpv_result(
                 (fns.mpv_set_property)(
@@ -335,16 +324,12 @@ impl MpvPlayer {
                     MPV_FORMAT_STRING,
                     pause_true.as_ptr() as *const c_void,
                 ),
-                fns,
+                &fns,
                 "failed to prepare media paused",
             )?;
         }
-        let loadfile_cmd = CString::new("loadfile").map_err(|_| PlayerError::LoadFailed {
-            reason: "invalid loadfile command".to_string(),
-        })?;
-        let replace_arg = CString::new("replace").map_err(|_| PlayerError::LoadFailed {
-            reason: "invalid loadfile mode".to_string(),
-        })?;
+        let loadfile_cmd = CString::new("loadfile").unwrap();
+        let replace_arg = CString::new("replace").unwrap();
         let args = [
             loadfile_cmd.as_ptr(),
             c_path.as_ptr(),
@@ -353,19 +338,41 @@ impl MpvPlayer {
         ];
         let result = unsafe { (fns.mpv_command)(handle, args.as_ptr()) };
         if result != MPV_ERROR_SUCCESS {
-            let error_str = unsafe { (fns.mpv_error_string)(result) };
-            let reason = if error_str.is_null() {
+            let err_str = unsafe { (fns.mpv_error_string)(result) };
+            let reason = if err_str.is_null() {
                 "loadfile failed".to_string()
             } else {
-                unsafe { CStr::from_ptr(error_str).to_string_lossy().into_owned() }
+                unsafe { CStr::from_ptr(err_str).to_string_lossy().into_owned() }
             };
             return Err(PlayerError::LoadFailed { reason });
         }
-        unsafe { (fns.mpv_wait_event)(handle, 0.1) };
-        if let Some(duration) = unsafe { mpv_get_double(handle, fns, "duration") } {
+        for _ in 0..10 {
+            unsafe { (fns.mpv_wait_event)(handle, 0.1) };
+        }
+        if let Some(duration) = unsafe { mpv_get_double(handle, &fns, "duration") } {
             self.snapshot.duration_ms = Some((duration * 1000.0) as u64);
         }
+        if let Some(w) = unsafe { mpv_get_int64(handle, &fns, "video-params/w") } {
+            if let Some(h) = unsafe { mpv_get_int64(handle, &fns, "video-params/h") } {
+                self.render_w = w as usize;
+                self.render_h = h as usize;
+            }
+        }
         Ok(())
+    }
+
+    fn ensure_render_buf(&mut self, handle: MpvHandle, fns: &MpvFns) {
+        unsafe {
+            let w = mpv_get_int64(handle, fns, "video-params/w").unwrap_or(self.render_w as i64);
+            let h = mpv_get_int64(handle, fns, "video-params/h").unwrap_or(self.render_h as i64);
+            let w = w.max(16) as usize;
+            let h = h.max(16) as usize;
+            self.render_w = w;
+            self.render_h = h;
+            let stride = ((w * 4 + 63) / 64) * 64;
+            self.render_stride = stride;
+            self.render_buf.resize(stride * h, 0);
+        }
     }
 }
 
@@ -375,20 +382,16 @@ impl Default for MpvPlayer {
     }
 }
 
-// SAFETY: MpvPlayer wraps a raw mpv_handle (C void pointer) obtained from
-// mpv_create(). The mpv client API is thread-safe — mpv_command,
-// mpv_set_property, and mpv_get_property may be called from any thread as
-// long as concurrent access to the same handle is serialized. In this
-// implementation all mpv calls go through the MpvPlayer methods, and
-// AppRuntime always wraps MpvPlayer in `Arc<Mutex<MpvPlayer>>`, ensuring
-// exclusive access. The libmpv library is kept alive via ManuallyDrop in
-// load_library(). Drop calls mpv_terminate_destroy which is safe to call
-// from any thread that last held the handle.
 unsafe impl Send for MpvPlayer {}
 unsafe impl Sync for MpvPlayer {}
 
 impl Drop for MpvPlayer {
     fn drop(&mut self) {
+        if let Some(ctx) = self.render_ctx.take() {
+            if let Some(fns) = &self.fns {
+                unsafe { (fns.mpv_render_context_free)(ctx) };
+            }
+        }
         if let (Some(handle), Some(fns)) = (self.handle.take(), self.fns.take()) {
             unsafe { (fns.mpv_terminate_destroy)(handle) };
         }
@@ -433,11 +436,9 @@ impl LocalPlayer for MpvPlayer {
                     MPV_FORMAT_STRING,
                     pause_false.as_ptr() as *const c_void,
                 ),
-                fns,
+                &fns,
                 "failed to start playback",
             )?;
-            // Wait for play event
-            (fns.mpv_wait_event)(handle, 0.05);
         }
         self.snapshot.state = PlayerState::Playing;
         Ok(())
@@ -462,10 +463,9 @@ impl LocalPlayer for MpvPlayer {
                     MPV_FORMAT_STRING,
                     pause_true.as_ptr() as *const c_void,
                 ),
-                fns,
+                &fns,
                 "failed to pause playback",
             )?;
-            (fns.mpv_wait_event)(handle, 0.05);
         }
         self.snapshot.state = PlayerState::Paused;
         Ok(())
@@ -493,10 +493,9 @@ impl LocalPlayer for MpvPlayer {
         unsafe {
             mpv_result(
                 (fns.mpv_command)(handle, args.as_ptr()),
-                fns,
+                &fns,
                 "failed to seek playback",
             )?;
-            (fns.mpv_wait_event)(handle, 0.05);
         }
         self.snapshot.position_ms = position_ms;
         Ok(())
@@ -505,8 +504,7 @@ impl LocalPlayer for MpvPlayer {
     fn set_volume(&mut self, volume: f32) -> Result<(), PlayerError> {
         let (handle, fns) = self.ensure_ready()?;
         let clamped_volume = volume.clamp(0.0, 1.0);
-        let vol = clamped_volume * 100.0;
-        let vol_str = CString::new(format!("{vol:.0}")).unwrap();
+        let vol_str = CString::new(format!("{:.0}", clamped_volume * 100.0)).unwrap();
         let vol_name = CString::new("volume").unwrap();
         unsafe {
             mpv_result(
@@ -516,7 +514,7 @@ impl LocalPlayer for MpvPlayer {
                     MPV_FORMAT_STRING,
                     vol_str.as_ptr() as *const c_void,
                 ),
-                fns,
+                &fns,
                 "failed to set volume",
             )?;
         }
@@ -537,8 +535,8 @@ impl LocalPlayer for MpvPlayer {
                     MPV_FORMAT_STRING,
                     rate_str.as_ptr() as *const c_void,
                 ),
-                fns,
-                "failed to set playback rate",
+                &fns,
+                "failed to set rate",
             )?;
         }
         self.snapshot.playback_rate = rate;
@@ -547,8 +545,6 @@ impl LocalPlayer for MpvPlayer {
 
     fn snapshot(&self) -> PlayerSnapshot {
         let mut snap = self.snapshot.clone();
-
-        // Update live position from mpv
         if let (Some(handle), Some(fns)) = (self.handle, &self.fns) {
             unsafe {
                 if let Some(pos) = mpv_get_double(handle, fns, "time-pos") {
@@ -557,19 +553,8 @@ impl LocalPlayer for MpvPlayer {
                 if let Some(dur) = mpv_get_double(handle, fns, "duration") {
                     snap.duration_ms = Some((dur * 1000.0) as u64);
                 }
-                // Update state from mpv pause property
-                if let Some(pause) = mpv_get_int64(handle, fns, "pause") {
-                    if snap.state == PlayerState::Ready {
-                        // A loaded-but-paused file is the expected pre-sync state.
-                    } else if pause != 0 {
-                        snap.state = PlayerState::Paused;
-                    } else if snap.state == PlayerState::Paused {
-                        snap.state = PlayerState::Playing;
-                    }
-                }
             }
         }
-
         snap
     }
 
@@ -585,19 +570,14 @@ impl LocalPlayer for MpvPlayer {
     }
 
     fn buffered_ahead_ms(&self) -> Option<u64> {
-        // mpv doesn't directly expose "buffered ahead" for local files.
-        // For local perfect mode, the entire file is effectively available.
-        // For partial cache playback, the cache layer reports this separately.
         None
     }
-
     fn error_message(&self) -> Option<String> {
         self.snapshot.error_message.clone()
     }
 
     fn close(&mut self) {
         if let (Some(handle), Some(fns)) = (self.handle, &self.fns) {
-            // Stop playback
             let stop_cmd = CString::new("stop").unwrap();
             let null_term = ptr::null();
             let args = [stop_cmd.as_ptr(), null_term];
@@ -605,8 +585,19 @@ impl LocalPlayer for MpvPlayer {
                 (fns.mpv_command)(handle, args.as_ptr());
             }
         }
+        if let Some(ctx) = self.render_ctx.take() {
+            if let Some(fns) = &self.fns {
+                unsafe { (fns.mpv_render_context_free)(ctx) };
+            }
+        }
+        if let (Some(handle), Some(fns)) = (self.handle.take(), self.fns.take()) {
+            unsafe { (fns.mpv_terminate_destroy)(handle) };
+        }
         self.loaded_path = None;
         self.snapshot = PlayerSnapshot::default();
+        self.surface_handle = None;
+        self.render_w = 640;
+        self.render_h = 480;
     }
 
     fn attach_native_surface(&mut self, surface_handle: usize) -> Result<(), PlayerError> {
@@ -624,12 +615,9 @@ impl LocalPlayer for MpvPlayer {
             });
         }
         let desired = self.snapshot.clone();
-        let (handle, fns) = match Self::load_library(surface_handle) {
+        let (handle, fns, render_ctx) = match Self::load_library(surface_handle) {
             Ok(loaded) => loaded,
             Err(error) => {
-                // A failed attach means no real decoder is (or will be)
-                // available for this session. Mark the player unavailable so
-                // play/pause/seek can never silently report success.
                 self.unavailable = true;
                 self.snapshot.state = PlayerState::Error;
                 self.snapshot.error_message = Some(error.to_string());
@@ -639,6 +627,10 @@ impl LocalPlayer for MpvPlayer {
         self.handle = Some(handle);
         self.fns = Some(fns);
         self.surface_handle = Some(surface_handle);
+        self.render_ctx = Some(render_ctx);
+        let empty_stride = ((self.render_w * 4 + 63) / 64) * 64;
+        self.render_stride = empty_stride;
+        self.render_buf.resize(empty_stride * self.render_h, 0);
         if self.loaded_path.is_some() {
             self.load_current_media()?;
             if desired.position_ms > 0 {
@@ -651,13 +643,73 @@ impl LocalPlayer for MpvPlayer {
         Ok(())
     }
 
-    fn presentation_status(&self) -> super::presentation::PlayerPresentationStatus {
+    fn presentation_status(&self) -> presentation::PlayerPresentationStatus {
         if self.handle.is_some() && self.surface_handle.is_some() {
-            super::presentation::PlayerPresentationStatus::embedded_native(
-                super::presentation::embedded_native_bridge(),
+            presentation::PlayerPresentationStatus::embedded_native(
+                presentation::embedded_native_bridge(),
             )
+        } else if self.handle.is_some() {
+            presentation::PlayerPresentationStatus::native_render_host_required()
         } else {
-            super::presentation::PlayerPresentationStatus::native_render_host_required()
+            presentation::PlayerPresentationStatus::unavailable("libmpv is not initialized.")
+        }
+    }
+
+    fn render_next_frame(&mut self) -> Option<(usize, Vec<u8>, usize, usize, usize)> {
+        let (handle, fns) = match (self.handle, self.fns) {
+            (Some(h), Some(f)) => (h, f),
+            _ => return None,
+        };
+        let ctx = self.render_ctx?;
+        if self.render_buf.is_empty() {
+            self.ensure_render_buf(handle, &fns);
+        }
+        // Pump events to keep the mpv core alive during playback. A short
+        // timeout prevents blocking the player lock for too long.
+        unsafe { (fns.mpv_wait_event)(handle, 0.01) };
+        let w = self.render_w;
+        let h = self.render_h;
+        let stride = self.render_stride;
+        if stride == 0 || w == 0 || h == 0 {
+            return None;
+        }
+        let sw_fmt = CString::new("bgr0").unwrap();
+        let mut sw_size = [w as i32, h as i32];
+        let mut stride_val = stride;
+        let block_for_target: i32 = 0;
+        let params = [
+            MpvRenderParam {
+                type_: 17,
+                data: sw_size.as_mut_ptr() as *mut c_void,
+            }, // SW_SIZE
+            MpvRenderParam {
+                type_: 18,
+                data: sw_fmt.as_ptr() as *mut c_void,
+            }, // SW_FORMAT
+            MpvRenderParam {
+                type_: 19,
+                data: (&mut stride_val) as *mut usize as *mut c_void,
+            }, // SW_STRIDE
+            MpvRenderParam {
+                type_: 20,
+                data: self.render_buf.as_mut_ptr() as *mut c_void,
+            }, // SW_POINTER
+            MpvRenderParam {
+                type_: 12,
+                data: &block_for_target as *const i32 as *mut c_void,
+            }, // BLOCK_FOR_TARGET_TIME=0
+            MpvRenderParam {
+                type_: 0,
+                data: ptr::null_mut(),
+            },
+        ];
+        let rc = unsafe { (fns.mpv_render_context_render)(ctx, params.as_ptr()) };
+        if rc == 0 {
+            let surface = self.surface_handle.unwrap_or(0);
+            let data = self.render_buf.clone();
+            Some((surface, data, w, h, stride))
+        } else {
+            None
         }
     }
 }

@@ -113,6 +113,14 @@ pub trait LocalPlayer {
         })
     }
 
+    /// Render the next available video frame into an RGBA buffer and return
+    /// it together with its presentation metadata (surface handle, width,
+    /// height, stride). Returns `None` when no new frame is available or the
+    /// backend does not render frames (e.g. headless test players).
+    fn render_next_frame(&mut self) -> Option<(usize, Vec<u8>, usize, usize, usize)> {
+        None
+    }
+
     fn presentation_status(&self) -> presentation::PlayerPresentationStatus {
         presentation::PlayerPresentationStatus::native_render_host_required()
     }

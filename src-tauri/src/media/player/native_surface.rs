@@ -237,6 +237,119 @@ extern "C" {
     fn sel_registerName(name: *const i8) -> *mut std::ffi::c_void;
     fn objc_msgSend();
 }
+
+// ── RGBA frame display into the native surface ──────────────────────────────
+//
+// Movie Party renders libmpv frames into an RGBA buffer (software renderer)
+// and pushes them onto the native NSView's backing layer. CALayer is
+// documented thread-safe for property updates, so the render thread may set
+// the layer contents directly.
+
+#[cfg(target_os = "macos")]
+struct DisplayFrame {
+    surface: usize,
+    width: usize,
+    height: usize,
+    stride: usize,
+    data: Vec<u8>,
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGColorSpaceCreateDeviceRGB() -> *mut std::ffi::c_void;
+    fn CGDataProviderCreateWithCopyOfData(data: *const u8, size: isize) -> *mut std::ffi::c_void;
+    fn CGImageCreate(
+        width: usize,
+        height: usize,
+        bits_per_component: usize,
+        bits_per_pixel: usize,
+        bytes_per_row: usize,
+        color_space: *mut std::ffi::c_void,
+        bitmap_info: u32,
+        provider: *mut std::ffi::c_void,
+        decode: *const f64,
+        should_interpolate: bool,
+        intent: i32,
+    ) -> *mut std::ffi::c_void;
+    fn CGImageRelease(image: *mut std::ffi::c_void);
+    fn CGDataProviderRelease(provider: *mut std::ffi::c_void);
+    fn CGColorSpaceRelease(color_space: *mut std::ffi::c_void);
+}
+
+#[cfg(target_os = "macos")]
+fn display_frame_on_current_thread(frame: &DisplayFrame) {
+    unsafe {
+        let view = frame.surface as *mut std::ffi::c_void;
+        if view.is_null() {
+            return;
+        }
+        let layer = msg_id(view, "layer");
+        if layer.is_null() {
+            return;
+        }
+        if frame.width == 0 || frame.height == 0 || frame.stride < frame.width * 4 {
+            return;
+        }
+        let data_len = frame.stride * frame.height;
+        if frame.data.len() < data_len {
+            return;
+        }
+        let color_space = CGColorSpaceCreateDeviceRGB();
+        let provider = CGDataProviderCreateWithCopyOfData(frame.data.as_ptr(), data_len as isize);
+        // bgr0 from mpv is byte order B,G,R,0 per pixel. CoreGraphics little-
+        // endian RGBA (kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little)
+        // reads byte order B,G,R,A where A is ignored for a none-skip alpha.
+        const KCG_IMAGE_ALPHA_NONE_SKIP_FIRST: u32 = 2;
+        const KCG_BITMAP_BYTE_ORDER_32_LITTLE: u32 = 0x0000_2000;
+        let image = CGImageCreate(
+            frame.width,
+            frame.height,
+            8,
+            32,
+            frame.stride,
+            color_space,
+            KCG_IMAGE_ALPHA_NONE_SKIP_FIRST | KCG_BITMAP_BYTE_ORDER_32_LITTLE,
+            provider,
+            std::ptr::null(),
+            false,
+            0, // kCGRenderingIntentDefault
+        );
+        if !image.is_null() {
+            msg_void_id(layer, "setContents:", image);
+            CGImageRelease(image);
+        }
+        CGDataProviderRelease(provider);
+        CGColorSpaceRelease(color_space);
+    }
+}
+
+/// Push a rendered RGBA frame to the native surface. The layer update happens
+/// synchronously on the calling (render) thread; CALayer property access is
+/// thread-safe on macOS.
+#[cfg(target_os = "macos")]
+pub fn display_frame(surface: usize, width: usize, height: usize, stride: usize, data: Vec<u8>) {
+    let frame = DisplayFrame {
+        surface,
+        width,
+        height,
+        stride,
+        data,
+    };
+    display_frame_on_current_thread(&frame);
+}
+
+/// Push a rendered RGBA frame to the native surface. No-op when software
+/// frame display is unsupported on this platform.
+#[cfg(not(target_os = "macos"))]
+pub fn display_frame(
+    _surface: usize,
+    _width: usize,
+    _height: usize,
+    _stride: usize,
+    _data: Vec<u8>,
+) {
+}
 #[cfg(target_os = "macos")]
 unsafe fn selector(name: &str) -> *mut std::ffi::c_void {
     let mut bytes = name.as_bytes().to_vec();
@@ -299,6 +412,16 @@ unsafe fn msg_void_rect(target: *mut std::ffi::c_void, name: &'static str, value
         std::mem::transmute(objc_msgSend as *const ());
     f(target, selector(name), value);
 }
+unsafe fn msg_void_id(
+    target: *mut std::ffi::c_void,
+    name: &'static str,
+    value: *mut std::ffi::c_void,
+) {
+    let f: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, *mut std::ffi::c_void) =
+        std::mem::transmute(objc_msgSend as *const ());
+    f(target, selector(name), value);
+}
+
 #[cfg(target_os = "macos")]
 unsafe fn msg_void_id_isize_id(
     target: *mut std::ffi::c_void,
