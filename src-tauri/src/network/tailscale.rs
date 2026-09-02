@@ -34,7 +34,7 @@ impl TailscalePeer {
 
 /// Returns the subset of peers that are online and have at least one usable
 /// Tailscale CGNAT IPv4 address. Non-Tailscale or offline peers are excluded.
-pub fn usable_peers<'a>(peers: &'a [TailscalePeer]) -> Vec<&'a TailscalePeer> {
+pub fn usable_peers(peers: &[TailscalePeer]) -> Vec<&TailscalePeer> {
     peers
         .iter()
         .filter(|p| p.online && p.usable_ipv4().is_some())
@@ -84,12 +84,14 @@ impl TailscaleReadiness {
 
 #[derive(Debug, thiserror::Error)]
 pub enum TailscaleError {
-    #[error("MP-NET-001 Tailscale executable was not found")]
+    #[error("MP-NET-TS-001 Tailscale executable was not found")]
     ExecutableNotFound,
-    #[error("MP-NET-001 Tailscale status command failed: {0}")]
+    #[error("MP-NET-TS-003 Tailscale status command failed: {0}")]
     CommandFailed(String),
-    #[error("MP-NET-001 Tailscale output could not be parsed: {0}")]
+    #[error("MP-NET-TS-003 Tailscale output could not be parsed: {0}")]
     InvalidStatus(String),
+    #[error("MP-NET-TS-003 could not open the Tailscale app: {0}")]
+    OpenFailed(String),
 }
 
 pub fn candidate_executables() -> Vec<PathBuf> {
@@ -174,14 +176,16 @@ pub fn readiness_from_error(error: TailscaleError) -> TailscaleReadiness {
             device_name: None,
             message: "Install Tailscale to create or join a private cinema.".to_string(),
         },
-        TailscaleError::CommandFailed(_) | TailscaleError::InvalidStatus(_) => TailscaleReadiness {
-            state: TailscaleState::DaemonUnavailable,
-            code: Some("MP-NET-TS-003".to_string()),
-            ip: None,
-            device_name: None,
-            message: "Tailscale is installed but its daemon is not responding. Make sure Tailscale is running."
-                .to_string(),
-        },
+        TailscaleError::CommandFailed(_) | TailscaleError::InvalidStatus(_) | TailscaleError::OpenFailed(_) => {
+            TailscaleReadiness {
+                state: TailscaleState::DaemonUnavailable,
+                code: Some("MP-NET-TS-003".to_string()),
+                ip: None,
+                device_name: None,
+                message: "Tailscale is installed but its daemon is not responding. Make sure Tailscale is running."
+                    .to_string(),
+            }
+        }
     }
 }
 
@@ -285,9 +289,9 @@ pub fn open_tailscale_app() -> Result<(), TailscaleError> {
         let output = std::process::Command::new("open")
             .args(["-a", "Tailscale"])
             .output()
-            .map_err(|e| TailscaleError::CommandFailed(e.to_string()))?;
+            .map_err(|e| TailscaleError::OpenFailed(e.to_string()))?;
         if !output.status.success() {
-            return Err(TailscaleError::CommandFailed(
+            return Err(TailscaleError::OpenFailed(
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
             ));
         }
@@ -654,6 +658,25 @@ mod tests {
     fn invalid_status_maps_to_daemon_unavailable() {
         let readiness = readiness_from_error(TailscaleError::InvalidStatus("bad json".to_string()));
         assert_eq!(readiness.state, TailscaleState::DaemonUnavailable);
+    }
+
+    #[test]
+    fn open_failed_maps_to_daemon_unavailable() {
+        let readiness = readiness_from_error(TailscaleError::OpenFailed(
+            "application not found".to_string(),
+        ));
+        assert_eq!(readiness.state, TailscaleState::DaemonUnavailable);
+        assert_eq!(readiness.code.as_deref(), Some("MP-NET-TS-003"));
+    }
+
+    #[test]
+    fn open_failed_displays_stable_mp_net_ts_code() {
+        let error = TailscaleError::OpenFailed("application not found".to_string());
+        let text = error.to_string();
+        assert!(
+            text.starts_with("MP-NET-TS-003"),
+            "Open Tailscale failures must surface a stable MP-NET-TS code, got: {text}"
+        );
     }
 
     #[test]

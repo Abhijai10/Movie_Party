@@ -229,7 +229,7 @@ fn bundled_libmpv_sw_render_api_produces_decoded_frames() {
     }
     let w = video_w.max(16) as usize;
     let h = video_h.max(16) as usize;
-    let stride = ((w * 4 + 63) / 64) * 64;
+    let stride = (w * 4).div_ceil(64) * 64;
     let mut buf = vec![0u8; stride * h];
 
     // ── 7. Render frames via SW render API ───────────────────────────────

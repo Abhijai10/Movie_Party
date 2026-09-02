@@ -56,7 +56,7 @@ struct RealLayer {
 impl RealLayer {
     fn new() -> Self {
         unsafe {
-            let cls = objc_getClass(b"CALayer\0".as_ptr().cast());
+            let cls = objc_getClass(c"CALayer".as_ptr());
             assert!(!cls.is_null(), "CALayer class must exist");
             let layer = msg_id(cls, "layer");
             assert!(!layer.is_null(), "[CALayer layer] returned null");

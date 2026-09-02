@@ -23,6 +23,7 @@ import {
   type AppSnapshot,
   type ProviderCapability,
   type TailscaleReadiness,
+  type TailscaleSetupAction,
 } from "../backend/appRuntime";
 import { useAppSnapshot } from "../hooks/useAppSnapshot";
 import { parseMoviePartyInvite } from "../invites/deepLinks";
@@ -38,6 +39,7 @@ import { TailscaleSetupView } from "../views/TailscaleSetupView";
 import { createCallTileSessionState, type CallTileSessionState } from "../overlays/callTileState";
 import { LoadingState } from "./LoadingState";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { isTailscaleReady, pollIntervalMs } from "../backend/tailscaleOnboarding";
 
 type LocalScreen = "CREATE_PARTY" | null;
 type DevScreen = "HOME" | "CREATE" | "JOIN" | "LOBBY" | "READY" | "CINEMA" | null;
@@ -58,6 +60,7 @@ export function AppShell() {
   const [devScreen, setDevScreen] = useState<DevScreen>(null);
   const [tailscaleReadiness, setTailscaleReadiness] = useState<TailscaleReadiness | null>(null);
   const [isRefreshingConnectivity, setIsRefreshingConnectivity] = useState(false);
+  const [setupOpenError, setSetupOpenError] = useState<string | null>(null);
   const connectivityInFlight = useRef(false);
   const [callTileSession, setCallTileSession] = useState<CallTileSessionState>(() =>
     createCallTileSessionState(),
@@ -158,11 +161,21 @@ export function AppShell() {
     }
   }, []);
 
+  const openSetup = useCallback(
+    (action: TailscaleSetupAction) => {
+      void openTailscaleSetup(action).then((message) => {
+        setSetupOpenError(message);
+      });
+    },
+    [],
+  );
+
   useEffect(() => {
     void refreshConnectivity();
   }, [refreshConnectivity]);
 
-  const isTailscaleReady = tailscaleReadiness?.state === "READY";
+  const tailscaleReady =
+    tailscaleReadiness !== null && isTailscaleReady(tailscaleReadiness.state);
 
   useEffect(() => {
     // Poll connectivity continuously. A slower cadence while READY keeps the
@@ -173,12 +186,12 @@ export function AppShell() {
       () => {
         void refreshConnectivity();
       },
-      isTailscaleReady ? 15_000 : 4_000,
+      pollIntervalMs(tailscaleReady),
     );
     return () => {
       clearInterval(interval);
     };
-  }, [isTailscaleReady, refreshConnectivity]);
+  }, [tailscaleReady, refreshConnectivity]);
 
   const goHome = () => {
     setDevScreen(null);
@@ -401,15 +414,17 @@ export function AppShell() {
     );
   }
 
-  if (tailscaleReadiness.state !== "READY") {
+  if (!tailscaleReady) {
     return (
       <TailscaleSetupView
         readiness={tailscaleReadiness}
         isRefreshing={isRefreshingConnectivity}
-        onRefresh={() => void refreshConnectivity()}
-        onOpenSetup={(action) => {
-          void openTailscaleSetup(action);
+        openError={setupOpenError}
+        onRefresh={() => {
+          setSetupOpenError(null);
+          void refreshConnectivity();
         }}
+        onOpenSetup={openSetup}
       />
     );
   }

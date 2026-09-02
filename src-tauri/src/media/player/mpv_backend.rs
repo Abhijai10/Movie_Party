@@ -369,7 +369,7 @@ impl MpvPlayer {
             let h = h.max(16) as usize;
             self.render_w = w;
             self.render_h = h;
-            let stride = ((w * 4 + 63) / 64) * 64;
+            let stride = (w * 4).div_ceil(64) * 64;
             self.render_stride = stride;
             self.render_buf.resize(stride * h, 0);
         }
@@ -628,7 +628,7 @@ impl LocalPlayer for MpvPlayer {
         self.fns = Some(fns);
         self.surface_handle = Some(surface_handle);
         self.render_ctx = Some(render_ctx);
-        let empty_stride = ((self.render_w * 4 + 63) / 64) * 64;
+        let empty_stride = (self.render_w * 4).div_ceil(64) * 64;
         self.render_stride = empty_stride;
         self.render_buf.resize(empty_stride * self.render_h, 0);
         if self.loaded_path.is_some() {

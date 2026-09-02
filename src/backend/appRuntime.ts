@@ -228,14 +228,34 @@ export async function getTailscaleReadiness(): Promise<TailscaleReadiness> {
 
 export type TailscaleSetupAction = "INSTALL" | "OPEN_APP" | "PARTNER_HELP";
 
-export async function openTailscaleSetup(action: TailscaleSetupAction): Promise<boolean> {
+/** Returns `null` on success or a user-readable failure message. */
+export async function openTailscaleSetup(action: TailscaleSetupAction): Promise<string | null> {
   try {
     await invoke("open_tailscale_setup", { action });
-    return true;
+    return null;
   } catch (error) {
     console.error("open_tailscale_setup failed", error);
-    return false;
+    return tailscaleSetupOpenErrorMessage(error);
   }
+}
+
+export function tailscaleSetupOpenErrorMessage(error: unknown): string {
+  const detail =
+    typeof error === "string"
+      ? error
+      : error instanceof Error
+        ? error.message
+        : safeStringify(error);
+  const sanitized = sanitizeErrorDetail(detail);
+  const code = extractErrorCode(sanitized);
+
+  if (code === "MP-NET-TS-001") {
+    return "Movie Party could not find the Tailscale app on this device. Install Tailscale, then check again.";
+  }
+  if (code === "MP-NET-TS-003") {
+    return "Movie Party could not open the Tailscale app. Open it from your Applications folder, then check again.";
+  }
+  return "Movie Party could not open Tailscale setup. If Tailscale is installed, open it yourself, then check again.";
 }
 
 export async function showHome(): Promise<AppSnapshot | null> {
@@ -479,7 +499,7 @@ function sanitizeErrorDetail(detail: string): string {
 }
 
 function extractErrorCode(detail: string): string {
-  return detail.match(/\bMP-[A-Z]+-\d{3}\b/)?.[0] ?? "MP-BACKEND-001";
+  return detail.match(/\bMP-[A-Z]+(?:-[A-Z0-9]+)*-\d{3}\b/)?.[0] ?? "MP-BACKEND-001";
 }
 
 function classifyFailure(code: string): BackendFailureKind {

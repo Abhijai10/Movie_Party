@@ -14,14 +14,16 @@ It must be updated continuously.
 
 ```text
 Project State:
-🟨 BATCH 7 V1 RELEASE HARDENING + CURRENT-BRANCH RELIABILITY AUDIT COMPLETE
-    (code-level). The current branch was revalidated against the remaining
-    V1 release risks; old audit findings were revalidated rather than blindly
-    implemented; only concrete current-branch defects were fixed. Real
-    two-device V1 verification remains pending.
+🟨 TAILSCALE ONBOARDING TRUTHFULNESS PASS COMPLETE (code-level). Verified
+    the six-state model (NOT_INSTALLED, DAEMON_UNAVAILABLE, NEEDS_LOGIN,
+    STOPPED, NO_USABLE_ADDRESS, READY) with correct user-facing actions per
+    state. Open Tailscale failure surfaced with stable MP-NET-TS-003 error.
+    Fixed error-code extraction regex for MP-NET-TS-xxx codes. Added
+    testable onboarding helpers (poll cadence, refresh label, state
+    detection). 69 frontend + 279 Rust + 82 integration tests pass.
 
 Current Phase:
-BATCH 7 V1 RELEASE HARDENING + RELIABILITY AUDIT (code-level)
+BATCH 8 — TAILSCALE ONBOARDING TRUTHFULNESS PASS (code-level)
 
 Current Release:
 V1 Development
@@ -37,6 +39,150 @@ M6: Real Chrome/provider login and media playback require external verification
 M7: ScreenCaptureKit needs macOS permission dialog
 M8: Chrome/player crash watchers not wired
 ```
+
+---
+
+# BATCH 8 — TAILSCALE ONBOARDING TRUTHFULNESS PASS (2026-09-02)
+
+## Objective
+
+Make the Movie Party Tailscale first-run onboarding truthful, actionable, and
+production-ready. The existing six-state model was already in place; this batch
+audited the mapping, fixed gaps, surfaced errors, and added focused tests.
+
+## Six-state model (verified)
+
+| State | Meaning | Primary Action | Secondary Action |
+|---|---|---|---|
+| NOT_INSTALLED | Tailscale is not on the machine | Install Tailscale (download page) | Check again |
+| DAEMON_UNAVAILABLE | Executable found but daemon not responding | Open Tailscale | Check again |
+| NEEDS_LOGIN | Installed but not authenticated | Open Tailscale | Check again ("I've signed in") |
+| STOPPED | Installed/auth'd but connection is off | Open Tailscale | Check again |
+| NO_USABLE_ADDRESS | Running but no CGNAT IPv4 available | Open Tailscale | Check again |
+| READY | Usable Tailscale IPv4 present | leave onboarding automatically | — |
+
+## Defects found and fixed
+
+### D1 — Error-code extraction regex failed for MP-NET-TS-xxx codes
+
+The frontend `extractErrorCode` regex `\bMP-[A-Z]+-\d{3}\b` matched only
+`MP-NET-001` but not `MP-NET-TS-001` through `MP-NET-TS-006`. This meant
+`createRoomErrorMessage` and `joinFailureMessage` never matched their
+Tailscale-specific branches, falling back to generic messages.
+
+**Fix**: `\bMP-[A-Z]+(?:-[A-Z0-9]+)*-\d{3}\b` — matches both `MP-NET-001` and
+`MP-NET-TS-001` style codes.
+
+### D2 — Open Tailscale failure silently swallowed
+
+`openTailscaleSetup` returned `boolean` and the AppShell ignored the result.
+When `open -a Tailscale` failed (e.g., app not installed), the user saw no
+feedback — the "Open Tailscale" button appeared to do nothing.
+
+**Fix**:
+- Added `TailscaleError::OpenFailed` variant with stable `MP-NET-TS-003` code.
+- `openTailscaleSetup` returns `null` on success, user-readable message on
+  failure.
+- `TailscaleSetupView` accepts `openError` prop and renders it in red text
+  below the action buttons.
+- "Check again" remains available regardless of open failure.
+
+### D3 — Stale `MP-NET-001` error codes in `TailscaleError` Display
+
+The `TailscaleError` enum used `MP-NET-001` in its Display strings, while the
+readiness model used `MP-NET-TS-001/003` codes. This made error strings from
+`open_tailscale_app` return a non-TS-series code.
+
+**Fix**: Changed Display to `MP-NET-TS-001` for `ExecutableNotFound` and
+`MP-NET-TS-003` for `CommandFailed`/`InvalidStatus`/`OpenFailed`.
+
+### D4 — `contentFor` did not guard against READY
+
+The `contentFor` default case handled READY by returning a generic "Open
+Tailscale" action, which would be contradictory if READY ever reached the setup
+view.
+
+**Fix**: Added explicit `case "READY": throw new Error("READY is not a setup
+state")`. The view is only rendered when state !== READY, so this is a
+defensive programming contract backed by a test.
+
+## macOS Open Tailscale behavior
+
+`open_tailscale_app()` uses `open -a Tailscale` (standard macOS Launch
+Services mechanism). If the app is not registered, the error maps to
+`MP-NET-TS-003` and the user sees: "Movie Party could not open the Tailscale
+app. Open it from your Applications folder, then check again."
+
+No hard-coded developer paths. No fallback to the download page when the app
+is installed.
+
+## Readiness polling
+
+- In-flight guard (`connectivityInFlight` ref) prevents overlapping refresh
+  calls.
+- Cadence: 15s when READY, 4s when not READY.
+- "Check again" button clears any open error and triggers immediate refresh.
+- Polling interval extracted to `tailscaleOnboarding.pollIntervalMs()`.
+
+## Partner connectivity
+
+Partner reachability is NOT a prerequisite for entering Home. The
+`PartnerConnectView` is shown only on `MP-NET-TS-005` join failure (host
+unreachable). This is a separate stage after Tailscale local readiness.
+
+## Create Party regression
+
+`create_local_party` calls `local_readiness()` + `required_ipv4()` to obtain
+the authoritative Tailscale IPv4. No localhost, LAN, or public IP fallback
+when `MOVIE_PARTY_DEV_LOOPBACK` is not set. No regression.
+
+## Tests added/updated
+
+### Rust (2 new tests in tailscale.rs)
+- `open_failed_maps_to_daemon_unavailable` — OpenFailed → DaemonUnavailable
+- `open_failed_displays_stable_mp_net_ts_code` — Display string is MP-NET-TS-003
+
+### Frontend (new files + updated)
+
+**`src/backend/tailscaleOnboarding.test.ts`** (6 tests):
+- `isTailscaleReady` returns true only for READY
+- `pollIntervalMs` cadence: ready slower than setup
+- `refreshLabelFor` — "I've signed in" for NEEDS_LOGIN, "Check again" for others
+
+**`src/backend/appRuntime.test.ts`** (14 tests):
+- BackendCommandError extracts MP-NET-TS-001/002/003/004/005/006 codes
+- Falls back to MP-BACKEND-001 for unknown codes
+- Classifies TS codes as "network failure"
+- `tailscaleSetupOpenErrorMessage` maps codes to user-readable messages
+- Verifies no raw backend detail leaks to the user
+
+**`src/views/TailscaleSetupView.test.ts`** (17 tests, previously 9):
+- READY throws (defensive contract)
+- Each state has a unique title identifying the state
+- No localhost/LAN/public IP references in any state
+- "Check again" affordance for every setup state
+- Partner guidance in NOT_INSTALLED description
+- refreshLabelFor coverage
+
+## Verification
+
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test --lib` ✅ (279 lib tests)
+- `cargo test --all-targets --all-features` ✅ (279 lib + 82 integration)
+- `pnpm lint` ✅
+- `pnpm test` ✅ (69 frontend tests)
+- `pnpm exec tsc --noEmit` ✅
+- `pnpm build` ✅
+
+## External Verification Pending
+
+- macOS: fresh install, signed-out, service-offline, and healthy signed-in
+  Tailscale paths; official setup/sign-in launch behavior; host creation and
+  guest join across two devices.
+- Windows: installer detection, `tailscale up` handoff, external help launch,
+  and child join reachability across a real tailnet.
+- Separate-tailnet sharing/ACL cases remain user-managed in Tailscale; Movie
+  Party provides guidance only and does not use admin credentials or APIs.
 
 ---
 

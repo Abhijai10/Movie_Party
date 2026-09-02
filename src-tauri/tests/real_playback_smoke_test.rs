@@ -19,6 +19,7 @@ type MpvHandle = *mut c_void;
 
 const MPV_FORMAT_FLAG: i32 = 3;
 const MPV_FORMAT_DOUBLE: i32 = 5;
+#[allow(dead_code)]
 const MPV_FORMAT_INT64: i32 = 4;
 
 #[test]
@@ -46,19 +47,26 @@ fn bundled_libmpv_plays_pauses_seeks_real_video() {
     type TerminateFn = unsafe extern "C" fn(MpvHandle) -> c_void;
     type ErrorStringFn = unsafe extern "C" fn(c_int) -> *const c_char;
 
+    #[allow(clippy::explicit_auto_deref)]
     let mpv_create: &CreateFn = unsafe { &*lib.get(b"mpv_create\0").expect("mpv_create") };
+    #[allow(clippy::explicit_auto_deref)]
     let mpv_initialize: &InitializeFn =
         unsafe { &*lib.get(b"mpv_initialize\0").expect("mpv_initialize") };
+    #[allow(clippy::explicit_auto_deref)]
     let mpv_command: &CommandFn = unsafe { &*lib.get(b"mpv_command\0").expect("mpv_command") };
+    #[allow(clippy::explicit_auto_deref)]
     let mpv_get_property: &GetPropFn =
         unsafe { &*lib.get(b"mpv_get_property\0").expect("mpv_get_property") };
+    #[allow(clippy::explicit_auto_deref)]
     let mpv_wait_event: &WaitEventFn =
         unsafe { &*lib.get(b"mpv_wait_event\0").expect("mpv_wait_event") };
+    #[allow(clippy::explicit_auto_deref)]
     let mpv_terminate_destroy: &TerminateFn = unsafe {
         &*lib
             .get(b"mpv_terminate_destroy\0")
             .expect("mpv_terminate_destroy")
     };
+    #[allow(clippy::explicit_auto_deref)]
     let mpv_error_string: &ErrorStringFn =
         unsafe { &*lib.get(b"mpv_error_string\0").expect("mpv_error_string") };
 
@@ -78,6 +86,7 @@ fn bundled_libmpv_plays_pauses_seeks_real_video() {
     // Must use mpv_set_option_string BEFORE mpv_initialize.
     type SetOptionStringFn = unsafe extern "C" fn(MpvHandle, *const c_char, *const c_char) -> c_int;
     let mpv_set_option_string: &SetOptionStringFn = unsafe {
+        #[allow(clippy::explicit_auto_deref)]
         &*lib
             .get(b"mpv_set_option_string\0")
             .expect("mpv_set_option_string")

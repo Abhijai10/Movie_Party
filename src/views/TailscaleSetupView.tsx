@@ -16,10 +16,12 @@ import type {
   TailscaleState,
   TailscaleSetupAction,
 } from "../backend/appRuntime";
+import { refreshLabelFor } from "../backend/tailscaleOnboarding";
 
 type TailscaleSetupViewProps = {
   readiness: TailscaleReadiness;
   isRefreshing: boolean;
+  openError: string | null;
   onRefresh: () => void;
   onOpenSetup: (action: TailscaleSetupAction) => void;
 };
@@ -41,7 +43,7 @@ export function contentFor(state: TailscaleState): StateContent {
         eyebrow: "Private connection setup",
         title: "Set up your\nprivate connection",
         description:
-          "Movie Party connects two devices privately through Tailscale. Tailscale isn't installed on this device yet. Install it, sign in, and come back to start your movie night.",
+          "Movie Party needs Tailscale to create a private connection between you and your movie partner. Tailscale isn't installed on this device yet. Install it, sign in, and come back to start your movie night.",
         primaryLabel: "Install Tailscale",
         primaryAction: "INSTALL",
         icon: Download,
@@ -91,6 +93,8 @@ export function contentFor(state: TailscaleState): StateContent {
         icon: AlertTriangle,
         accent: "text-[#FCA5A5] border-[#F87171]/35 bg-[#7F1D1D]/20",
       };
+    case "READY":
+      throw new Error("READY is not a setup state");
     default:
       return {
         eyebrow: "Private connection setup",
@@ -108,12 +112,13 @@ export function contentFor(state: TailscaleState): StateContent {
 export function TailscaleSetupView({
   readiness,
   isRefreshing,
+  openError,
   onRefresh,
   onOpenSetup,
 }: TailscaleSetupViewProps) {
   const content = contentFor(readiness.state);
   const StateIcon = content.icon;
-  const refreshLabel = readiness.state === "NEEDS_LOGIN" ? "I've signed in" : "Check again";
+  const refreshLabel = refreshLabelFor(readiness.state);
 
   return (
     <div className="relative min-h-screen w-full overflow-hidden bg-[#05050B] text-white">
@@ -163,6 +168,12 @@ export function TailscaleSetupView({
               {refreshLabel}
             </button>
           </div>
+
+          {openError && (
+            <p role="alert" className="mt-5 max-w-xl text-sm leading-relaxed text-[#FCA5A5]">
+              {openError}
+            </p>
+          )}
 
           <p className="mt-8 text-xs leading-relaxed text-white/40">
             Movie Party never asks for your Tailscale account or password.
