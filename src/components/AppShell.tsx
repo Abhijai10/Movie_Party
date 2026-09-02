@@ -39,7 +39,12 @@ import { TailscaleSetupView } from "../views/TailscaleSetupView";
 import { createCallTileSessionState, type CallTileSessionState } from "../overlays/callTileState";
 import { LoadingState } from "./LoadingState";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { isTailscaleReady, pollIntervalMs } from "../backend/tailscaleOnboarding";
+import {
+  createSingleFlight,
+  isTailscaleReady,
+  pollIntervalMs,
+  shouldShowPartnerConnectView,
+} from "../backend/tailscaleOnboarding";
 
 type LocalScreen = "CREATE_PARTY" | null;
 type DevScreen = "HOME" | "CREATE" | "JOIN" | "LOBBY" | "READY" | "CINEMA" | null;
@@ -61,7 +66,7 @@ export function AppShell() {
   const [tailscaleReadiness, setTailscaleReadiness] = useState<TailscaleReadiness | null>(null);
   const [isRefreshingConnectivity, setIsRefreshingConnectivity] = useState(false);
   const [setupOpenError, setSetupOpenError] = useState<string | null>(null);
-  const connectivityInFlight = useRef(false);
+  const refreshConnectivityOnce = useRef(createSingleFlight());
   const [callTileSession, setCallTileSession] = useState<CallTileSessionState>(() =>
     createCallTileSessionState(),
   );
@@ -150,15 +155,14 @@ export function AppShell() {
   }, []);
 
   const refreshConnectivity = useCallback(async () => {
-    if (connectivityInFlight.current) return;
-    connectivityInFlight.current = true;
-    setIsRefreshingConnectivity(true);
-    try {
-      setTailscaleReadiness(await getTailscaleReadiness());
-    } finally {
-      connectivityInFlight.current = false;
-      setIsRefreshingConnectivity(false);
-    }
+    await refreshConnectivityOnce.current(async () => {
+      setIsRefreshingConnectivity(true);
+      try {
+        setTailscaleReadiness(await getTailscaleReadiness());
+      } finally {
+        setIsRefreshingConnectivity(false);
+      }
+    });
   }, []);
 
   const openSetup = useCallback(
@@ -429,7 +433,7 @@ export function AppShell() {
     );
   }
 
-  if (joinFailureCode === "MP-NET-TS-005") {
+  if (shouldShowPartnerConnectView(joinFailureCode)) {
     return (
       <PartnerConnectView
         isRetrying={isJoining}
