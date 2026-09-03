@@ -7,7 +7,7 @@ use std::sync::{Arc, OnceLock};
 
 use tokio::sync::Mutex;
 
-use movie_party_lib::app_runtime::AppRuntime;
+use movie_party_lib::app_runtime::{AppRuntime, AppSnapshot};
 use movie_party_lib::identity::DeviceIdentity;
 use movie_party_lib::media::cache::SparseCache;
 use movie_party_lib::media::stream::range_server::{start_range_server, RangeServerConfig};
@@ -492,6 +492,28 @@ async fn reconnect_reuses_single_session_worker() {
     std::env::remove_var("MOVIE_PARTY_DEV_LOOPBACK");
 }
 
+/// Poll for a predicate on the host snapshot with a timeout.
+fn poll_host(host: &AppRuntime, deadline: std::time::Duration, pred: fn(&AppSnapshot) -> bool) {
+    let start = std::time::Instant::now();
+    while !pred(&host.snapshot()) {
+        if start.elapsed() > deadline {
+            panic!("host predicate not satisfied within {:?}", deadline);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Poll for a predicate on the guest snapshot with a timeout.
+fn poll_guest(guest: &AppRuntime, deadline: std::time::Duration, pred: fn(&AppSnapshot) -> bool) {
+    let start = std::time::Instant::now();
+    while !pred(&guest.snapshot()) {
+        if start.elapsed() > deadline {
+            panic!("guest predicate not satisfied within {:?}", deadline);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // M3.4 — Strict sync remains the only authority: guest starvation pauses BOTH
 // sides; refill requires a fresh readiness consensus to resume; no independent
@@ -527,10 +549,26 @@ async fn guest_starvation_pauses_host_and_guest_with_consensus_resume() {
     }
     assert!(guest.snapshot().media.is_some(), "guest must have media");
 
-    // Both sides start playback through the coordinator.
+    // Both sides establish genuine readiness through the coordinator, then
+    // start playback through the distributed play protocol.  The host
+    // coordinator must learn the guest's readiness via the QUIC ReadyState
+    // round trip before the play protocol can commit.
+    poll_guest(&guest, std::time::Duration::from_secs(5), |s| {
+        s.participants
+            .iter()
+            .any(|p| p.role == "Guest" && p.media_ready)
+    });
+    guest.report_buffer_status(0, 8_000, false);
+    guest.set_ready();
+    host.set_ready();
+    poll_host(&host, std::time::Duration::from_secs(5), |s| {
+        s.room.state == "READYCHECK"
+    });
     host.enter_cinema();
     host.resume_playback();
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    poll_host(&host, std::time::Duration::from_secs(5), |s| {
+        s.sync.room_state == "PLAYING"
+    });
     let host_snap = host.snapshot();
     assert_eq!(host_snap.sync.room_state, "PLAYING");
 

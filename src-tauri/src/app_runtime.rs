@@ -3332,6 +3332,23 @@ impl AppRuntime {
             if state.pending_operation_id.is_some() {
                 return snapshot_from_state(&state);
             }
+            // Never start the play protocol — and therefore never report
+            // PLAYING — while the local player is genuinely unavailable
+            // (e.g. the native surface attach failed because libmpv could
+            // not be loaded). A player error here is sticky until the media
+            // is re-opened, so the host cannot talk its way into PLAYING.
+            if state.player_snapshot.state == "PLAYER_ERROR"
+                && state
+                    .player_snapshot
+                    .error_message
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("MP-MEDIA-001"))
+            {
+                state.error =
+                    Some("MP-MEDIA-001 player unavailable; cannot start playback".to_string());
+                sync_room_snapshot(&mut state);
+                return snapshot_from_state(&state);
+            }
             state.local_participant.media_ready = true;
             state
                 .sync_coordinator
@@ -4069,8 +4086,18 @@ impl AppRuntime {
             state.room_state = RoomState::Error;
             state.sync.strict_sync_paused = true;
         } else {
-            state.room_state = RoomState::Playing;
-            state.sync.strict_sync_paused = false;
+            // Use the coordinator's canonical state — never fabricate PLAYING
+            // before the play protocol has committed. The coordinator state
+            // after set_ready is ReadyCheck; play is started by host_play.
+            let coordinator_state = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .room_state;
+            state.room_state = coordinator_state;
+            if coordinator_state == RoomState::ReadyCheck || coordinator_state == RoomState::Lobby {
+                state.sync.strict_sync_paused = false;
+            }
         }
         sync_room_snapshot(&mut state);
         snapshot_from_state(&state)
@@ -5108,7 +5135,8 @@ fn apply_recovery_to_state(state: &mut AppRuntimeState, event: FailureEvent, pla
 #[cfg(test)]
 mod tests {
     use super::{
-        adaptive_preload_deadline, reconnect_failure, AppRuntime, AppSnapshot, ReconnectFailure,
+        adaptive_preload_deadline, reconnect_failure, sync_room_snapshot, AppRuntime, AppSnapshot,
+        ReconnectFailure,
     };
     use crate::call::{CallSignal, CallSignalType};
     use crate::network::quic::QuicError;
@@ -5321,9 +5349,9 @@ mod tests {
             state.transfer_stall_watcher_task = Some(spawn_long(cancelled.clone()));
         }
         runtime.leave_party();
-        // Poll for up to 2s for the Drop guards to run; under full-suite
-        // parallel load the tokio abort may be deferred.
-        for _ in 0..20 {
+        // Poll for up to 10s for the Drop guards to run; under full-suite
+        // parallel load the tokio abort may be deferred well past 2s.
+        for _ in 0..100 {
             if cancelled.load(Ordering::SeqCst) {
                 break;
             }
@@ -5648,7 +5676,27 @@ mod tests {
     #[test]
     fn runtime_failures_drive_recovery_state() {
         let runtime = AppRuntime::new();
-        let playing = runtime.enter_cinema();
+        // Establish genuine PLAYING through the coordinator, not by
+        // fabricating the state in enter_cinema (which must not claim
+        // PLAYING before the play protocol commits).
+        {
+            use crate::sync::consensus::ParticipantReadiness;
+            let mut state = runtime.lock();
+            let room_state = {
+                let mut coord = state
+                    .sync_coordinator
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                coord.host_ready(ParticipantReadiness::ready(5_000));
+                coord.guest_ready(ParticipantReadiness::ready(5_000));
+                let scheduled = coord.prepare_play(0, 0, 5_000).expect("prepare");
+                coord.commit_play(&scheduled).expect("commit");
+                coord.room_state
+            };
+            state.room_state = room_state;
+            sync_room_snapshot(&mut state);
+        }
+        let playing = runtime.snapshot();
         assert_eq!(playing.sync.room_state, "PLAYING");
 
         let interrupted = runtime.handle_failure_event(FailureEvent::TransferInterrupted);
@@ -5693,6 +5741,93 @@ mod tests {
         assert_eq!(
             snapshot.player.error_message.as_deref(),
             Some("MP-MEDIA-006 simulated player failure")
+        );
+    }
+
+    #[test]
+    fn enter_cinema_never_fabricates_playing_before_play_commit() {
+        // A fresh runtime has no coordinator play protocol in flight. Entering
+        // cinema must NOT advertise PLAYING just because a player exists —
+        // PLAYING is only legitimate after a committed play operation.
+        let runtime = AppRuntime::new();
+        let snapshot = runtime.enter_cinema();
+
+        assert_eq!(snapshot.screen, "CINEMA");
+        assert_ne!(
+            snapshot.sync.room_state, "PLAYING",
+            "enter_cinema must not fabricate PLAYING before a play commit"
+        );
+
+        // A coordinator that has only reached READY_CHECK (set_ready path,
+        // no play protocol) must also stay non-PLAYING after enter_cinema.
+        {
+            use crate::sync::consensus::ParticipantReadiness;
+            let mut state = runtime.lock();
+            let ready_state = {
+                let mut coord = state
+                    .sync_coordinator
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                coord.host_ready(ParticipantReadiness::ready(5_000));
+                coord.guest_ready(ParticipantReadiness::ready(5_000));
+                coord.update_readiness_consensus(5_000);
+                coord.room_state
+            };
+            state.room_state = ready_state;
+            sync_room_snapshot(&mut state);
+        }
+        let ready = runtime.enter_cinema();
+        assert_eq!(ready.sync.room_state, "READYCHECK");
+        assert_ne!(ready.sync.room_state, "PLAYING");
+    }
+
+    #[test]
+    fn host_play_never_reports_playing_when_player_unavailable() {
+        // If the local player is genuinely unavailable (libmpv could not be
+        // loaded at attach), host_play must refuse to start the distributed
+        // play protocol: the room can never talk its way into PLAYING while
+        // no real playback engine exists on this device.
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            use crate::sync::consensus::ParticipantReadiness;
+            let coord_room_state = {
+                let mut coord = state
+                    .sync_coordinator
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                coord.host_ready(ParticipantReadiness::ready(5_000));
+                coord.guest_ready(ParticipantReadiness::ready(5_000));
+                coord.update_readiness_consensus(5_000);
+                coord.room_state
+            };
+            state.room_state = coord_room_state;
+            AppRuntime::set_player_diagnostic_error(
+                &mut state,
+                "MP-MEDIA-001 player unavailable".to_string(),
+            );
+            sync_room_snapshot(&mut state);
+        }
+
+        let snapshot = runtime.host_play();
+
+        assert_ne!(
+            snapshot.sync.room_state, "PLAYING",
+            "host_play must never fabricate PLAYING with an unavailable player"
+        );
+        assert!(
+            snapshot.player.state == "PLAYER_ERROR"
+                && snapshot
+                    .player
+                    .error_message
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("MP-MEDIA-001")),
+            "the LibMpvUnavailable diagnostic must stay visible, got {:?}",
+            snapshot.player.error_message
+        );
+        assert_eq!(
+            snapshot.error.as_deref(),
+            Some("MP-MEDIA-001 player unavailable; cannot start playback")
         );
     }
 

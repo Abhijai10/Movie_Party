@@ -297,6 +297,10 @@ fn handle_connection(
             }
         },
         None => {
+            // A full-file GET without Range header must only serve 200 OK
+            // when the complete file is available.  Serving a partial file
+            // as 200 would fabricate a shorter-than-real EOF, causing the
+            // player to see a truncated movie.
             let serve = wait_for_range(
                 cache,
                 manifest,
@@ -306,19 +310,16 @@ fn handle_connection(
                 chunk_wake,
                 wait_timeout_ms,
             );
-            match serve {
-                RangeServe::Available(bytes) | RangeServe::Partial(bytes) => {
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
-                        bytes.len()
-                    );
-                    let _ = stream.write_all(response.as_bytes());
-                    let _ = stream.write_all(&bytes);
-                }
-                RangeServe::Unavailable => {
-                    let response = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                    let _ = stream.write_all(response.as_bytes());
-                }
+            if let RangeServe::Available(bytes) = serve {
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                    bytes.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(&bytes);
+            } else {
+                let response = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(response.as_bytes());
             }
         }
     }
@@ -436,8 +437,13 @@ fn read_available_portion(
         if avail_end > avail_start {
             let read_len = avail_end - avail_start;
             let g = cache.blocking_lock();
-            if let Ok(Some(bytes)) = g.read_range(avail_start, read_len) {
-                result.extend_from_slice(&bytes);
+            match g.read_range(avail_start, read_len) {
+                Ok(Some(bytes)) => result.extend_from_slice(&bytes),
+                // The first unavailable chunk breaks the contiguous prefix.
+                // Serving anything beyond this point would fabricate a
+                // contiguous byte range from sparse, non-adjacent data and
+                // corrupt the media stream (off-by-one Content-Range lies).
+                _ => break,
             }
         }
         current = chunk_end;
@@ -685,6 +691,99 @@ mod tests {
             !r.contains("206 Partial Content"),
             "no bogus partial content expected"
         );
+        h.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn range_server_partial_timeout_serves_only_contiguous_prefix() {
+        let root = std::env::temp_dir().join(Uuid::now_v7().to_string());
+        std::fs::create_dir_all(&root).expect("temp");
+        let m = test_manifest();
+        let mut cache = SparseCache::open(&root, m.clone()).expect("cache");
+        // Chunk 0 is cached, chunk 1 is missing, chunk 2 is cached. A request
+        // spanning 0..=11 must NOT be answered by concatenating chunk 0 + chunk
+        // 2 as if it were contiguous (that would fabricate an off-by-one
+        // Content-Range from sparse data).
+        cache.write_chunk(0, b"abcd").expect("w0");
+        cache.write_chunk(2, b"ijkl").expect("w2");
+        let cache = Arc::new(Mutex::new(cache));
+        let mut config = make_config(m, cache, "tok");
+        config.wait_timeout_ms = 150;
+        let h = start_range_server(config).await.expect("server");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let r = http_get_range(h.addr, "/media/range-test?token=tok", "bytes=0-11");
+        if r.contains("206 Partial Content") {
+            // If a partial is served it must be ONLY the contiguous prefix
+            // (chunk 0, bytes 0-3) and must never skip the missing chunk 1.
+            assert!(r.contains("abcd"), "contiguous prefix must be served");
+            assert!(
+                !r.contains("ijkl"),
+                "bytes past a missing chunk must not be fabricated as contiguous: {r}"
+            );
+            assert!(
+                r.contains("bytes 0-3/16"),
+                "Content-Range must reflect the contiguous bytes actually served: {r}"
+            );
+        } else {
+            assert!(
+                r.contains("503 Service Unavailable"),
+                "non-contiguous data must be refused: {r}"
+            );
+        }
+        h.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn range_server_full_get_requires_complete_file() {
+        let root = std::env::temp_dir().join(Uuid::now_v7().to_string());
+        std::fs::create_dir_all(&root).expect("temp");
+        let m = test_manifest();
+        let cache = Arc::new(Mutex::new(
+            SparseCache::open(&root, m.clone()).expect("cache"),
+        ));
+        let mut config = make_config(m, cache, "tok");
+        config.wait_timeout_ms = 150;
+        let h = start_range_server(config).await.expect("server");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // A plain GET (no Range) on a partial file must NOT report 200 with a
+        // truncated body (fabricated EOF); it must refuse with 503.
+        let r = http_get(h.addr, "/media/range-test?token=tok");
+        assert!(
+            r.contains("503 Service Unavailable"),
+            "full-file GET must refuse incomplete media, got: {r}"
+        );
+        assert!(
+            !r.contains("200 OK"),
+            "partial file must not be served as a complete 200"
+        );
+        h.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn range_server_full_get_serves_complete_file() {
+        let root = std::env::temp_dir().join(Uuid::now_v7().to_string());
+        std::fs::create_dir_all(&root).expect("temp");
+        let m = test_manifest();
+        let mut cache = SparseCache::open(&root, m.clone()).expect("cache");
+        for index in 0..m.chunk_count {
+            cache
+                .write_chunk(index, &[b'a' + index as u8; 4])
+                .expect("write");
+        }
+        let cache = Arc::new(Mutex::new(cache));
+        let h = start_range_server(make_config(m, cache, "tok"))
+            .await
+            .expect("server");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let r = http_get(h.addr, "/media/range-test?token=tok");
+        assert!(r.contains("200 OK"), "complete file must be served: {r}");
+        assert!(r.contains("aaaabbbbccccdddd"), "all bytes must be present");
         h.shutdown();
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -14,16 +14,23 @@ It must be updated continuously.
 
 ```text
 Project State:
-🟨 TAILSCALE ONBOARDING TRUTHFULNESS PASS COMPLETE (code-level). Verified
-    the six-state model (NOT_INSTALLED, DAEMON_UNAVAILABLE, NEEDS_LOGIN,
-    STOPPED, NO_USABLE_ADDRESS, READY) with correct user-facing actions per
-    state. Open Tailscale failure surfaced with stable MP-NET-TS-003 error.
-    Fixed error-code extraction regex for MP-NET-TS-xxx codes. Added
-    testable onboarding helpers (poll cadence, refresh label, state
-    detection). 69 frontend + 279 Rust + 82 integration tests pass.
+🟨 LOCAL PERFECT MEDIA DELIVERY/PLAYBACK AUDIT PASS COMPLETE (code-level).
+    Audited the full Host file → fingerprint → QUIC 1 MiB chunk transfer →
+    sparse cache → range server → libmpv → playback-readiness → strict-sync
+    path against PROTOCOL_SPEC. Media identity (BLAKE3 full hash + size +
+    first/last-4MiB quick fingerprint), chunk validation (media_id, index,
+    length, per-chunk hash), sparse cache, demand-driven transfer, bounded
+    retry, 503-on-unavailable range semantics all verified correct. Fixed
+    three real defects: (1) range server could fabricate a contiguous
+    Content-Range from non-adjacent sparse chunks at wait timeout;
+    (2) a plain full-file GET could serve a partially cached file as a
+    complete 200 OK (fabricated EOF); (3) enter_cinema fabricated PLAYING
+    before any play commit and host_play did not refuse a genuinely
+    unavailable player. 69 frontend + 284 Rust lib + 81 integration tests
+    pass.
 
 Current Phase:
-BATCH 8 — TAILSCALE ONBOARDING TRUTHFULNESS PASS (code-level)
+BATCH 9 — LOCAL PERFECT MEDIA DELIVERY AND PLAYBACK READINESS AUDIT
 
 Current Release:
 V1 Development
@@ -39,6 +46,160 @@ M6: Real Chrome/provider login and media playback require external verification
 M7: ScreenCaptureKit needs macOS permission dialog
 M8: Chrome/player crash watchers not wired
 ```
+
+---
+
+# BATCH 9 — LOCAL PERFECT MEDIA DELIVERY/PLAYBACK AUDIT (2026-09-03)
+
+## Objective
+
+Audit and complete the existing Local Perfect path so a Host can provide an
+authorized local movie to the Guest over the existing Tailscale + QUIC
+architecture and the Guest can actually consume that media through the
+existing playback stack. No architecture redesign; only concrete
+gaps between code and PROTOCOL_SPEC were fixed.
+
+## Verified correct (no redesign)
+
+- **Media identity / fingerprinting** (`media/manifest/mod.rs`): media_id is
+  derived from file size + full BLAKE3 hash prefix; quick fingerprint hashes
+  first/last 4 MiB; `validate_for_guest` rejects empty/oversized/mismatched
+  manifests; identity is never filename/extension/display-name based. Duplicate
+  requests reuse the same cache root keyed by media_id; replacing the source
+  file changes the full hash → new media_id → old cache is not reused.
+- **1 MiB chunk semantics** (`media/manifest`, `media/transfer`):
+  `DEFAULT_CHUNK_SIZE_BYTES = 1_048_576`; `chunk_len` computes the final
+  partial chunk; `build_chunk_packet` validates the payload length against
+  `chunk_len`; `validate_chunk_packet` checks media_id, index bounds, exact
+  length, and per-chunk hash. Zero-length and out-of-bounds ranges are
+  rejected (`InvalidRange` → HTTP 416).
+- **Guest sparse cache** (`media/cache/mod.rs`): sparse chunk map persisted to
+  `chunk-map.bin`; `read_range` only returns data when every chunk in the
+  range is present; `complete()` requires all chunks; writes are bounded per
+  chunk (no whole-movie memory buffer); partially cached media is never
+  marked complete; cache state survives reconnect/retry.
+- **Integrity** (`media/transfer/mod.rs`): every received chunk is re-hashed
+  and validated before it may enter the cache; a wrong-length, wrong-offset,
+  wrong-identity, or corrupted chunk is rejected and never exposed to
+  libmpv. Corrupted chunks are removed from the in-flight set so the next
+  demand re-fetches them.
+- **Resume / retry**: the transfer worker requeues on cache-write failure and
+  on QUIC errors with a 1s pause; reconnect is bounded (6 attempts, backoff);
+  there is exactly one demand scheduler (`ChunkDemandHandle`) with in-flight
+  dedup — no second scheduler was added.
+- **Strict sync**: guest/host buffer-low still pauses BOTH sides through the
+  coordinator; recovery returns to READYCHECK and requires a fresh consensus
+  + host play to resume. `enter_cinema` no longer fabricates PLAYING, so the
+  m3 starvation test now exercises the genuine distributed play protocol
+  (stronger coverage than before).
+- **No localhost/LAN/public fallback**: media transfer is QUIC-only over the
+  Tailscale interface (loopback only under `MOVIE_PARTY_DEV_LOOPBACK=1` for
+  tests); the range server binds 127.0.0.1 with an unguessable token as the
+  PROTOCOL_SPEC §27 loopback-only media source.
+
+## Defects found and fixed
+
+### D1 — Range server fabricated contiguous Content-Range from sparse data
+
+**Location**: `media/stream/range_server.rs`, `read_available_portion`
+
+**Defect**: When a range request timed out waiting for chunks,
+`read_available_portion` accumulated every *available* sub-range in the
+requested window — even when the missing chunk sat in the middle — and the
+206 response then claimed `bytes start-(start+len-1)`, presenting
+non-adjacent sparse bytes as a contiguous run. libmpv would decode garbage
+as if it were the real byte range (integrity bypass via off-by-one
+Content-Range).
+
+**Fix**: `read_available_portion` now stops at the first unavailable chunk
+and serves only the contiguous prefix, so the Content-Range always describes
+bytes that are genuinely present in that order.
+
+**Test**: `range_server_partial_timeout_serves_only_contiguous_prefix`
+(chunk 0 + chunk 2 cached, chunk 1 missing; a 206 may only ever contain the
+chunk-0 prefix and must never contain chunk-2 bytes).
+
+### D2 — Plain full-file GET served a partial file as 200 OK
+
+**Location**: `media/stream/range_server.rs`, `handle_connection` (no Range
+header branch)
+
+**Defect**: A GET without a `Range` header waited for the *whole* file and,
+on timeout, returned `200 OK` with `Content-Length` = however many prefix
+bytes existed. A 200 response means "this is the entire resource", so the
+player would treat a truncated body as the real EOF of the movie.
+
+**Fix**: The no-Range branch now serves `200 OK` only when the complete file
+is cached (`RangeServe::Available`); otherwise it returns
+`503 Service Unavailable` with `Retry-After: 1`. Partial data is reported
+as unavailable rather than fabricated.
+
+**Tests**: `range_server_full_get_requires_complete_file` (partial cache →
+must be 503, never 200) and `range_server_full_get_serves_complete_file`
+(full cache → 200 with the complete byte stream).
+
+### D3 — `enter_cinema` fabricated PLAYING before any play commit
+
+**Location**: `app_runtime.rs`, `enter_cinema`
+
+**Defect**: Entering the cinema screen set `room_state = Playing` whenever
+the player had no error — before the distributed play protocol had ever run.
+The UI then showed PLAYING (pause button, "in sync" indicator) while no
+playback had been committed by any participant, and `host_play` became a
+no-op through its idempotency guard, skipping the real protocol.
+
+**Fix**: `enter_cinema` now adopts the coordinator's canonical room state
+(READYCHECK after readiness consensus, PAUSED/BUFFERING where applicable)
+instead of forcing PLAYING. PLAYING only arrives through a committed play
+operation.
+
+**Tests**: `enter_cinema_never_fabricates_playing_before_play_commit`;
+`runtime_failures_drive_recovery_state` now establishes genuine PLAYING
+via coordinator `prepare_play`/`commit_play`; the m3_closure starvation test
+now drives the real readiness + play protocol (previously it silently relied
+on the fabricated state).
+
+### D4 — `host_play` did not refuse a genuinely unavailable player
+
+**Location**: `app_runtime.rs`, `host_play`
+
+**Defect**: If the native surface attach failed because libmpv could not be
+loaded (sticky `MP-MEDIA-001` player diagnostic), `host_play` still force-set
+`media_ready = true` and started the distributed play protocol, letting the
+room report PLAYING with no real playback engine on the device.
+
+**Fix**: `host_play` now refuses to start the play protocol while the player
+snapshot carries the sticky `MP-MEDIA-001` unavailable diagnostic and reports
+`MP-MEDIA-001 player unavailable; cannot start playback`. The existing
+LibMpvUnavailable diagnostic-only behavior (protocol tests without libmpv)
+is preserved — the guard keys on the genuine attach-failure error state, not
+on the pre-attach simulation window.
+
+**Test**: `host_play_never_reports_playing_when_player_unavailable`.
+
+## Verification
+
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test --all-targets --all-features` ✅ (284 lib + 2 wiring + 28 m2 +
+  7 m3_closure + 18 m3_integration + 9 m3_m4 + 15 m4_closure +
+  real_native_surface_e2e)
+- `pnpm install --frozen-lockfile` ✅
+- `pnpm lint` ✅
+- `pnpm test` ✅ (70 frontend tests)
+- `pnpm exec tsc --noEmit` ✅
+- `pnpm build` ✅
+- `pnpm tauri build` ✅ (`Movie Party.app` + DMG bundle produced)
+
+## Remaining manual validation (NOT claimed complete)
+
+- Real two-device Local Perfect playback over live Tailscale (Host picks a
+  movie → Guest joins → media transfers → both sides actually watch
+  synchronized video) has NOT been performed in this batch and remains
+  external verification pending.
+- Real in-window libmpv rendering on macOS requires the staged libmpv runtime
+  and a real GUI session; unit/integration tests do not prove visible
+  playback.
 
 ---
 

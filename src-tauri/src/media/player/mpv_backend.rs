@@ -422,6 +422,11 @@ impl LocalPlayer for MpvPlayer {
             return Err(PlayerError::LibMpvUnavailable);
         }
         if self.handle.is_none() && self.loaded_path.is_some() {
+            // Simulation window before the native surface attaches: libmpv
+            // has not been loaded yet, so no real decode can start here.
+            // Real production playback always attaches the surface first
+            // (which loads libmpv and opens the media); the play protocol
+            // gates on attach failure through the player error state.
             self.snapshot.state = PlayerState::Playing;
             return Ok(());
         }
