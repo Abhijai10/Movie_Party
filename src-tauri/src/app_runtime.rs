@@ -5,7 +5,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, MutexGuard, RwLock,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -1423,21 +1423,11 @@ impl AppRuntime {
                                 db.update_schedule_status(&schedule.schedule_id, "WaitingForPeer");
                             let should_notify = {
                                 let mut state = inner.lock();
-                                let now = Instant::now();
-                                match state.preload_wait_notified_at.get(&schedule.schedule_id) {
-                                    Some(previous)
-                                        if now.duration_since(*previous)
-                                            < std::time::Duration::from_secs(15 * 60) =>
-                                    {
-                                        false
-                                    }
-                                    _ => {
-                                        state
-                                            .preload_wait_notified_at
-                                            .insert(schedule.schedule_id.clone(), now);
-                                        true
-                                    }
-                                }
+                                should_notify_preload_wait(
+                                    &mut state,
+                                    &schedule.schedule_id,
+                                    Instant::now(),
+                                )
                             };
                             if should_notify {
                                 let _ = inner.notifier.notify(
@@ -3068,7 +3058,10 @@ impl AppRuntime {
                 }
                 QuicServerEvent::BufferRecovered { buffer_ahead_ms } => {
                     state.buffer.buffering_participant = None;
-                    state.buffer.percent = 100;
+                    // Real verified transfer progress, never a fabricated
+                    // 100% — the guest may have recovered its playback-ahead
+                    // window while the whole file is still transferring.
+                    state.buffer.percent = transfer_percent_for_state(&state);
                     state.buffer.guest_buffer_ahead_ms = buffer_ahead_ms;
                     // PROTOCOL_SPEC §30: BUFFER_RECOVERED does NOT auto-resume.
                     // The coordinator returns to READY_CHECK (only when the
@@ -3531,7 +3524,11 @@ impl AppRuntime {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .buffer_recovered();
             state.buffer.buffering_participant = None;
-            state.buffer.percent = 100;
+            // The whole-file transfer percentage is the real verified
+            // progress, never a fabricated 100% (the file may be far from
+            // fully transferred even when the playback-ahead window is
+            // healthy again).
+            state.buffer.percent = transfer_percent_for_state(&state);
             state.buffer.guest_buffer_ahead_ms = buffer_ahead_ms;
             let strict_sync_paused = state
                 .sync_coordinator
@@ -3890,22 +3887,7 @@ impl AppRuntime {
                         runtime.report_buffer_status(position_ms, buffer_ahead_ms, stalled);
                     }
                     if let Some((drift_ms, position_ms)) = correction {
-                        use crate::sync::drift::{correction_for_drift, DriftCorrection};
-                        let mut player = player_arc
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        match correction_for_drift(drift_ms, position_ms as i64) {
-                            DriftCorrection::Ignore => {
-                                let _ = player.set_playback_rate(1.0);
-                            }
-                            DriftCorrection::PlaybackRate { rate } => {
-                                let _ = player.set_playback_rate(rate);
-                            }
-                            DriftCorrection::MicroSeek { target_position_ms }
-                            | DriftCorrection::HardSeek { target_position_ms } => {
-                                let _ = player.seek(target_position_ms.max(0) as u64);
-                            }
-                        }
+                        Self::apply_drift_correction(&player_arc, drift_ms, position_ms);
                     }
                 }
             }
@@ -3917,6 +3899,34 @@ impl AppRuntime {
         let mut state = self.lock();
         if let Some(old) = state.player_event_task.replace(task) {
             old.abort();
+        }
+    }
+
+    /// Apply a strict-sync drift correction to the guest player. This is the
+    /// exact code the player event loop runs: `Ignore` restores the normal
+    /// 1.0 rate once the guest has converged on the host position, a small
+    /// drift nudges the playback rate, and larger drifts seek back to the
+    /// canonical host commit.
+    fn apply_drift_correction(
+        player_arc: &Arc<std::sync::Mutex<dyn LocalPlayer + Send + Sync>>,
+        drift_ms: i64,
+        position_ms: u64,
+    ) {
+        use crate::sync::drift::{correction_for_drift, DriftCorrection};
+        let mut player = player_arc
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match correction_for_drift(drift_ms, position_ms as i64) {
+            DriftCorrection::Ignore => {
+                let _ = player.set_playback_rate(1.0);
+            }
+            DriftCorrection::PlaybackRate { rate } => {
+                let _ = player.set_playback_rate(rate);
+            }
+            DriftCorrection::MicroSeek { target_position_ms }
+            | DriftCorrection::HardSeek { target_position_ms } => {
+                let _ = player.seek(target_position_ms.max(0) as u64);
+            }
         }
     }
 
@@ -4709,39 +4719,71 @@ impl AppRuntime {
 
         // 4. Open player with range-server HTTP URL
         {
+            let (playable, position_ms, duration_ms) = {
+                let mut state = self.lock();
+                state.media = Some(manifest.clone());
+                state.local_participant.media_ready = false;
+                state.local_participant.buffer_ahead_ms = 0;
+                state.range_server_handle = Some(range_handle);
+                #[cfg(feature = "mpv")]
+                {
+                    let mut player = MpvPlayer::new();
+                    if let Err(e) = player.open(std::path::Path::new(&media_url)) {
+                        state.local_participant.media_ready = false;
+                        Self::set_player_error(&mut state, Self::media_load_error_message(&e));
+                    } else {
+                        state.player_snapshot = PlayerSnapshot::from_player(&player);
+                    }
+                    state.player = Some(Arc::new(std::sync::Mutex::new(player)));
+                }
+                #[cfg(not(feature = "mpv"))]
+                {
+                    let mut player = crate::media::player::LibMpvPlayer::new();
+                    if let Err(e) = player.open(std::path::Path::new(&media_url)) {
+                        state.local_participant.media_ready = false;
+                        Self::set_player_error(&mut state, Self::media_load_error_message(&e));
+                    } else {
+                        state.player_snapshot = PlayerSnapshot::from_player(&player);
+                    }
+                    state.player = Some(Arc::new(std::sync::Mutex::new(player)));
+                }
+                let playable =
+                    initial_bytes_available > 0 && state.player_snapshot.error_message.is_none();
+                state.local_participant.media_ready = playable;
+                state.buffer.percent = Self::transfer_percent(&state);
+                (
+                    playable,
+                    state.player_snapshot.position_ms,
+                    state
+                        .player_snapshot
+                        .duration_ms
+                        .filter(|duration| *duration > 0),
+                )
+            };
+            // Honest initial headroom: the contiguous verified bytes ahead of
+            // the playhead, exactly like the player event loop computes it.
+            // A partially cached opening window is healthy playback headroom
+            // even though the whole-file transfer percentage is low; a
+            // completed chunk far from the playhead is not. The backend's
+            // own buffered-ahead value (when it can expose one) stays
+            // authoritative. The cache is consulted WITHOUT holding the
+            // runtime state lock so the transfer worker can never deadlock
+            // against this read.
+            let cache_headroom_ms = match duration_ms {
+                Some(duration_ms) => {
+                    let byte_offset = (position_ms as u128 * manifest.file_size as u128
+                        / duration_ms as u128) as u64;
+                    let contiguous = cache_arc.lock().await.contiguous_bytes_from(byte_offset);
+                    ((contiguous as u128 * duration_ms as u128) / manifest.file_size.max(1) as u128)
+                        as u64
+                }
+                None => 0,
+            };
             let mut state = self.lock();
-            state.media = Some(manifest.clone());
-            state.local_participant.media_ready = false;
-            state.local_participant.buffer_ahead_ms = 0;
-            state.range_server_handle = Some(range_handle);
-            #[cfg(feature = "mpv")]
-            {
-                let mut player = MpvPlayer::new();
-                if let Err(e) = player.open(std::path::Path::new(&media_url)) {
-                    state.local_participant.media_ready = false;
-                    Self::set_player_error(&mut state, Self::media_load_error_message(&e));
-                } else {
-                    state.player_snapshot = PlayerSnapshot::from_player(&player);
-                }
-                state.player = Some(Arc::new(std::sync::Mutex::new(player)));
-            }
-            #[cfg(not(feature = "mpv"))]
-            {
-                let mut player = crate::media::player::LibMpvPlayer::new();
-                if let Err(e) = player.open(std::path::Path::new(&media_url)) {
-                    state.local_participant.media_ready = false;
-                    Self::set_player_error(&mut state, Self::media_load_error_message(&e));
-                } else {
-                    state.player_snapshot = PlayerSnapshot::from_player(&player);
-                }
-                state.player = Some(Arc::new(std::sync::Mutex::new(player)));
-            }
-            let playable =
-                initial_bytes_available > 0 && state.player_snapshot.error_message.is_none();
-            state.local_participant.media_ready = playable;
-            state.buffer.percent = Self::transfer_percent(&state);
-            state.buffer.guest_buffer_ahead_ms =
-                state.player_snapshot.buffered_ahead_ms.unwrap_or(0);
+            state.buffer.guest_buffer_ahead_ms = state
+                .player_snapshot
+                .buffered_ahead_ms
+                .unwrap_or(cache_headroom_ms);
             state.local_participant.buffer_ahead_ms = state.buffer.guest_buffer_ahead_ms;
             if !Self::is_host_role(&state)
                 && playable
@@ -5063,6 +5105,40 @@ fn sync_room_snapshot(state: &mut AppRuntimeState) {
     state.sync.room_state = format!("{:?}", state.room_state).to_ascii_uppercase();
 }
 
+/// Whole-file transfer percentage derived from the real verified transfer
+/// progress. Recovery bookkeeping must never fabricate 0%/100% values: the
+/// cache on disk is the source of truth for how much of the file exists.
+/// This is deliberately NOT playback readiness — see
+/// [`crate::media::cache::SparseCache::contiguous_bytes_from`] for the
+/// playback-headroom concept.
+fn transfer_percent_for_state(state: &AppRuntimeState) -> u8 {
+    state
+        .transfer
+        .as_ref()
+        .map(|progress| (progress.fraction() * 100.0).round().clamp(0.0, 100.0) as u8)
+        .unwrap_or(0)
+}
+
+/// Rate-limit decision for "preload waiting" OS notifications: a repeated
+/// WaitingForPeer poll within the window must not re-notify the user.
+/// Mutates the per-schedule map so a fresh decision records the timestamp.
+fn should_notify_preload_wait(
+    state: &mut AppRuntimeState,
+    schedule_id: &str,
+    now: Instant,
+) -> bool {
+    const PRELOAD_WAIT_NOTIFY_WINDOW: Duration = Duration::from_secs(15 * 60);
+    match state.preload_wait_notified_at.get(schedule_id) {
+        Some(previous) if now.duration_since(*previous) < PRELOAD_WAIT_NOTIFY_WINDOW => false,
+        _ => {
+            state
+                .preload_wait_notified_at
+                .insert(schedule_id.to_string(), now);
+            true
+        }
+    }
+}
+
 fn apply_recovery_to_state(state: &mut AppRuntimeState, event: FailureEvent, plan: RecoveryPlan) {
     if plan.pauses_playback_for_both {
         state.room_state = RoomState::Reconnecting;
@@ -5081,15 +5157,25 @@ fn apply_recovery_to_state(state: &mut AppRuntimeState, event: FailureEvent, pla
         }
         FailureEvent::TransferInterrupted => {
             state.buffer.guest_buffer_ahead_ms = 0;
-            state.buffer.percent = 0;
             state.buffer.buffering_participant = Some("Guest".to_string());
+            // The stall cleared the buffer; the whole-file transfer
+            // percentage is untouched because the verified cache is still
+            // on disk. Only the playback-ahead window collapsed to zero.
+            state.buffer.percent = transfer_percent_for_state(state);
         }
         FailureEvent::TransferResumed => {
-            state.room_state = RoomState::Playing;
-            state.sync.strict_sync_paused = false;
-            state.buffer.guest_buffer_ahead_ms = 5_000;
-            state.buffer.percent = 100;
+            // PROTOCOL_SPEC §30 / MASTER_PRD §14: transfer recovery NEVER
+            // resumes playback by itself. Playback only resumes through a
+            // fresh host play-protocol cycle after readiness consensus, so
+            // the room state and strict-sync pause are left exactly as the
+            // coordinator holds them. Only the buffer bookkeeping is
+            // refreshed, and from real transfer progress — not a
+            // fabricated 100%.
             state.buffer.buffering_participant = None;
+            state.buffer.percent = transfer_percent_for_state(state);
+            if let Some(transfer) = state.transfer.as_mut() {
+                transfer.buffer_ahead_ms = state.buffer.guest_buffer_ahead_ms;
+            }
         }
         FailureEvent::TailscaleDisconnect | FailureEvent::WifiDisconnect => {
             state.network.connected = false;
@@ -5135,15 +5221,15 @@ fn apply_recovery_to_state(state: &mut AppRuntimeState, event: FailureEvent, pla
 #[cfg(test)]
 mod tests {
     use super::{
-        adaptive_preload_deadline, reconnect_failure, sync_room_snapshot, AppRuntime, AppSnapshot,
-        ReconnectFailure,
+        adaptive_preload_deadline, reconnect_failure, should_notify_preload_wait,
+        sync_room_snapshot, AppRuntime, AppSnapshot, ReconnectFailure,
     };
     use crate::call::{CallSignal, CallSignalType};
     use crate::network::quic::QuicError;
     use crate::resilience::{FailureEvent, RecoveryAction};
     use crate::room::MoviePartyInvite;
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tokio::sync::Mutex;
 
     /// Serializes tests that read or write the process-global
@@ -5324,11 +5410,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn leave_party_aborts_reconnect_heartbeat_preload_and_watch_workers() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         let runtime = AppRuntime::new();
         let cancelled = Arc::new(AtomicBool::new(false));
-        let spawn_long = |cancelled: Arc<AtomicBool>| {
+        let started = Arc::new(AtomicUsize::new(0));
+        let spawn_long = |cancelled: Arc<AtomicBool>, started: Arc<AtomicUsize>| {
             tokio::spawn(async move {
+                started.fetch_add(1, Ordering::SeqCst);
                 struct Guard(Arc<AtomicBool>);
                 impl Drop for Guard {
                     fn drop(&mut self) {
@@ -5343,19 +5431,40 @@ mod tests {
         };
         {
             let mut state = runtime.lock();
-            state.reconnect_task = Some(spawn_long(cancelled.clone()));
-            state.heartbeat_task = Some(spawn_long(cancelled.clone()));
-            state.preload_task = Some(spawn_long(cancelled.clone()));
-            state.transfer_stall_watcher_task = Some(spawn_long(cancelled.clone()));
+            state.reconnect_task = Some(spawn_long(cancelled.clone(), started.clone()));
+            state.heartbeat_task = Some(spawn_long(cancelled.clone(), started.clone()));
+            state.preload_task = Some(spawn_long(cancelled.clone(), started.clone()));
+            state.transfer_stall_watcher_task =
+                Some(spawn_long(cancelled.clone(), started.clone()));
         }
+        // Tokio processes a task's abort the next time the task is polled, so
+        // every worker must reach its first poll before leave_party runs.
+        // Without these yields the test body never releases its worker slot
+        // and, when a previous test leaves the process loaded, spawned tasks
+        // can sit unscheduled indefinitely — a scheduling hazard, not a
+        // worker-abort bug. yield_now lets the body thread help schedule.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while started.load(Ordering::SeqCst) < 4 && std::time::Instant::now() < deadline {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            4,
+            "all four workers must reach their first poll before leave_party"
+        );
+        assert!(
+            !cancelled.load(Ordering::SeqCst),
+            "sanity: workers must be running before leave_party"
+        );
         runtime.leave_party();
-        // Poll for up to 10s for the Drop guards to run; under full-suite
-        // parallel load the tokio abort may be deferred well past 2s.
-        for _ in 0..100 {
-            if cancelled.load(Ordering::SeqCst) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        // Poll until every Drop guard has run. The yield keeps this test's
+        // worker participating in scheduling so the abort wake is never
+        // starved; the bounded deadline keeps a real failure loud.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !cancelled.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
         let state = runtime.lock();
         assert!(state.reconnect_task.is_none());
@@ -5710,8 +5819,22 @@ mod tests {
         );
 
         let resumed = runtime.handle_failure_event(FailureEvent::TransferResumed);
-        assert!(!resumed.sync.strict_sync_paused);
-        assert_eq!(resumed.sync.room_state, "PLAYING");
+        // PROTOCOL_SPEC §30: transfer recovery never silently resumes
+        // playback. The coordinator holds the pause until the guest
+        // completes a fresh readiness cycle (report_buffer_recovered →
+        // READY_CHECK → fresh play commit). The room must NOT be PLAYING
+        // here merely because the transfer worker is making progress
+        // again.
+        assert!(resumed.sync.strict_sync_paused);
+        assert_ne!(
+            resumed.sync.room_state, "PLAYING",
+            "transfer recovery must not auto-resume playback"
+        );
+        // The guest buffer no longer reads as the buffering participant,
+        // and the transfer percent reflects real verified progress, never
+        // a fabricated 100%.
+        assert!(resumed.buffer.buffering_participant.is_none());
+        assert!(resumed.buffer.percent <= 100);
 
         let missing = runtime.handle_failure_event(FailureEvent::MissingLocalFile);
         assert!(missing.media.is_none());
@@ -6256,5 +6379,340 @@ mod tests {
             peer.media_ready,
             "CoordinatorStateUpdate must mirror the peer's genuine readiness"
         );
+    }
+
+    // ── Batch 9B: Local Perfect production-closure focused tests ──────────────
+
+    /// Test double that records every playback-rate and seek command the
+    /// runtime issues, so drift corrections can be asserted without a live
+    /// libmpv. This is a test-only recorder implementing the same
+    /// `LocalPlayer` seam the production backends implement.
+    struct ScriptedPlayer {
+        snapshot: crate::media::player::PlayerSnapshot,
+        rate_calls: std::sync::Arc<std::sync::Mutex<Vec<f32>>>,
+        seek_calls: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+    }
+
+    impl ScriptedPlayer {
+        fn new(
+            position_ms: u64,
+            duration_ms: u64,
+            rate_calls: std::sync::Arc<std::sync::Mutex<Vec<f32>>>,
+            seek_calls: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+        ) -> Self {
+            Self {
+                snapshot: crate::media::player::PlayerSnapshot {
+                    state: crate::media::player::PlayerState::Playing,
+                    position_ms,
+                    duration_ms: Some(duration_ms),
+                    volume: 1.0,
+                    playback_rate: 1.0,
+                    buffered_ahead_ms: None,
+                    error_message: None,
+                },
+                rate_calls,
+                seek_calls,
+            }
+        }
+    }
+
+    impl crate::media::player::LocalPlayer for ScriptedPlayer {
+        fn open(
+            &mut self,
+            _path: &std::path::Path,
+        ) -> Result<(), crate::media::player::PlayerError> {
+            Ok(())
+        }
+        fn play(&mut self) -> Result<(), crate::media::player::PlayerError> {
+            self.snapshot.state = crate::media::player::PlayerState::Playing;
+            Ok(())
+        }
+        fn pause(&mut self) -> Result<(), crate::media::player::PlayerError> {
+            self.snapshot.state = crate::media::player::PlayerState::Paused;
+            Ok(())
+        }
+        fn seek(&mut self, position_ms: u64) -> Result<(), crate::media::player::PlayerError> {
+            self.seek_calls.lock().unwrap().push(position_ms);
+            self.snapshot.position_ms = position_ms;
+            Ok(())
+        }
+        fn set_volume(&mut self, volume: f32) -> Result<(), crate::media::player::PlayerError> {
+            self.snapshot.volume = volume.clamp(0.0, 1.0);
+            Ok(())
+        }
+        fn set_playback_rate(
+            &mut self,
+            rate: f32,
+        ) -> Result<(), crate::media::player::PlayerError> {
+            self.rate_calls.lock().unwrap().push(rate);
+            self.snapshot.playback_rate = rate.clamp(0.25, 4.0);
+            Ok(())
+        }
+        fn snapshot(&self) -> crate::media::player::PlayerSnapshot {
+            self.snapshot.clone()
+        }
+        fn duration(&self) -> Option<u64> {
+            self.snapshot.duration_ms
+        }
+        fn buffered_ahead_ms(&self) -> Option<u64> {
+            self.snapshot.buffered_ahead_ms
+        }
+        fn error_message(&self) -> Option<String> {
+            self.snapshot.error_message.clone()
+        }
+        fn close(&mut self) {}
+    }
+
+    /// The runtime drift path must restore the normal 1.0 rate once the
+    /// guest converges on the host position (rate correction may not leak a
+    /// 0.97/1.03 rate into converged playback).
+    #[tokio::test]
+    async fn drift_correction_restores_normal_rate_after_convergence() {
+        let rate_calls: std::sync::Arc<std::sync::Mutex<Vec<f32>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seek_calls: std::sync::Arc<std::sync::Mutex<Vec<u64>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let player =
+            ScriptedPlayer::new(100_000, 3_600_000, rate_calls.clone(), seek_calls.clone());
+        let player_arc: std::sync::Arc<
+            std::sync::Mutex<dyn crate::media::player::LocalPlayer + Send + Sync>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(player));
+
+        // Guest 120ms ahead of the host commit → gentle rate correction.
+        AppRuntime::apply_drift_correction(&player_arc, 120, 100_000);
+        // Guest converged (drift inside the ignore band) → rate restored.
+        AppRuntime::apply_drift_correction(&player_arc, 10, 100_100);
+
+        let rates = rate_calls.lock().unwrap().clone();
+        assert_eq!(rates, vec![0.97, 1.0]);
+        assert!(
+            seek_calls.lock().unwrap().is_empty(),
+            "rate-band drift must never seek"
+        );
+    }
+
+    /// The runtime drift path must hard-seek back to the canonical host
+    /// commit when the guest drifts beyond the micro-seek band.
+    #[tokio::test]
+    async fn drift_correction_hard_seeks_back_to_host_commit() {
+        let rate_calls: std::sync::Arc<std::sync::Mutex<Vec<f32>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seek_calls: std::sync::Arc<std::sync::Mutex<Vec<u64>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let player = ScriptedPlayer::new(40_000, 3_600_000, rate_calls, seek_calls.clone());
+        let player_arc: std::sync::Arc<
+            std::sync::Mutex<dyn crate::media::player::LocalPlayer + Send + Sync>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(player));
+
+        // Guest 900ms behind the host commit (40_900 committed).
+        AppRuntime::apply_drift_correction(&player_arc, -900, 40_000);
+
+        let seeks = seek_calls.lock().unwrap().clone();
+        assert_eq!(seeks, vec![40_900]);
+    }
+
+    /// Playback headroom and whole-file transfer percentage are separate
+    /// concepts and must stay separate in the snapshot: a sparse cache with a
+    /// healthy contiguous window at the playhead reports healthy headroom
+    /// even while the whole-file transfer percent is low, and recovery
+    /// bookkeeping may never fabricate a 100% transfer from headroom health.
+    #[tokio::test]
+    async fn recovery_percent_reflects_verified_transfer_not_headroom() {
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            // 40% of the file verified on disk.
+            state.transfer = Some(crate::media::transfer::TransferProgress {
+                media_id: "m".to_string(),
+                bytes_available: 400,
+                bytes_total: 1_000,
+                buffer_ahead_ms: 0,
+                goodput_bps: 8_000_000,
+            });
+            state.buffer.guest_buffer_ahead_ms = 30_000;
+        }
+
+        let resumed = runtime.handle_failure_event(FailureEvent::TransferResumed);
+        assert_eq!(
+            resumed.buffer.percent, 40,
+            "recovery percent must be the real verified transfer fraction"
+        );
+        assert_eq!(
+            resumed.buffer.guest_buffer_ahead_ms, 30_000,
+            "healthy headroom is preserved separately from the transfer percent"
+        );
+
+        let interrupted = runtime.handle_failure_event(FailureEvent::TransferInterrupted);
+        assert_eq!(
+            interrupted.buffer.percent, 40,
+            "a stall must zero headroom, not fabricate a whole-file transfer reset"
+        );
+        assert_eq!(interrupted.buffer.guest_buffer_ahead_ms, 0);
+        assert!(interrupted.buffer.buffering_participant.is_some());
+    }
+
+    /// `report_buffer_recovered` must mirror the coordinator's authority and
+    /// the real transfer percent — never fabricate 100% or a resume.
+    #[tokio::test]
+    async fn buffer_recovery_reports_real_percent_and_never_resumes() {
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            state.transfer = Some(crate::media::transfer::TransferProgress {
+                media_id: "m".to_string(),
+                bytes_available: 250,
+                bytes_total: 1_000,
+                buffer_ahead_ms: 0,
+                goodput_bps: 8_000_000,
+            });
+            // Strict-sync pause active: recovery must not clear it.
+            state.sync.strict_sync_paused = true;
+            state.room_state = crate::sync::state_machine::RoomState::Reconnecting;
+        }
+
+        let recovered = runtime.report_buffer_recovered(12_000);
+
+        assert_eq!(
+            recovered.buffer.percent, 25,
+            "buffer recovery must report the real transfer percent"
+        );
+        assert_eq!(recovered.buffer.guest_buffer_ahead_ms, 12_000);
+        assert!(
+            recovered.buffer.buffering_participant.is_none(),
+            "the buffering participant flag must clear on recovery"
+        );
+        assert_ne!(
+            recovered.sync.room_state, "PLAYING",
+            "recovery must never resume playback by itself"
+        );
+    }
+
+    #[test]
+    fn leave_party_detaches_guest_cache_but_preserves_it_on_disk() {
+        let runtime = AppRuntime::new();
+        let dir = std::env::temp_dir().join(format!("b9b_leave_cache_{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).expect("cache dir");
+        let manifest = crate::media::manifest::MediaManifest {
+            media_id: "leave-test".to_string(),
+            filename: "leave-test.bin".to_string(),
+            file_size: 12,
+            container: None,
+            full_hash: "hash".to_string(),
+            quick_fingerprint: crate::media::manifest::QuickFingerprint {
+                file_size: 12,
+                first_hash: "f".to_string(),
+                last_hash: "l".to_string(),
+            },
+            chunk_size: 4,
+            chunk_count: 3,
+        };
+        let cache = Arc::new(Mutex::new(
+            crate::media::cache::SparseCache::open(&dir, manifest).expect("open"),
+        ));
+        {
+            let mut state = runtime.lock();
+            state.guest_cache = Some(cache);
+            state.local_participant.role = "Guest".to_string();
+        }
+
+        runtime.leave_party();
+
+        let state = runtime.lock();
+        assert!(
+            state.guest_cache.is_none(),
+            "leave_party must detach the in-memory cache handle"
+        );
+        drop(state);
+        assert!(
+            dir.join("chunk-map.bin").exists()
+                || dir.read_dir().is_ok_and(|mut d| d.next().is_some()),
+            "leave_party must NOT delete the on-disk cache; retention decides later"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preload_wait_notifications_are_rate_limited_per_schedule() {
+        let runtime = AppRuntime::new();
+        let first_at = Instant::now();
+        {
+            let mut state = runtime.lock();
+            assert!(
+                should_notify_preload_wait(&mut state, "sched-1", first_at),
+                "the first waiting poll must notify"
+            );
+        }
+        {
+            let mut state = runtime.lock();
+            assert!(
+                !should_notify_preload_wait(
+                    &mut state,
+                    "sched-1",
+                    first_at + Duration::from_secs(60)
+                ),
+                "a repeat within the window must be suppressed"
+            );
+        }
+        {
+            let mut state = runtime.lock();
+            assert!(
+                should_notify_preload_wait(
+                    &mut state,
+                    "sched-1",
+                    first_at + Duration::from_secs(15 * 60 + 1)
+                ),
+                "after the window expires the poll must notify again"
+            );
+        }
+        {
+            let mut state = runtime.lock();
+            assert!(
+                should_notify_preload_wait(
+                    &mut state,
+                    "sched-2",
+                    first_at + Duration::from_secs(60)
+                ),
+                "a different schedule is an independent notification"
+            );
+        }
+    }
+
+    #[test]
+    fn host_play_refuses_to_start_when_player_reports_media_error() {
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            // Simulate the sticky MP-MEDIA-001 player error the gate checks.
+            state.player_snapshot.state = "PLAYER_ERROR".to_string();
+            state.player_snapshot.error_message =
+                Some("MP-MEDIA-001 player unavailable".to_string());
+            state.media = Some(crate::media::manifest::MediaManifest {
+                media_id: "host-play-gate".to_string(),
+                filename: "gate.bin".to_string(),
+                file_size: 12,
+                container: None,
+                full_hash: "hash".to_string(),
+                quick_fingerprint: crate::media::manifest::QuickFingerprint {
+                    file_size: 12,
+                    first_hash: "f".to_string(),
+                    last_hash: "l".to_string(),
+                },
+                chunk_size: 4,
+                chunk_count: 3,
+            });
+        }
+
+        let snapshot = runtime.host_play();
+
+        assert_eq!(
+            snapshot.error.as_deref(),
+            Some("MP-MEDIA-001 player unavailable; cannot start playback"),
+            "host_play must refuse to start on a sticky player error"
+        );
+        assert!(
+            !snapshot.participants.iter().any(|p| p.media_ready),
+            "no participant may be marked ready when the host player failed"
+        );
+        assert_ne!(snapshot.sync.room_state, "PLAYING");
     }
 }

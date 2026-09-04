@@ -3392,3 +3392,120 @@ Verification:
 - `leave_party` media/provider/chat cleanup on guest disconnect.
 - `m2_integration` keeps the four pre-existing timing predicate failures
   (`test_a`, `test_d`, `test_l`, `test_t`).
+
+---
+
+## 2026-09-04 — Batch 9B Close Local Perfect production gaps
+
+Scope: code-level closure only — no architecture change, no new protocols,
+no fake readiness. All edits confined to `src-tauri/src/app_runtime.rs` and
+`src-tauri/tests/m3_integration.rs`.
+
+### Concrete gaps closed
+
+1. **Playback headroom is now separate from transfer percent.**
+   New free function `transfer_percent_for_state` derives
+   `buffer.percent` from `TransferProgress::fraction()`. The
+   TransferResumed / TransferInterrupted / BufferRecovered handlers and the
+   guest `QuicServerEvent::BufferRecovered` handler no longer fabricate
+   `percent = 100`; they report the real whole-file transfer fraction.
+   `buffer.percent` keeps its meaning (whole-file transfer %, consumed by
+   the CinemaView BufferingOverlay); playback headroom continues to flow
+   through `buffer.guest_buffer_ahead_ms` (ms of contiguous playable
+   cache), derived in `guest_prepare_media` from
+   `SparseCache::contiguous_bytes_from` with the player backend value
+   authoritative and the contiguous-cache fallback honest.
+
+2. **Transfer recovery never auto-resumes playback** (PROTOCOL_SPEC §30 /
+   MASTER_PRD §14). `apply_recovery_to_state` for `TransferResumed` no
+   longer sets `room_state = Playing`, clears `strict_sync_paused`, or
+   fabricates headroom; it clears the buffering participant and syncs
+   percent/headroom from verified transfer state. Resume only happens
+   through a fresh host play-protocol cycle after readiness consensus.
+   `TransferInterrupted` still pauses both sides (Reconnecting +
+   strict_sync_paused) with percent from the on-disk transfer state (the
+   cache itself is untouched by a stall).
+
+3. **Drift correction is now runtime-invoked, not orphaned helpers.**
+   The guest player event loop (200 ms poll) invokes the new
+   `apply_drift_correction` which applies `correction_for_drift`
+   thresholds (0–80 ignore → rate 1.0; 81–250 playback rate 0.97/1.03;
+   251–700 micro-seek; >700 hard-seek to host commit position) via the
+   real `LocalPlayer` seam when the room is Playing and not
+   strict-sync-paused.
+
+4. **Guest cache headroom computation can no longer deadlock.** The
+   `guest_prepare_media` player-open block no longer awaits the cache lock
+   while holding the state lock; headroom is computed from
+   `contiguous_bytes_from` outside the state lock and re-applied under it.
+
+5. **Preload-wait OS notifications are rate-limited per schedule.**
+   The inline 15-minute dedup decision is extracted into
+   `should_notify_preload_wait` (testable) and covered by a focused test
+   (first poll notifies; repeats within 15 min suppressed; after the
+   window notifies again; independent schedules notify independently).
+
+6. **`leave_party` detaches the in-memory guest cache handle but preserves
+   the on-disk cache directory** — retention (Keep/Remove/Save As) decides
+   the files later. Now proven by a focused test instead of being
+   implicit.
+
+7. **`host_play` error gate proven.** A sticky `MP-MEDIA-001` player
+   error refuses to start playback (no `media_ready`, no PLAYING, stable
+   error surfaced) — previously the gate existed but had no test.
+
+### Test improvements
+
+- New focused tests in `app_runtime.rs` (all use the real coordinator /
+  state machine; no fake READY/PLAYING):
+  - `drift_correction_restores_normal_rate_after_convergence`
+  - `drift_correction_hard_seeks_back_to_host_commit`
+  - `recovery_percent_reflects_verified_transfer_not_headroom`
+  - `buffer_recovery_reports_real_percent_and_never_resumes`
+  - `leave_party_detaches_guest_cache_but_preserves_it_on_disk`
+  - `preload_wait_notifications_are_rate_limited_per_schedule`
+  - `host_play_refuses_to_start_when_player_reports_media_error`
+- `runtime_failures_drive_recovery_state` updated to honest semantics:
+  TransferResumed keeps `strict_sync_paused`, does NOT move to PLAYING,
+  clears the buffering participant, and reports real percent.
+- `m3_integration::test_18_player_buffering_feeds_strict_sync` updated:
+  a solo host with no guest transfer honestly reports `percent = 0` after
+  recovery (was a fabricated 100).
+- **Test-scheduler hazard fixed** in
+  `leave_party_aborts_reconnect_heartbeat_preload_and_watch_workers`:
+  tokio processes a task's abort the next time the task is polled, so a
+  spawned-but-never-scheduled worker can sit indefinitely behind a worker
+  thread that never yields (reproduced deterministically when a previous
+  loopback-binding test leaves the process loaded, both parallel and
+  single-threaded; pristine tree had the same latent hazard). The test now
+  waits for all four workers' first poll (start-counter rendezvous) before
+  calling `leave_party`, and the poll loop yields so the test's own worker
+  participates in scheduling. No assertion was weakened.
+
+### Verification
+
+- `cargo fmt --check` ✅
+- `cargo check` ✅
+- `cargo test --lib` ✅ 291 passed, 0 failed, 2 ignored (parallel and
+  `--test-threads=1`)
+- Full `cargo test` ✅ — lib 291, host_guest_wiring 2, m2_integration 28,
+  m3_closure 7, m3_integration 18, m3_m4_e2e 9, m4_closure 15 — all
+  passing, 0 failed
+- No app launch, no browser automation, no fake external verification.
+
+### External / manual verification pending (⚠ EXTERNAL VERIFICATION PENDING)
+
+- Real libmpv playback of a local file (host) and range-server playback
+  (guest) on real hardware.
+- Real HTTP range requests issued by libmpv against the loopback range
+  server.
+- Real two-device Tailscale transfer (host→guest) including a 4 GB file
+  with mid-transfer interruption and resume.
+- Real starvation/recovery cycle: strict-sync pause on buffer underrun and
+  resume only via a fresh host play cycle after readiness consensus.
+- Real drift measurement between two devices under load (rate/micro-seek/
+  hard-seek tiers).
+- OS notification delivery (preload-wait rate limiting) on macOS and
+  Windows.
+- macOS and Windows playback verification (per AGENTS.md §19, recorded
+  separately per OS pair).

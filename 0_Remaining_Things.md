@@ -1528,7 +1528,9 @@ Verify:
 
 27. 🧪 macOS ↔ Windows
 28. 🧪 strict sync
-29. 🧪 buffering
+29. 🧪 buffering — code-level honest percent/headroom separation completed
+    in Batch 9B (no fabricated 100%; recovery never auto-resumes; resume
+    only via fresh host play cycle); physical-device verification pending
 30. 🧪 disconnect/reconnect — code-level reconnect/backoff/cache preservation
     completed; physical-device verification pending
 31. Fix only evidence-driven failures
@@ -1544,9 +1546,11 @@ Verify:
 ## Phase 7 — Scheduling / preload
 
 37. 🧪 Local Perfect scheduled pre-transfer — code-level wiring completed
-38. 🧪 online/offline notification flow — retryable/rate-limited code path completed
+38. 🧪 online/offline notification flow — retryable/rate-limited code path
+    completed; 15-minute per-schedule dedup extracted and tested in Batch 9B
 39. 🧪 preload percentage/readiness — cache-headroom fallback completed
-40. 🧪 retention flow proof
+40. 🧪 retention flow proof — Batch 9B added focused proof that leave_party
+    preserves the on-disk guest cache until the retention decision
 41. 🔮 Provider Sync scheduled preflight
 
 ## Phase 8 — Provider Shared
@@ -1567,7 +1571,10 @@ Verify:
 52. Re-run production audit on current branch
 53. Fix only confirmed remaining findings
 54. reconnect/backoff
-55. drift loop
+55. drift loop — Batch 9B wired `correction_for_drift` into the guest
+    player event loop (`apply_drift_correction`), with focused tests for
+    rate convergence and hard-seek back to the host commit; real
+    two-device drift measurement still pending
 56. bounds/limits
 57. CSP
 58. logging/diagnostics
