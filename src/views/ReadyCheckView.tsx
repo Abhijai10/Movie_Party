@@ -6,13 +6,22 @@ import { CinemaButton } from "../components/mp/CinemaButton";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
 import { useReducedMotion } from "../hooks/useReducedMotion";
+import { CallTile } from "../overlays/CallTile";
+import type { CallTileSessionState } from "../overlays/callTileState";
 
 type ReadyCheckViewProps = {
   snapshot: AppSnapshot;
   onStart: () => void;
+  callTileSession: CallTileSessionState;
+  onCallTileSessionChange: (next: CallTileSessionState) => void;
 };
 
-export function ReadyCheckView({ snapshot, onStart }: ReadyCheckViewProps) {
+export function ReadyCheckView({
+  snapshot,
+  onStart,
+  callTileSession,
+  onCallTileSessionChange,
+}: ReadyCheckViewProps) {
   const [countdown, setCountdown] = useState<number | null>(null);
   const transitionActive = countdown !== null;
   const prefersReducedMotion = useReducedMotion();
@@ -47,9 +56,15 @@ export function ReadyCheckView({ snapshot, onStart }: ReadyCheckViewProps) {
 
   const host = snapshot.participants.find((p) => p.role === "HOST");
   const guest = snapshot.participants.find((p) => p.role === "GUEST");
+  const peer = snapshot.participants.find((p) => p.role !== snapshot.room.role);
+  const peerName = peer?.displayName ?? "Movie partner";
 
   return (
-    <div className="relative w-screen h-screen overflow-hidden">
+    <div
+      className={`relative w-screen h-screen overflow-hidden ${
+        snapshot.ghostMode || snapshot.privacyMode ? "social-hidden" : ""
+      }`}
+    >
       <SilkBackground variant="dim" />
 
       <header className="relative z-10 flex items-center justify-between px-12 pt-8">
@@ -153,10 +168,20 @@ export function ReadyCheckView({ snapshot, onStart }: ReadyCheckViewProps) {
         </motion.div>
       </main>
 
+      {/* The call tile stays reachable above the Ready Check content —
+          it must never disappear behind this "Dim the Lights" screen. */}
+      <CallTile
+        peerName={peerName}
+        remoteCameraEnabled={peer?.cameraEnabled ?? false}
+        remoteMicrophoneEnabled={peer?.microphoneEnabled ?? false}
+        remoteConnected={peer?.connected ?? false}
+        session={callTileSession}
+        onSessionChange={onCallTileSessionChange}
+      />
+
       {transitionActive && (
         <motion.div
-          className="ready-cinema-transition"
-          initial={{ opacity: 0 }}
+          className="ready-cinema-transition"          initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: prefersReducedMotion ? 0.01 : 0.24 }}

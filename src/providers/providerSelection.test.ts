@@ -8,6 +8,8 @@ import {
   providerReadinessAction,
   providerReadinessMessage,
   providerSearchUrl,
+  providerSelectLabels,
+  resolveProviderSelectValue,
 } from "./providerSelection";
 
 const netflix: ProviderCapability = {
@@ -136,5 +138,30 @@ describe("provider readiness state machine", () => {
     expect(youtube.titleResolution).toBe("DIRECT_URL");
     expect(netflix.titleResolution).toBe("PROVIDER_SEARCH");
     expect(netflix.verification).toBe("EXTERNAL_VERIFICATION_PENDING");
+  });
+});
+describe("provider select labels (dark Emergent select)", () => {
+  it("offers every capability with its display name as the option label", () => {
+    const labels = providerSelectLabels([netflix, youtube]);
+    expect(labels).toEqual([
+      { value: "netflix", label: "Netflix", disabled: false },
+      { value: "youtube", label: "YouTube", disabled: false },
+    ]);
+  });
+
+  it("falls back to a single disabled placeholder while availability loads", () => {
+    expect(providerSelectLabels([])).toEqual([
+      { value: "", label: "Checking provider availability...", disabled: true },
+    ]);
+  });
+
+  it("keeps the selected provider visible whenever it is offered", () => {
+    expect(resolveProviderSelectValue([netflix, youtube], "youtube")).toBe("youtube");
+  });
+
+  it("never shows a blank selection: an unknown id resolves to the first option", () => {
+    expect(resolveProviderSelectValue([netflix, youtube], "")).toBe("netflix");
+    expect(resolveProviderSelectValue([netflix, youtube], "disney")).toBe("netflix");
+    expect(resolveProviderSelectValue([], "netflix")).toBe("");
   });
 });

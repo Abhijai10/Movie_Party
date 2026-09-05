@@ -7063,3 +7063,87 @@ mod tests {
         assert_ne!(snapshot.sync.room_state, "PLAYING");
     }
 }
+
+#[test]
+fn local_device_toggles_never_mutate_peer_snapshot() {
+    // LOCAL vs REMOTE call state separation: toggling MY camera/mic must
+    // only change MY local participant + my outgoing call state. The
+    // peer's own camera/mic flags are theirs and must never move.
+    let runtime = AppRuntime::new();
+    {
+        let mut state = runtime.lock();
+        state.peer_participant = Some(ParticipantSnapshot {
+            id: "peer-id".to_string(),
+            display_name: "Peer".to_string(),
+            role: "Guest".to_string(),
+            connected: true,
+            media_ready: false,
+            camera_enabled: false,
+            microphone_enabled: true,
+            buffer_ahead_ms: 0,
+        });
+    }
+
+    let before = runtime.snapshot();
+    let peer_before = before
+        .participants
+        .iter()
+        .find(|p| p.role == "Guest")
+        .expect("peer present")
+        .clone();
+    let local_before = before
+        .participants
+        .iter()
+        .find(|p| p.role == "Host")
+        .expect("local host present")
+        .clone();
+
+    // Local toggles: camera ON then OFF, mic OFF then ON.
+    runtime.set_camera_enabled(true);
+    runtime.set_camera_enabled(false);
+    runtime.set_microphone_enabled(false);
+    runtime.set_microphone_enabled(true);
+
+    let after = runtime.snapshot();
+    let peer_after = after
+        .participants
+        .iter()
+        .find(|p| p.role == "Guest")
+        .expect("peer present")
+        .clone();
+    let local_after = after
+        .participants
+        .iter()
+        .find(|p| p.role == "Host")
+        .expect("local host present")
+        .clone();
+
+    assert_eq!(
+        peer_after.camera_enabled, peer_before.camera_enabled,
+        "peer camera flag belongs to the peer"
+    );
+    assert_eq!(
+        peer_after.microphone_enabled, peer_before.microphone_enabled,
+        "peer microphone flag belongs to the peer"
+    );
+    assert_eq!(peer_after.connected, peer_before.connected);
+
+    // The local participant mirrors the local call state exactly.
+    assert_eq!(local_after.camera_enabled, after.call.camera.enabled);
+    assert_eq!(
+        local_after.microphone_enabled,
+        after.call.microphone.enabled
+    );
+    assert!(
+        !local_after.camera_enabled,
+        "final local camera state is OFF"
+    );
+    assert!(
+        local_after.microphone_enabled,
+        "final local microphone state is ON"
+    );
+    assert_ne!(
+        local_after.camera_enabled, local_before.camera_enabled,
+        "local toggles must visibly change local state"
+    );
+}

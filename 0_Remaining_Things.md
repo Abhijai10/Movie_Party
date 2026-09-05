@@ -72,16 +72,50 @@ verification** plus the long-pending native libmpv presentation fix.
    installer/sign-in/share flows, reachability verification). Revalidated
    in Batch 10; previously mislabeled as future work. 🧪 Real two-device
    tailnet verification remains pending.
-3. 🔴 **Video-call local/remote state separation and Lobby/Cinema call UX fixes**
-4. 🔴 **Chat size/translucency and Lobby layout cleanup**
-5. 🔴 **Streaming-provider selector visual bug**
+3. ✅ **Video-call local/remote state separation and Lobby/Cinema call UX fixes**
+   — closed at code level in Batch 10 (social UX pass): local controls
+   toggle only my outgoing devices; the peer tile renders genuine remote
+   participant state (display-only, unobtrusive mute indicator); the tile
+   is draggable with pointer capture + viewport clamping, sits above
+   Lobby/Ready Check/Cinema content, minimizes to a draggable video stage,
+   closes locally without hanging up (Call button restores), and now also
+   renders on the Ready Check screen. Backend separation is enforced by
+   `local_device_toggles_never_mutate_peer_snapshot`. 🧪 Real two-device
+   WebRTC/camera/mic verification remains pending.
+4. ✅ **Chat size/translucency and Lobby layout cleanup** — the chat overlay
+   already met the target family (min(420px, viewport) × min(500px,
+   viewport), strong backdrop blur, floating, never a sidebar, Lobby and
+   Cinema share the component); Batch 10 centralized the behavior:
+   incoming messages reveal a ~5 s transient preview, never reveal while
+   Ghost/Privacy hide social UI, set the unread badge that survives the
+   modes, manual open/close always wins over the transient timer, and
+   typing is never destroyed by auto-hide (the composer only exists in
+   manual mode; the preview close path preserves it). The Lobby ready
+   footer now wraps so the READY CHECK button can no longer overflow.
+   🧪 Visual confirmation on each OS remains pending.
+5. ✅ **Streaming-provider selector visual bug** — the select uses
+   `color-scheme: dark` with explicit dark colors on the element and its
+   options (no white native rectangle, selected text visible), the label
+   is associated with the control, and the option list plus visible-value
+   resolution come from a tested pure model, so the visible selection is
+   never blank while capabilities load. 🧪 Dropdown appearance
+   (hover/selected/keyboard) on macOS and Windows remains a manual check.
 6. 🧪 **Real local playback validation** (run the app with a real movie on
    macOS, then Windows — the code path is complete; the manual proof is not)
 7. 🧪 **Two-device macOS ↔ Windows validation**
 8. 🔮 **Scheduled Local Perfect preload completion**
 9. 🧪 **Provider Sync login/preparation real-account verification** (code path now wired through the provider readiness state machine)
 10. 🟡 **Provider Shared capture → encode → QUIC → guest presentation**
-11. 🔮 **Ghost Mode final implementation**
+11. ✅ **Ghost Mode final implementation** — Ghost Mode is complete at the
+    code level: it hides the local social layer (chat, reactions, call
+    tile, controls, diagnostics) via the `social-hidden` class, never
+    touches outgoing camera/mic or playback/sync/session, gates the
+    chat shortcuts so the keyboard cannot leak the overlay, keeps the
+    unread flag alive during the mode, and restores the exact prior UI
+    state on exit (manually-opened chat returns; call tile reappears at
+    its own saved position/visibility). Privacy Mode stays distinct:
+    devices off on entry, never auto-reactivated on exit. 🧪 Real
+    camera/mic behavior with OS permission prompts remains pending.
 12. 🎨 **Hero reel redesign by another AI**
 13. 🎨 **Cinema curtain/countdown visual polish by another AI**
 14. ✅ **Audit/security/reliability findings revalidated against the current branch (Batch 7 + Batch 9 + Batch 10)**: deep-link lifecycle, Tailscale boundary, Local Perfect / Cinema / Provider Sync / Call / Ghost / Privacy lifecycles, worker duplication, error/recovery consistency, and security items were all revalidated; only concrete current defects were fixed. Remaining items (CSP, reconnect media rebuild, Chrome crash watchers, release packaging) are documented as release-hardening/manual items, not silent production claims.
@@ -935,7 +969,14 @@ Do not place local camera/mic toggle buttons inside the remote peer tile.
 
 ## Status
 
-🔴 Confirmed visually/manual.
+✅ Closed at code level (Batch 10 social UX pass). The tile surface
+drags with pointer capture, non-control targets only, `user-select:none`
+during drag (restored on release), viewport clamping including
+shrink/resize, a z-45 overlay layer above Lobby/Ready Check/Cinema
+content, close = local hide with Call-button restore (no hang-up), and
+minimize = compact draggable video stage with restore. Rules live in
+`src/overlays/callTileState.ts` with focused tests. 🧪 Manual drag /
+bounds / z-order confirmation on each OS remains pending.
 
 ## 14.1 Dragging
 
@@ -997,9 +1038,12 @@ Minimized state:
 
 ## Status
 
-🔴 Needs a focused cleanup after the critical player work.
-
-Current Lobby is visually cluttered when call/chat are present.
+✅ Closed at code level (Batch 10 social UX pass). Chat and call remain
+floating overlays on request (never a sidebar), the lobby keeps the
+purpose → participants → readiness → invite → social controls
+hierarchy, and the Ready Check footer now wraps so its button stays
+inside the window at narrow desktop widths. 🧪 Visual confirmation on
+each OS remains pending.
 
 ## Desired hierarchy
 
@@ -1014,7 +1058,14 @@ Chat and call must not become a permanent sidebar.
 
 ## 15.1 Ready Check overflow
 
-Confirmed issue:
+✅ Fixed (Batch 10 social UX pass): `.lobby-ready-actions` now wraps
+(status row and action buttons stack at narrow widths) on top of the
+already-wrapped button row; the global purple button system was not
+touched. The Ready Check button stays fully inside the available width
+and the preview stays visible. 🧪 Manual check at narrow window sizes
+remains pending.
+
+Original report:
 
 - Lobby Ready Check button can extend out of the window.
 
@@ -1035,21 +1086,20 @@ Expected:
 
 ## Status
 
-🔴 Current panel remains smaller than the intended design.
+✅ Closed at code level (Batch 10 social UX pass). The shared overlay
+meets the size family (min(420px, viewport-32px) wide × min(500px,
+viewport-150px) high), renders translucent with a strong backdrop blur,
+floats over the movie/lobby (never a sidebar), and the behavioral rules
+are centralized and tested: manual open/close, ~5 s transient preview on
+incoming messages, unread badge while hidden, Ghost/Privacy suppression
+(no reveal, badge survives), and typing is never destroyed by the
+transient timer (the composer exists only in manual mode and the preview
+close path preserves a manual session). 🧪 Visual confirmation on each
+OS remains pending.
 
-The requirement is **not** “make chat smaller so it interrupts less.”
-
-Correct requirement:
-
-```text
-useful previous/larger size
-+
-translucent background
-+
-strong backdrop blur
-+
-movie/lobby visible behind it
-```
+The earlier "smaller than intended" panel note was already resolved by
+the shared larger translucent overlay; this pass closed the behavior
+gaps around it.
 
 ## 16.1 Target behavior
 
@@ -1070,20 +1120,22 @@ movie/lobby visible behind it
 
 ## Status
 
-🔴 Confirmed in Create Party.
+✅ Closed at code level (Batch 10 social UX pass): the select uses
+`color-scheme: dark` with explicit dark colors on the element and its
+options (no white native rectangle; selected text visible), focus/hover/
+disabled states exist, the label is associated with the control for
+keyboard/screen-reader access, and the option list plus visible-value
+resolution come from a tested pure model (`providerSelectLabels` /
+`resolveProviderSelectValue`) so the visible selection is never blank
+while availability loads. The source flow was not redesigned. 🧪 Native
+dropdown appearance (popup list hover/selected states) on macOS and
+Windows remains a manual check — native `<select>` popup chrome follows
+the OS, which is why `color-scheme: dark` is the fix mechanism.
 
-The Provider field currently renders as a white blank/native-looking area even when a provider is selected.
+Original report:
 
-Fix only the provider selector/component/theme behavior.
-
-Acceptance:
-
-- dark Emergent styling;
-- selected provider text visible;
-- no white native rectangle;
-- focus/hover/disabled states;
-- keyboard accessible;
-- no source-flow redesign required.
+- The Provider field rendered as a white blank/native-looking area even
+  when a provider was selected.
 
 ---
 
@@ -1091,7 +1143,19 @@ Acceptance:
 
 ## Status
 
-🔮 Required.
+✅ Implemented (Batch 10 social UX pass, backend semantics since the
+state-model batch). Ghost hides the local social layer via the
+`social-hidden` class (chat, history, indicators, reactions, tray, call
+tile, social controls, diagnostics overlays) in Cinema, Lobby, and the
+Ready Check screen; the keyboard shortcuts that could reveal chat
+(Enter/"c") are gated; incoming messages set the unread flag instead of
+revealing the overlay. Outgoing camera/microphone, playback,
+synchronization, and the network session are untouched — verified by
+`ghost_mode_keeps_local_call_devices_unchanged`. On exit the prior UI
+state is restored: a manually-opened chat returns open, and the call
+tile reappears at its own saved position/visibility (its session lives
+in AppShell and is only visually suppressed). 🧪 Real camera/mic
+behavior with OS permission prompts remains pending.
 
 Purpose: instantly hide Movie Party/social context locally when the user wants the screen to look like normal movie playback.
 
@@ -1134,7 +1198,18 @@ Restore the prior local UI state:
 
 # 19. Privacy Mode
 
-Privacy Mode remains distinct from Ghost Mode.
+✅ Implemented (backend semantics since the state-model batch; UI
+restore finalized in the Batch 10 social UX pass). Privacy stays distinct
+from Ghost: entry hides the overlays AND disables camera + microphone
+(`privacy_mode_disables_real_call_state`), blocks call-mode/device
+commands from re-enabling while active
+(`privacy_mode_blocks_call_mode_from_reenabling_devices`), and on exit
+restores the UI state (same snapshot/restore path as Ghost) while
+leaving both devices off until the user re-enables them explicitly
+(`leaving_privacy_does_not_reenable_devices_or_stick_ghost_mode`). The
+frontend surfaces "Privacy Mode ended. Camera and microphone remain
+disabled." 🧪 Real device-off behavior with OS permission prompts
+remains pending.
 
 ## Privacy Mode ON
 

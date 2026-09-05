@@ -3965,6 +3965,11 @@ input[type=range].mp-range::-webkit-slider-thumb {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+  /* Ready Check footer: the status row and the action buttons stack when
+     the lobby column gets narrow, so the READY CHECK button can never
+     push out of the window width. (Fixes the documented overflow without
+     touching the global purple button system.) */
+  flex-wrap: wrap;
 }
 
 .lobby-ready-actions-buttons {

@@ -26,6 +26,8 @@ import {
   providerModeStatus,
   providerReadinessAction,
   providerReadinessMessage,
+  providerSelectLabels,
+  resolveProviderSelectValue,
 } from "../providers/providerSelection";
 
 type SourceKind = "local" | "stream" | "link";
@@ -373,11 +375,15 @@ export function CreatePartyView({
                 className="flex-1 flex flex-col"
               >
                 <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-6 flex-1 flex flex-col">
-                  <label className="text-[11px] tracking-[0.24em] uppercase text-white/45">
+                  <label
+                    htmlFor="provider-source-select"
+                    className="text-[11px] tracking-[0.24em] uppercase text-white/45"
+                  >
                     Provider
                   </label>
                   <select
-                    value={providerId}
+                    id="provider-source-select"
+                    value={resolveProviderSelectValue(providerCapabilities, providerId)}
                     onChange={(event) => {
                       setProviderId(event.target.value);
                       setStatus("idle");
@@ -386,15 +392,11 @@ export function CreatePartyView({
                     className="provider-select mt-3 w-full appearance-none rounded-xl border border-white/10 px-4 py-3 text-sm focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                     data-testid="provider-select"
                   >
-                    {providerCapabilities.length === 0 ? (
-                      <option value="">Checking provider availability...</option>
-                    ) : (
-                      providerCapabilities.map((cap) => (
-                        <option key={cap.id} value={cap.id}>
-                          {cap.displayName}
-                        </option>
-                      ))
-                    )}
+                    {providerSelectLabels(providerCapabilities).map((option) => (
+                      <option key={option.value} value={option.value} disabled={option.disabled}>
+                        {option.label}
+                      </option>
+                    ))}
                   </select>
 
                   <span className="mt-6 text-[11px] tracking-[0.24em] uppercase text-white/45">

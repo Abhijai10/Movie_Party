@@ -30,13 +30,15 @@ import type { MouseEvent, SyntheticEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useReducedMotion } from "../hooks/useReducedMotion";
 import {
+  applyChatArrival,
+  canToggleChat,
   closeChatPreview,
   closedChatOverlay,
   isChatOverlayOpen,
   openChatManually,
-  openChatPreview,
   type ChatOverlayVisibility,
 } from "../chat/overlayState";
+import { captureGhostUiSnapshot, restoreGhostUiSnapshot, type GhostUiSnapshot } from "../social/ghostUiState";
 
 type CinemaViewProps = {
   snapshot: AppSnapshot;
@@ -82,6 +84,7 @@ export function CinemaView({
   const previousChatLength = useRef(snapshot.chat.length);
   const chatPreviewTimer = useRef<number | null>(null);
   const movieFrameRef = useRef<HTMLDivElement | null>(null);
+  const ghostUiSnapshotRef = useRef<GhostUiSnapshot | null>(null);
   const isGhostMode = snapshot.ghostMode;
   const isPrivacyMode = snapshot.privacyMode;
   const isHost = snapshot.room.role === "HOST";
@@ -160,12 +163,23 @@ export function CinemaView({
     const hasNewMessage = nextLength > previousChatLength.current;
     previousChatLength.current = nextLength;
 
-    if (!hasNewMessage || isGhostMode || isPrivacyMode || chatVisibility.manualOpen) {
+    if (!hasNewMessage || chatVisibility.manualOpen) {
       return;
     }
 
+    // While social UI is suppressed (Ghost/Privacy), a message never
+    // reveals the overlay — the unread flag alone survives the mode, so
+    // the chat button badge tells the user once it ends.
+    if (isGhostMode || isPrivacyMode) {
+      setHasUnreadChat(true);
+      return;
+    }
+
+    // Outside the modes the message is visible one way or another (open
+    // overlay or transient preview); the badge persists past a preview
+    // auto-close until the user opens the chat manually.
     setHasUnreadChat(true);
-    setChatVisibility(openChatPreview());
+    setChatVisibility(applyChatArrival(chatVisibility, false));
 
     if (chatPreviewTimer.current != null) {
       window.clearTimeout(chatPreviewTimer.current);
@@ -174,7 +188,7 @@ export function CinemaView({
       setChatVisibility((current) => closeChatPreview(current));
       chatPreviewTimer.current = null;
     }, 5_000);
-  }, [chatVisibility.manualOpen, isGhostMode, isPrivacyMode, snapshot.chat.length]);
+  }, [chatVisibility, isGhostMode, isPrivacyMode, snapshot.chat.length]);
 
   useEffect(() => {
     return () => {
@@ -183,6 +197,41 @@ export function CinemaView({
       }
     };
   }, []);
+
+  // Ghost/Privacy entry-exit bookkeeping. The chat visibility is captured
+  // as it was *before* the mode hid it, so ending the mode can put the
+  // prior UI state back. The call tile lives in AppShell session state
+  // and is only visually hidden by the `social-hidden` class, so its
+  // position/visibility needs no manual restore. Devices are governed by
+  // the backend: Ghost never touches them; Privacy disables both and
+  // never re-enables on exit.
+  const isSocialHiddenMode = isGhostMode || isPrivacyMode;
+  useEffect(() => {
+    if (isSocialHiddenMode) {
+      if (ghostUiSnapshotRef.current == null) {
+        ghostUiSnapshotRef.current = captureGhostUiSnapshot(chatVisibility);
+      }
+      // Hide the chat immediately (the CSS class hides everything else);
+      // a lingering transient preview would otherwise peek out later.
+      if (chatPreviewTimer.current != null) {
+        window.clearTimeout(chatPreviewTimer.current);
+        chatPreviewTimer.current = null;
+      }
+      setChatVisibility(closedChatOverlay);
+      return;
+    }
+
+    const snapshotToRestore = ghostUiSnapshotRef.current;
+    ghostUiSnapshotRef.current = null;
+    if (snapshotToRestore == null) {
+      return;
+    }
+    setChatVisibility(restoreGhostUiSnapshot(snapshotToRestore));
+    // `chatVisibility` and the timer refs are read only on the mode
+    // transition itself; re-running on every chat keystroke would
+    // re-capture mid-mode state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSocialHiddenMode]);
 
   const revealControls = (event?: MouseEvent<HTMLElement>) => {
     setControlsVisible(true);
@@ -269,14 +318,12 @@ export function CinemaView({
           return;
         }
 
-        const nextGhostMode = !isGhostMode;
-        void setGhostMode(nextGhostMode).then((next) => {
+        void setGhostMode(!isGhostMode).then((next) => {
           if (next) {
             onSnapshot(next);
           }
-          showNotice(nextGhostMode ? "Ghost Mode on" : "Ghost Mode off", ghostNoticeMs);
+          showNotice(!isGhostMode ? "Ghost Mode on" : "Ghost Mode off", ghostNoticeMs);
         });
-        setChatVisibility(closedChatOverlay);
         return;
       }
 
@@ -294,13 +341,18 @@ export function CinemaView({
             return;
           }
 
-          setChatVisibility(closedChatOverlay);
           showNotice("Privacy Mode on", ghostNoticeMs);
         });
         return;
       }
 
       if (isTextInput) {
+        return;
+      }
+
+      // Enter / "c" toggle chat. While Ghost or Privacy Mode hides the
+      // social layer, the toggle must not reveal it.
+      if (!canToggleChat(isGhostMode || isPrivacyMode)) {
         return;
       }
 

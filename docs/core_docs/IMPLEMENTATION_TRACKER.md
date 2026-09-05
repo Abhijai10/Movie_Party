@@ -14,6 +14,32 @@ It must be updated continuously.
 
 ```text
 Project State:
+🟨 SOCIAL UX + GHOST/PRIVACY CLOSURE COMPLETE (code-level).
+    Batch 10 (social UX) closed the remaining frontend/social gaps on
+    top of the desktop/runtime closure: Ghost Mode now restores the
+    exact prior local UI state on exit (a manually-opened chat returns,
+    expired transient previews stay closed; the call tile reappears at
+    its own saved position/visibility since the modes only visually
+    suppress it via the social-hidden class) and no longer destroys chat
+    state on entry; chat arrival semantics are centralized (an incoming
+    message reveals a transient preview when hidden, never reveals while
+    Ghost/Privacy suppresses social UI, and sets the unread badge that
+    survives the modes); Enter/"c" chat shortcuts are gated while
+    Ghost/Privacy hides social UI; the Ready Check screen now renders the
+    call tile above the "Dim the Lights" content (never disappears
+    behind that screen) with social-hidden gating; the Lobby ready
+    footer wraps so the READY CHECK button can no longer push out of the
+    window; the provider select is label-associated, driven by a tested
+    pure model (placeholder/labels/value resolution — the visible
+    selection is never blank) and keeps the dark native control scheme.
+    Backend semantics were already correct and tested (ghost never
+    touches devices; privacy disables both and never re-enables on
+    exit); this batch adds the focused local-vs-remote separation test
+    (my camera/mic toggles never mutate the peer participant snapshot).
+    Not manually verified: real cross-device WebRTC/camera/mic and visual
+    checks remain ⚠ EXTERNAL VERIFICATION PENDING.
+
+Previous:
 🟨 DESKTOP + RUNTIME PRODUCTION CLOSURE COMPLETE (code-level).
     Batch 10 closed the remaining desktop/runtime integration gaps:
     Windows now presents real libmpv software-rendered frames into the
@@ -41,7 +67,7 @@ Project State:
     playback and cross-device flows remain ⚠ EXTERNAL VERIFICATION PENDING.
 
 Current Phase:
-BATCH 10 — DESKTOP + RUNTIME PRODUCTION CLOSURE
+BATCH 10 — SOCIAL UX + GHOST/PRIVACY CLOSURE
 
 Current Release:
 V1 Development
@@ -64,9 +90,86 @@ M8: Chrome crash watchers not wired (player crash/liveness paths ARE wired
 
 ---
 
+# BATCH 10 — SOCIAL UX + GHOST/PRIVACY CLOSURE (2026-09-05)
+
+## Objective
+
+Close the frontend social-UX and privacy-mode gaps flagged in
+`0_Remaining_Things.md` (call tile local/remote separation and interaction
+semantics, Ghost Mode UI-state restore, chat arrival/unread semantics,
+Ready Check overflow, provider selector) without touching the locked
+architecture, the Emergent visual identity, the global purple button
+system, the WebRTC signalling path, or the already-correct backend
+Ghost/Privacy semantics.
+
+## Implemented in this pass
+
+- **Ghost/Privacy UI-state restore**: entering Ghost or Privacy Mode
+  captures the chat overlay visibility (pure module
+  `src/social/ghostUiState.ts`); ending the mode restores it — a
+  manually-opened chat comes back open, an expired transient preview
+  stays closed. The call tile needs no snapshot: its session (position,
+  minimized, hidden) lives in AppShell and is only visually suppressed by
+  the `social-hidden` class, so it reappears exactly as the user left it.
+  Devices follow the backend: Ghost never touches them; Privacy disables
+  both and never re-enables on exit.
+- **Chat arrival semantics** (`applyChatArrival` in
+  `src/chat/overlayState.ts`): an incoming message reveals a transient
+  ~5 s preview while the overlay is hidden; it never reveals the overlay
+  while Ghost/Privacy suppresses social UI — the unread flag alone
+  survives the mode so the chat button badge informs the user afterward.
+  `canToggleChat` gates the Enter/"c" shortcuts while the modes hide
+  social UI (the keyboard can no longer leak the chat overlay).
+- **Call tile on Ready Check**: the tile now renders above the
+  "Dim the Lights" content (documented requirement: it must never
+  disappear behind that screen), gated by `social-hidden` like Lobby and
+  Cinema, and keeps its AppShell session across views.
+- **Close/minimize semantics as a tested model**
+  (`src/overlays/callTileState.ts`): `closeCallTileLocally` /
+  `showCallTile` / `minimizeCallTile` / `restoreCallTile` /
+  `canInitiateDragFrom` encode the rules — close hides locally without
+  tearing the call down or touching position/minimized state; minimize
+  keeps a draggable video stage; the CallTile component now uses these
+  helpers instead of inline state spreads.
+- **Ready Check footer overflow**: `.lobby-ready-actions` wraps
+  (status row and action buttons can stack at narrow desktop widths),
+  completing the already-wrapped button row, so the READY CHECK button
+  can no longer extend out of the window. Global button system untouched.
+- **Provider selector**: the label is now associated with the select
+  (`htmlFor`/`id`), and the option list plus visible-value resolution
+  come from a tested pure model (`providerSelectLabels` /
+  `resolveProviderSelectValue`) — the visible selection is never blank
+  while capabilities load. The dark native control scheme
+  (`color-scheme: dark` + explicit option colors) stays.
+
+## Verification
+
+- `pnpm lint` ✅
+- `pnpm test` ✅ (10 files, 92 tests)
+- `pnpm exec tsc --noEmit` ✅
+- `pnpm build` ✅
+- `cargo test --lib` ✅ (300 passed, including the new
+  `local_device_toggles_never_mutate_peer_snapshot`)
+- `cargo fmt --check` ✅ / `cargo clippy --all-targets -- -D warnings` ✅
+
+## External Verification Pending
+
+- Real two-device WebRTC call: local mic/camera toggles must change only
+  my outgoing tracks while the peer tile follows genuine remote device
+  state (requires physical devices and OS permission prompts).
+- Visual/manual checks on macOS and Windows: call tile drag, bounds,
+  z-order above Lobby/Ready Check content, minimize/restore, local
+  close/reopen; Ghost entry/exit restoring chat and tile state; Privacy
+  entry disabling devices and requiring explicit re-enable; unread
+  badge; Ready Check layout at narrow desktop widths; provider select
+  dropdown appearance (hover/selected/keyboard) on both OSes.
+
+---
+
 # BATCH 10 — DESKTOP + RUNTIME PRODUCTION CLOSURE (2026-09-05)
 
 ## Objective
+
 
 Close the remaining desktop/runtime integration gaps identified by the
 full audit, preserving the locked architecture. Code-level only: all

@@ -495,7 +495,14 @@ export function AppShell() {
   }
 
   if (snapshot.screen === "READY_CHECK" || devScreen === "READY") {
-    return <ReadyCheckView snapshot={snapshot} onStart={goCinema} />;
+    return (
+      <ReadyCheckView
+        snapshot={snapshot}
+        onStart={goCinema}
+        callTileSession={callTileSession}
+        onCallTileSessionChange={setCallTileSession}
+      />
+    );
   }
 
   if (snapshot.screen === "CINEMA" || devScreen === "CINEMA") {

@@ -128,3 +128,48 @@ export function providerSearchUrl(
 export function canCreatePartyWithReadiness(readiness: ProviderReadiness): boolean {
   return readiness === "PLAYBACK_READY";
 }
+/**
+ * Pure model behind the Create Party provider `<select>`.
+ *
+ * The visual defect being closed: the native select previously rendered
+ * as a white/native rectangle with invisible selected text. The fix is
+ * CSS (`color-scheme: dark` + explicit dark colors on the select and its
+ * options), and this model supplies the text content rules:
+ *
+ * - an explicit label list drives the `<option>` elements (dark-styled,
+ *   selected value visible);
+ * - while capabilities load, a single non-selectable placeholder option
+ *   is shown and the select is disabled;
+ * - the selected id must always map to one of the offered options so the
+ *   visible selection is never blank.
+ */
+export function providerSelectLabels(
+  capabilities: ProviderCapability[],
+): { value: string; label: string; disabled: boolean }[] {
+  if (capabilities.length === 0) {
+    return [{ value: "", label: "Checking provider availability...", disabled: true }];
+  }
+  return capabilities.map((capability) => ({
+    value: capability.id,
+    label: capability.displayName,
+    disabled: false,
+  }));
+}
+
+/**
+ * Resolves the select's `value`: the selected id when it is among the
+ * offered options, otherwise the first option so the visible selection is
+ * never empty (no white blank rectangle with no text).
+ */
+export function resolveProviderSelectValue(
+  capabilities: ProviderCapability[],
+  selectedId: string,
+): string {
+  if (capabilities.length === 0) {
+    return "";
+  }
+  if (capabilities.some((capability) => capability.id === selectedId)) {
+    return selectedId;
+  }
+  return capabilities[0]?.id ?? "";
+}

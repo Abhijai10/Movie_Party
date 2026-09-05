@@ -23,3 +23,36 @@ export function closeChatPreview(current: ChatOverlayVisibility): ChatOverlayVis
 export function isChatOverlayOpen(current: ChatOverlayVisibility): boolean {
   return current.manualOpen || current.transientOpen;
 }
+
+/**
+ * Semantics of an incoming chat message (MASTER_PRD social layer).
+ *
+ * - While the overlay is already open, nothing changes (the message is
+ *   visible; no unread flag).
+ * - While it is hidden, the message reveals a transient preview — the
+ *   "incoming message can reveal chat" rule — so the user sees it arrive.
+ * - While social UI is suppressed (Ghost Mode or Privacy Mode), nothing is
+ *   revealed; the caller keeps an unread indicator instead, surfaced when
+ *   the modes end.
+ */
+export function applyChatArrival(
+  current: ChatOverlayVisibility,
+  isSocialHidden: boolean,
+): ChatOverlayVisibility {
+  if (isSocialHidden) {
+    return current;
+  }
+  if (isChatOverlayOpen(current)) {
+    return current;
+  }
+  return openChatPreview();
+}
+
+/**
+ * Whether the chat toggle affordance (Enter / "c" / the chat button) may
+ * act. Ghost and Privacy Modes hide all social UI; the toggle must not
+ * reveal it while they are active.
+ */
+export function canToggleChat(isSocialHidden: boolean): boolean {
+  return !isSocialHidden;
+}

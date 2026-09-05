@@ -1,8 +1,12 @@
 import { Maximize2, MicOff, Minus, Video } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import {
+  canInitiateDragFrom,
   clampCallTilePosition,
+  closeCallTileLocally,
   deriveRemoteCallPresentation,
+  minimizeCallTile,
+  restoreCallTile,
   type CallTileSessionState,
 } from "./callTileState";
 
@@ -14,8 +18,6 @@ type CallTileProps = {
   session: CallTileSessionState;
   onSessionChange: (next: CallTileSessionState) => void;
 };
-
-const nonDraggableTarget = "button, input, textarea, select, a, [data-call-tile-control]";
 
 export function CallTile({
   peerName,
@@ -84,7 +86,7 @@ export function CallTile({
   };
 
   const startDrag = (event: ReactPointerEvent<HTMLElement>) => {
-    if (event.target instanceof Element && event.target.closest(nonDraggableTarget)) {
+    if (!canInitiateDragFrom(event.target as Element | null)) {
       return;
     }
 
@@ -139,7 +141,7 @@ export function CallTile({
             <button
               type="button"
               onClick={() => {
-                updateSession({ isMinimized: true });
+                onSessionChange(minimizeCallTile(session));
               }}
               aria-label="Minimize call tile"
               title="Minimize call tile"
@@ -150,7 +152,7 @@ export function CallTile({
             <button
               type="button"
               onClick={() => {
-                updateSession({ isHidden: true });
+                onSessionChange(closeCallTileLocally(session));
               }}
               aria-label="Hide call tile"
               title="Hide call tile"
@@ -182,7 +184,7 @@ export function CallTile({
             type="button"
             className="camera-restore-control"
             onClick={() => {
-              updateSession({ isMinimized: false });
+              onSessionChange(restoreCallTile(session));
             }}
             aria-label="Restore call tile"
             title="Restore call tile"
