@@ -349,9 +349,163 @@ pub fn display_frame(surface: usize, width: usize, height: usize, stride: usize,
     display_frame_on_current_thread(&frame);
 }
 
+// ── Windows: software framebuffer presentation into the child HWND ─────────
+//
+// The render loop pushes libmpv's bgr0 (B,G,R,0 per pixel) software-render
+// buffer into the existing child surface HWND behind the transparent WebView2
+// host. A 32bpp BI_RGB top-down DIB has exactly the same byte order, so the
+// frame buffer is presented with StretchDIBits and no per-pixel conversion
+// and no second rendering architecture.
+
+/// A validated Windows frame blit description. `dib_width` is the row pitch
+/// expressed as 32bpp pixels (`stride / 4`) — GDI derives row pitch from
+/// `biWidth`, so the DIB is declared `stride/4` pixels wide (frame pixels
+/// packed at each row start, padding columns at the end) and the blit's
+/// source rectangle samples only the real `width` columns. This is the
+/// Windows mirror of the macOS path passing `stride` as `bytesPerRow`.
+#[cfg(windows)]
+struct WindowsFrameBlit<'a> {
+    hwnd: *mut std::ffi::c_void,
+    dib_width: i32,
+    bitmap_header: BitmapInfoHeader,
+    data: &'a [u8],
+}
+
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BitmapInfoHeader {
+    size: u32,
+    width: i32,
+    height: i32,
+    planes: u16,
+    bit_count: u16,
+    compression: u32,
+    size_image: u32,
+    x_pels_per_meter: i32,
+    y_pels_per_meter: i32,
+    clr_used: u32,
+    clr_important: u32,
+}
+
+/// Validate a rendered frame the same way the macOS path does: non-null
+/// surface, positive dimensions, stride wide enough for a 32bpp row, and a
+/// buffer large enough to cover `stride * height` bytes.
+#[cfg(windows)]
+fn validate_windows_frame(
+    surface: usize,
+    width: usize,
+    height: usize,
+    stride: usize,
+    data: &[u8],
+) -> Option<WindowsFrameBlit<'_>> {
+    if surface == 0 {
+        return None;
+    }
+    if width == 0 || height == 0 {
+        return None;
+    }
+    if stride < width * 4 {
+        return None;
+    }
+    // DIB rows are addressed in 4-byte pixel units, so a stride that is not
+    // a whole number of 32bpp pixels cannot be expressed as a DIB width.
+    if stride % 4 != 0 {
+        return None;
+    }
+    if data.len() < stride.checked_mul(height)? {
+        return None;
+    }
+    let dib_width = stride / 4;
+    if dib_width > i32::MAX as usize || height > i32::MAX as usize {
+        return None;
+    }
+    Some(WindowsFrameBlit {
+        hwnd: surface as *mut std::ffi::c_void,
+        dib_width: dib_width as i32,
+        // Top-down DIB: a negative biHeight makes row 0 the top scanline,
+        // which is how mpv's software renderer produces frames.
+        bitmap_header: BitmapInfoHeader {
+            size: std::mem::size_of::<BitmapInfoHeader>() as u32,
+            // Stride-aware row pitch: the DIB spans the full stride (real
+            // pixels + padding columns); the blit samples only the frame
+            // area, so padding is never displayed.
+            width: dib_width as i32,
+            height: -(height as i32),
+            planes: 1,
+            bit_count: 32,
+            compression: BI_RGB,
+            size_image: (stride * height) as u32,
+            x_pels_per_meter: 0,
+            y_pels_per_meter: 0,
+            clr_used: 0,
+            clr_important: 0,
+        },
+        data,
+    })
+}
+
+#[cfg(windows)]
+fn display_frame_on_current_thread(
+    surface: usize,
+    width: usize,
+    height: usize,
+    stride: usize,
+    data: &[u8],
+) {
+    let Some(blit) = validate_windows_frame(surface, width, height, stride, data) else {
+        return;
+    };
+    unsafe {
+        let dc = GetDC(blit.hwnd);
+        if dc.is_null() {
+            return;
+        }
+        let mut client = Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        let client_ok = GetClientRect(blit.hwnd, &mut client) != 0;
+        let client_width = (client.right - client.left).max(0);
+        let client_height = (client.bottom - client.top).max(0);
+        if client_ok && client_width > 0 && client_height > 0 {
+            // Discard-on-shrink stretch mode: the GDI default merges colors
+            // when downscaling, which visibly darkens video.
+            const COLORONCOLOR: i32 = 3;
+            SetStretchBltMode(dc, COLORONCOLOR);
+            StretchDIBits(
+                dc,
+                0,
+                0,
+                client_width,
+                client_height,
+                0,
+                0,
+                width as i32,
+                height as i32,
+                blit.data.as_ptr(),
+                &blit.bitmap_header,
+                DIB_RGB_COLORS,
+                SRCCOPY,
+            );
+        }
+        ReleaseDC(blit.hwnd, dc);
+    }
+}
+
+/// Push a rendered RGBA frame to the native surface. The blit happens
+/// synchronously on the calling (render) thread using the child HWND's
+/// device context; GDI is thread-safe per-device-context.
+#[cfg(windows)]
+pub fn display_frame(surface: usize, width: usize, height: usize, stride: usize, data: Vec<u8>) {
+    display_frame_on_current_thread(surface, width, height, stride, &data);
+}
+
 /// Push a rendered RGBA frame to the native surface. No-op when software
 /// frame display is unsupported on this platform.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn display_frame(
     _surface: usize,
     _width: usize,
@@ -422,6 +576,7 @@ unsafe fn msg_void_rect(target: *mut std::ffi::c_void, name: &'static str, value
         std::mem::transmute(objc_msgSend as *const ());
     f(target, selector(name), value);
 }
+#[cfg(target_os = "macos")]
 unsafe fn msg_void_id(
     target: *mut std::ffi::c_void,
     name: &'static str,
@@ -530,6 +685,24 @@ const WS_VISIBLE: u32 = 0x1000_0000;
 const SWP_NOACTIVATE: u32 = 0x0010;
 #[cfg(windows)]
 const HWND_BOTTOM: *mut std::ffi::c_void = 1 as *mut std::ffi::c_void;
+/// BI_RGB: an uncompressed bottom-up (or top-down with negative height)
+/// bitmap whose 32bpp pixels are B,G,R,reserved in memory — the exact byte
+/// order libmpv's `bgr0` software-render format produces.
+#[cfg(windows)]
+const BI_RGB: u32 = 0;
+#[cfg(windows)]
+const DIB_RGB_COLORS: u32 = 0;
+#[cfg(windows)]
+const SRCCOPY: u32 = 0x00CC_0020;
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Rect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
 #[cfg(windows)]
 #[link(name = "user32")]
 extern "system" {
@@ -557,6 +730,32 @@ extern "system" {
         flags: u32,
     ) -> i32;
     fn DestroyWindow(hwnd: *mut std::ffi::c_void) -> i32;
+    fn GetDC(hwnd: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn ReleaseDC(hwnd: *mut std::ffi::c_void, dc: *mut std::ffi::c_void) -> i32;
+    fn GetClientRect(hwnd: *mut std::ffi::c_void, rect: *mut Rect) -> i32;
+}
+#[cfg(windows)]
+#[link(name = "gdi32")]
+extern "system" {
+    fn StretchDIBits(
+        hdc: *mut std::ffi::c_void,
+        x_dest: i32,
+        y_dest: i32,
+        dest_width: i32,
+        dest_height: i32,
+        x_src: i32,
+        y_src: i32,
+        src_width: i32,
+        src_height: i32,
+        src_bits: *const u8,
+        bits_info: *const BitmapInfoHeader,
+        usage: u32,
+        rop: u32,
+    ) -> i32;
+    /// COLORONCOLOR stretch mode: on downscale, discard extra scanlines
+    /// instead of AND/OR-merging colors (the GDI default BLACKONWHITE would
+    /// darken video). COLORONCOLOR = 3.
+    fn SetStretchBltMode(hdc: *mut std::ffi::c_void, mode: i32) -> i32;
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -611,5 +810,63 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    // ── Windows software-frame validation (pure, no window required) ────────
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_frame_validation_accepts_strided_bgr0_buffer() {
+        // 2x2 frame with a 64-byte-aligned stride (128 bytes), padded to a
+        // full stride*height buffer — exactly what the mpv SW renderer gives
+        // display_frame.
+        let stride = 128;
+        let data = vec![0u8; stride * 2];
+        let blit = super::validate_windows_frame(0x1000, 2, 2, stride, &data);
+        assert!(blit.is_some(), "aligned full-height frame must validate");
+        let blit = blit.expect("checked above");
+        // The DIB is declared stride/4 pixels wide so GDI addresses rows at
+        // the mpv stride (mirror of the macOS bytesPerRow); the blit source
+        // rectangle samples only the real 2 columns.
+        assert_eq!(blit.dib_width, 32);
+        assert_eq!(blit.bitmap_header.width, 32);
+        // Top-down DIB: negative height flips the bottom-up GBI default.
+        assert_eq!(blit.bitmap_header.height, -2);
+        assert_eq!(blit.bitmap_header.bit_count, 32);
+        assert_eq!(blit.bitmap_header.compression, super::BI_RGB);
+        assert_eq!(blit.bitmap_header.size_image as usize, stride * 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_frame_validation_rejects_malformed_frames() {
+        let stride = 64;
+        let good = vec![0u8; stride * 4];
+        // Null surface, empty dimensions, too-narrow stride, short buffer.
+        assert!(super::validate_windows_frame(0, 4, 4, stride, &good).is_none());
+        assert!(super::validate_windows_frame(0x1000, 0, 4, stride, &good).is_none());
+        assert!(super::validate_windows_frame(0x1000, 4, 0, stride, &good).is_none());
+        assert!(super::validate_windows_frame(0x1000, 4, 4, 8, &good).is_none());
+        assert!(super::validate_windows_frame(0x1000, 4, 4, stride, &good[..8]).is_none());
+        // A 1 MiB-chunk-sized stride must never overflow the buffer check.
+        let huge = vec![0u8; 1024];
+        assert!(super::validate_windows_frame(0x1000, 1024, 1, 1024, &huge).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_frame_validation_handles_i32_overflowing_dimensions() {
+        // The i32 guard now applies to the DIB width (stride/4): a stride
+        // beyond i32 pixel range must be rejected before header math.
+        let data = vec![0u8; 8];
+        assert!(
+            super::validate_windows_frame(0x1000, 1, 1, (i32::MAX as usize + 1) * 4, &data)
+                .is_none(),
+            "stride beyond i32 pixel range must be rejected"
+        );
+        assert!(
+            super::validate_windows_frame(0x1000, 1, i32::MAX as usize + 1, 4, &data).is_none(),
+            "height beyond i32 range must be rejected"
+        );
     }
 }

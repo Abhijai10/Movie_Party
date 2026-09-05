@@ -575,9 +575,11 @@ async fn test_18_player_buffering_feeds_strict_sync() {
     runtime.enter_cinema();
     runtime.resume_playback();
 
-    // Report buffer stall (simulates player telling us it's buffering)
-    runtime.report_buffer_status(0, 0, true);
-    let stalled = runtime.snapshot();
+    // Report buffer stall (simulates player telling us it's buffering).
+    // The returned snapshot is taken atomically under the runtime lock; a
+    // separate snapshot() read could race the 200 ms player event loop,
+    // which also refreshes headroom fields.
+    let stalled = runtime.report_buffer_status(0, 0, true);
     assert!(
         stalled.sync.strict_sync_paused,
         "strict_sync_paused must be true after buffer stall"
@@ -587,9 +589,8 @@ async fn test_18_player_buffering_feeds_strict_sync() {
         "buffering_participant must be set"
     );
 
-    // Report buffer recovery
-    runtime.report_buffer_status(0, 5_000, false);
-    let recovered = runtime.snapshot();
+    // Report buffer recovery — same atomic-snapshot rule.
+    let recovered = runtime.report_buffer_status(0, 5_000, false);
     // Batch 9B: percent is the whole-file transfer fraction, never a fake
     // 100. A solo host has performed no guest transfer (bytes_available 0),
     // so the honest percent after recovery is 0 — recovery itself is

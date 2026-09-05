@@ -58,6 +58,9 @@ impl PendingDeepLinks {
 }
 
 pub fn run() {
+    // MASTER_PRD §87: structured logs at INFO by default, local stdout only.
+    // RUST_LOG overrides; nothing is ever sent to a cloud service.
+    telemetry::init_local_logging();
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_single_instance::init(|_, _, _| {}))

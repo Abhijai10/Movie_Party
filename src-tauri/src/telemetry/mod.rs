@@ -1,5 +1,26 @@
 pub const DEFAULT_LOG_LEVEL: &str = "INFO";
 
+/// Production/dev build default log level from MASTER_PRD §87.
+/// Initialize the local structured logging pipeline exactly once. This is a
+/// LOCAL-ONLY stdout subscriber — telemetry is never sent to a cloud service.
+///
+/// The effective level comes from the environment (`RUST_LOG`) when set, and
+/// otherwise from [`DEFAULT_LOG_LEVEL`], so a QA machine can raise verbosity
+/// without a rebuild. Per PRD §86/§87 no secrets, cookies, credentials,
+/// media paths, or full chat content are ever logged by this pipeline.
+pub fn init_local_logging() {
+    use tracing_subscriber::EnvFilter;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_LEVEL)),
+        )
+        .with_target(false)
+        .with_timer(tracing_subscriber::fmt::time::Uptime::default())
+        .try_init();
+    // try_init is intentionally infallible here: a second init (tests, dual
+    // run() calls) is a no-op rather than a startup failure.
+}
+
 pub mod certification {
     use crate::network::tailscale::TailscalePath;
 
@@ -546,5 +567,27 @@ pub mod beta {
 
             assert_eq!(beta_readiness(&events), BetaReadiness::ReadyForManualReview);
         }
+    }
+}
+
+#[cfg(test)]
+mod logging_tests {
+    use super::*;
+
+    #[test]
+    fn default_log_level_matches_prd_section_87() {
+        // MASTER_PRD §87: production/dev default is INFO.
+        assert_eq!(DEFAULT_LOG_LEVEL, "INFO");
+    }
+
+    #[test]
+    fn local_logging_init_is_idempotent_and_never_panics() {
+        // The subscriber is process-global; double init (app startup plus a
+        // test) must be a no-op, not a startup failure.
+        init_local_logging();
+        init_local_logging();
+        // A real warn! through the installed subscriber proves the pipeline
+        // swallows events without panicking (local stdout only, no network).
+        tracing::warn!("telemetry self-check event");
     }
 }

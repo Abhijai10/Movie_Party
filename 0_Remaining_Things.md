@@ -2,8 +2,8 @@
 
 > **Purpose:** This is the living source of truth for everything still required to finish Movie Party V1.  
 > **Scope:** Two-person private desktop watch parties on macOS and Windows.  
-> **Current branch:** `emergent-ui-integration-complete`  
-> **Latest checkpoint discussed:** `8622174` — Batch 7 readiness-honesty audit (no real-device failures supplied)  
+> **Current branch:** `main`  
+> **Latest checkpoint:** Batch 10 — desktop + runtime production closure (code-level)  
 > **Rule:** “Code exists” is not the same as “production-ready.” Items that need real devices, real accounts, real media, or OS behavior remain pending until manually verified.
 
 ---
@@ -63,12 +63,20 @@ verification** plus the long-pending native libmpv presentation fix.
 
 ## Highest-priority current items
 
-1. 🔴 **Native libmpv video presentation inside the Cinema surface**
-2. 🔮 **First-run Tailscale onboarding + partner connectivity setup**
+1. ✅ **Native libmpv video presentation inside the Cinema surface** —
+   macOS (NSView/CALayer + CGImage) and Windows (child HWND + GDI
+   `StretchDIBits`) both present real SW-rendered frames in code as of
+   Batch 10. 🧪 Manual playback proof on each OS remains pending.
+2. ✅ **First-run Tailscale onboarding + partner connectivity setup** —
+   implemented (four-state detection, setup view, launch official
+   installer/sign-in/share flows, reachability verification). Revalidated
+   in Batch 10; previously mislabeled as future work. 🧪 Real two-device
+   tailnet verification remains pending.
 3. 🔴 **Video-call local/remote state separation and Lobby/Cinema call UX fixes**
 4. 🔴 **Chat size/translucency and Lobby layout cleanup**
 5. 🔴 **Streaming-provider selector visual bug**
-6. 🧪 **Real local playback validation**
+6. 🧪 **Real local playback validation** (run the app with a real movie on
+   macOS, then Windows — the code path is complete; the manual proof is not)
 7. 🧪 **Two-device macOS ↔ Windows validation**
 8. 🔮 **Scheduled Local Perfect preload completion**
 9. 🧪 **Provider Sync login/preparation real-account verification** (code path now wired through the provider readiness state machine)
@@ -76,8 +84,49 @@ verification** plus the long-pending native libmpv presentation fix.
 11. 🔮 **Ghost Mode final implementation**
 12. 🎨 **Hero reel redesign by another AI**
 13. 🎨 **Cinema curtain/countdown visual polish by another AI**
-14. ✅ **Audit/security/reliability findings revalidated against the current branch (Batch 7)**: deep-link lifecycle, Tailscale boundary, Local Perfect / Cinema / Provider Sync / Call / Ghost / Privacy lifecycles, worker duplication, error/recovery consistency, and security items were all revalidated; only concrete current defects were fixed (worker-duplication fixes + call-tile reset on deep link). Remaining items (CSP, reconnect media rebuild, crash watchers, release packaging) are documented as release-hardening/manual items, not silent production claims.
+14. ✅ **Audit/security/reliability findings revalidated against the current branch (Batch 7 + Batch 9 + Batch 10)**: deep-link lifecycle, Tailscale boundary, Local Perfect / Cinema / Provider Sync / Call / Ghost / Privacy lifecycles, worker duplication, error/recovery consistency, and security items were all revalidated; only concrete current defects were fixed. Remaining items (CSP, reconnect media rebuild, Chrome crash watchers, release packaging) are documented as release-hardening/manual items, not silent production claims.
 15. 🔮 **Packaging/release hardening**
+
+## Batch 10 desktop + runtime closure status (2026-09-05)
+
+Code-level only; no real-device claims:
+
+- ✅ **Windows native presentation implemented**: `display_frame` now
+  presents real frames into the existing child HWND via GDI
+  `StretchDIBits` (32bpp BI_RGB top-down DIB — byte-identical to mpv
+  bgr0, no conversion; mpv stride expressed as the DIB width, mirroring
+  the macOS bytesPerRow, so 64-byte-aligned strides render correctly).
+  The ungated macOS msg helper that broke the Windows build is fixed.
+  Deterministic Windows unit tests + a Windows e2e harness were added.
+  🧪 External verification pending: run the app on Windows with a real
+  movie.
+- ✅ **macOS presentation revalidated**: bgr0→CGImage byte order, layer
+  ownership, resize, cleanup all verified correct. Bridge strings updated
+  to the truthful "via libmpv SW render" wording.
+  🧪 External verification pending: real movie playback.
+- ✅ **Guest BUFFER_STATUS cadence wired**: periodic 500 ms worker while
+  Playing (PRD §21 / PROTOCOL_SPEC §28), single replace+abort worker,
+  cancelled by leave/create/join teardowns, paused/ended rooms silent.
+- ✅ **Heartbeat liveness wired**: application-level detection (2 s
+  interval, 5-missed ≈10 s threshold per §16), role-aware recovery
+  events (guest records HostCrash; host records GuestCrash), recovery
+  never auto-resumes — readiness consensus is required again.
+- ✅ **Reconnect/lifecycle revalidated**: bounded backoff, single worker,
+  cache survives with no completed-chunk refetch, no auto-resume; all
+  session workers (including the new buffer-status worker) aborted on
+  leave/create/join.
+- ✅ **Structured logging wired**: local-only tracing subscriber at INFO
+  default (PRD §87), `RUST_LOG` override, no cloud sink, no secrets
+  logged.
+- ✅ **Chat kept ephemeral per PRD** (V1 is session-scoped chat; the
+  SQLite chat functions stay dormant by design).
+- ✅ **Readiness revalidated truthful** (no fabricated PLAYING/buffer;
+  transfer percent stays separate from playback headroom).
+- ⚠ **Protocol reconciliation follow-up documented in the tracker**:
+  PROTOCOL_SPEC says CBOR + 256 KiB + numeric IDs; the implementation
+  uses JSON + serde tags + a 2 MiB transport limit. The wire format is
+  the intentional V1 implementation; reconciling requires a versioned
+  protocol batch, not a silent change.
 
 ## Batch 7 readiness-honesty status (2026-08-30)
 
@@ -263,50 +312,85 @@ These are considered implemented at the code level unless later manual testing d
 
 ## Status
 
-🔴 **Confirmed during manual testing**
+✅ **Code-complete on macOS and Windows (Batch 10)** — 🧪 manual playback proof pending
 
-The app currently reaches Cinema but reports that libmpv is not attached to a native renderer host.
+The previous manual finding (Cinema reachable without a native render
+host attached) was fixed in the SW-render architecture: libmpv renders
+into an application-owned buffer via the render API
+(`MPV_RENDER_API_TYPE_SW`, `bgr0`), and the runtime presents each frame
+into a native child surface behind the transparent WebView.
 
-Observed behavior:
+- **macOS**: NSView/CALayer child host; frames become CGImages
+  (`kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little` — the exact
+  byte order of mpv bgr0) and update the layer each render tick.
+- **Windows**: child HWND (created `WS_CHILD|WS_VISIBLE`, positioned
+  `HWND_BOTTOM` behind the WebView); frames are blitted into its client
+  rect via GDI `StretchDIBits` with a 32bpp `BI_RGB` top-down DIB header
+  (negative `biHeight` — byte-identical to mpv bgr0, no per-pixel
+  conversion). Previously `display_frame` was a Windows no-op; that gap
+  is closed.
 
-> libmpv is configured not to create a second window; attach the native render host to present video.  
-> NSView/CALayer host for libmpv render context.
-
-This means Movie Party can reach the playback stage without actually presenting the movie inside the Cinema surface.
+There is exactly one rendering architecture (the SW render path) and one
+native presentation surface per platform; no detached mpv window, no
+browser video element, no D3D11 layer.
 
 ## 4.1 Required macOS architecture
 
 ```text
 React Cinema surface
         ↓
-Tauri native presentation host
+Tauri native presentation host (NSView/CALayer)
         ↓
-NSView / CALayer
-        ↓
-libmpv render context
+libmpv SW render context (bgr0)
         ↓
 actual movie frames
 ```
 
+Implemented exactly as above; revalidated in Batch 10 with no defects
+found (byte order, stride-as-bytesPerRow, layer ownership, resize,
+cleanup).
+
 ## 4.2 Acceptance criteria
 
-- Movie renders inside the Movie Party Cinema surface.
-- No detached mpv window is used.
-- Movie canvas resizes correctly with the Tauri window.
-- Movie remains behind overlays.
-- Play/Pause/Seek affect the real decoder/player.
-- Position and duration reflect the real player.
-- Player errors cannot leave the backend/frontend claiming false `PLAYING`.
-- Video does not autoplay before the authoritative synchronized start.
-- Cleanup works when ending/leaving/reloading a party.
+Code-level:
+
+- ✅ Movie renders into the Cinema surface architecture (frames presented
+  to the native child surface each render tick).
+- ✅ No detached mpv window is used (`force-window=no`; `wid` never set).
+- ✅ Movie canvas resizes with the Tauri window (bounds validated, finite,
+  ≥1px; macOS `setFrame`, Windows `SetWindowPos`).
+- ✅ Movie remains behind overlays (macOS `addSubview:...relativeTo:`
+  below; Windows `HWND_BOTTOM`; WebView transparent).
+- ✅ Play/Pause/Seek drive the real decoder/player (production
+  `MpvPlayer` commands; pause-holds-position, seek-lands, resume-advances
+  are asserted by the macOS/Windows e2e harnesses when the runtime is
+  present).
+- ✅ Position and duration reflect the real player (player snapshot).
+- ✅ Player errors cannot leave false PLAYING (Batch 9 honesty guards).
+- ✅ Video does not autoplay before the authoritative synchronized start
+  (host-authoritative commit flow).
+- ✅ Cleanup works when ending/leaving/reloading a party (detach +
+  DestroyWindow / removeFromSuperview; worker aborts).
+
+Manual (🧪 external verification pending):
+
+- Real movie visibly renders inside Cinema on macOS.
+- Real movie visibly renders inside Cinema on Windows.
+- Resize keeps the video correctly positioned/scaled on both OSes.
 
 ## 4.3 Windows
 
-🟡 The equivalent native presentation host must also exist for Windows before cross-platform Local Perfect can be considered complete.
+✅ Code-complete (Batch 10): child HWND + GDI `StretchDIBits` presentation
+of the SW-rendered bgr0 buffer; deterministic validation unit tests and a
+Windows e2e harness (`tests/windows_native_surface_e2e.rs`, skips without
+the bundled runtime/test video).
+🧪 External verification pending: run the app on Windows with a real
+movie before considering cross-platform Local Perfect complete.
 
 ## 4.4 Manual proof required
 
-🧪 Test a real local movie on macOS first, then Windows.
+🧪 Test a real local movie on macOS first, then Windows. Not yet
+performed — recorded as EXTERNAL VERIFICATION PENDING, not claimed.
 
 ---
 
@@ -314,9 +398,17 @@ actual movie frames
 
 ## Status
 
-🔮 **Required V1 onboarding feature**
+✅ **Implemented (revalidated Batch 10)** — 🧪 real two-device verification pending
 
-A fresh Movie Party install must not assume that Tailscale is ready.
+This was previously mislabeled as future work. Current code implements
+the four-state onboarding: `TailscaleState` detection
+(NotInstalled / SignedOut / Connected / Unavailable), the
+`TailscaleSetupView` first-run surface, launching the official installer
+/app (`open_tailscale_setup`), and reachability verification before
+Create/Join is allowed. Movie Party never collects Tailscale credentials
+and never silently installs software.
+
+A fresh Movie Party install does not assume Tailscale is ready.
 
 The onboarding must distinguish four states.
 

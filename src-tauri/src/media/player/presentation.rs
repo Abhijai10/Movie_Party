@@ -73,11 +73,11 @@ impl PlayerPresentationStatus {
 pub fn embedded_native_bridge() -> &'static str {
     #[cfg(target_os = "macos")]
     {
-        "NSView child host via libmpv wid"
+        "NSView child host via libmpv SW render"
     }
     #[cfg(target_os = "windows")]
     {
-        "HWND child host via libmpv wid"
+        "HWND child host via libmpv SW render"
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {

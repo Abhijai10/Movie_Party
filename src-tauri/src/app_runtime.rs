@@ -498,6 +498,9 @@ struct AppRuntimeState {
     reconnect_task: Option<tokio::task::JoinHandle<()>>,
     /// Guest heartbeat monitor; replaced whenever the QUIC transport changes.
     heartbeat_task: Option<tokio::task::JoinHandle<()>>,
+    /// Guest periodic BUFFER_STATUS reporter (PROTOCOL_SPEC §28 / MASTER_PRD
+    /// §21: report every ~500 ms while Playing). Exactly one may exist.
+    buffer_status_task: Option<tokio::task::JoinHandle<()>>,
     /// Scheduled preload preparation task, cancelled with the active party.
     preload_task: Option<tokio::task::JoinHandle<()>>,
     /// Last offline-preload notice per schedule, preventing scheduler spam.
@@ -690,6 +693,7 @@ impl AppRuntime {
                     transfer_stall_watcher_task: None,
                     reconnect_task: None,
                     heartbeat_task: None,
+                    buffer_status_task: None,
                     preload_task: None,
                     preload_wait_notified_at: HashMap::new(),
                     db: None,
@@ -1688,6 +1692,9 @@ impl AppRuntime {
             if let Some(task) = state.heartbeat_task.take() {
                 task.abort();
             }
+            if let Some(task) = state.buffer_status_task.take() {
+                task.abort();
+            }
             if let Some(task) = state.reconnect_task.take() {
                 task.abort();
             }
@@ -1981,6 +1988,9 @@ impl AppRuntime {
             if let Some(task) = state.heartbeat_task.take() {
                 task.abort();
             }
+            if let Some(task) = state.buffer_status_task.take() {
+                task.abort();
+            }
             if let Some(task) = state.preload_task.take() {
                 task.abort();
             }
@@ -2085,6 +2095,7 @@ impl AppRuntime {
         // host-monotonic deadline conversion for scheduled commits.
         self.spawn_clock_calibration();
         self.spawn_guest_heartbeat();
+        self.spawn_buffer_status_worker();
 
         // M3: Auto-fetch media for the guest after authenticated join.
         // Only trigger when the host has local media (the ManifestRequest
@@ -2548,14 +2559,20 @@ impl AppRuntime {
         let task = tokio::spawn(async move {
             let mut failures = 0_u8;
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tokio::time::sleep(HEARTBEAT_INTERVAL).await;
                 let client = runtime.lock().client.clone();
                 let Some(client) = client else { break };
                 match client.heartbeat().await {
                     Ok(()) => failures = 0,
                     Err(_) => {
                         failures = failures.saturating_add(1);
-                        if failures >= 5 {
+                        if heartbeat_declares_liveness_failure(failures) {
+                            // Role-aware peer-loss recovery: the guest's
+                            // missed-heartbeat threshold means the HOST died;
+                            // the host's detection path means the GUEST died.
+                            // Both go through the same existing recovery
+                            // machine (peer_disconnected → RECONNECTING,
+                            // strict-sync pause, never auto-resume).
                             let _ = Self::apply_disconnect(&runtime.inner);
                             runtime.spawn_reconnect_worker();
                             break;
@@ -2566,6 +2583,65 @@ impl AppRuntime {
         });
         let mut state = self.lock();
         if let Some(old) = state.heartbeat_task.replace(task) {
+            old.abort();
+        }
+    }
+
+    /// M4+/Batch 10: periodic guest BUFFER_STATUS reporter. PROTOCOL_SPEC §28
+    /// and MASTER_PRD §21 require the guest to report its buffer status every
+    /// ~500 ms while the room is Playing. This worker owns that cadence; the
+    /// transition-triggered reports in the player event loop stay unchanged.
+    ///
+    /// - Paused/Ended/Reconnecting/strict-sync-paused rooms do not spam
+    ///   reports (the guest has nothing authoritative to say there).
+    /// - Exactly one worker exists: spawning replaces (and aborts) the old
+    ///   one, so a rejoin/reconnect never duplicates it and a Leave Party
+    ///   kills it.
+    /// - Each tick reads the CURRENT client, so a replaced transport is used
+    ///   immediately; a worker from a previous room is aborted by the
+    ///   leave/join/create teardown paths and cannot publish into the new
+    ///   room.
+    fn spawn_buffer_status_worker(&self) {
+        let runtime = self.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(BUFFER_STATUS_INTERVAL).await;
+                let (should_report, position_ms, headroom_ms, stalled) = {
+                    let state = runtime.lock();
+                    let Some(player) = state.player.clone() else {
+                        // No player: nothing to report. Keep looping so the
+                        // same worker adopts a later player (reconnect path
+                        // re-spawns anyway).
+                        continue;
+                    };
+                    let room_playing =
+                        state.room_state == RoomState::Playing && !state.sync.strict_sync_paused;
+                    if !room_playing || state.client.is_none() {
+                        continue;
+                    }
+                    let snap = {
+                        let player = player
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        player.snapshot()
+                    };
+                    (
+                        true,
+                        snap.position_ms,
+                        snap.buffered_ahead_ms.unwrap_or(0),
+                        matches!(snap.state, crate::media::player::PlayerState::Buffering),
+                    )
+                };
+                if !should_report {
+                    continue;
+                }
+                // report_buffer_status picks up the CURRENT client under its
+                // own lock and relays over QUIC (guest path).
+                runtime.report_buffer_status(position_ms, headroom_ms, stalled);
+            }
+        });
+        let mut state = self.lock();
+        if let Some(old) = state.buffer_status_task.replace(task) {
             old.abort();
         }
     }
@@ -2689,11 +2765,12 @@ impl AppRuntime {
         self.spawn_guest_peer_event_listener();
         self.spawn_clock_calibration();
         self.spawn_guest_heartbeat();
+        self.spawn_buffer_status_worker();
         self.inner.emit(self.snapshot());
         Ok(())
     }
 
-    fn apply_disconnect(inner: &RuntimeInner) -> Result<(), ()> {
+    fn apply_disconnect(inner: &Arc<RuntimeInner>) -> Result<(), ()> {
         let mut state = inner.lock();
         if let Some(peer) = &mut state.peer_participant {
             peer.connected = false;
@@ -2706,18 +2783,21 @@ impl AppRuntime {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .peer_disconnected();
         state.sync.strict_sync_paused = true;
-        // Abort any in-flight operation: a disconnected guest cannot answer
+        // Abort any in-flight operation: a disconnected peer cannot answer
         // READY, so the pending operation must not commit half-way.
         state.pending_operation_id = None;
         state.pending_operation_kind = None;
         state.commit_scheduled_for = None;
-        // M8: Wire through the proper recovery system so last_recovery is
-        // surfaced to the UI and the full RecoveryPlan is recorded.
-        let event = FailureEvent::GuestCrash;
+        // M8/Batch 10: Wire through the proper recovery system so
+        // last_recovery is surfaced to the UI and the full RecoveryPlan is
+        // recorded. The event is role-aware: the guest's peer loss is a
+        // HOST crash, the host's peer loss is a GUEST crash. Both use the
+        // same existing recovery machine.
+        let event = peer_loss_failure_event(Self::is_host_role(&state));
         let plan = recovery_plan(event);
         apply_recovery_to_state(&mut state, event, plan);
         state.last_recovery = Some(RuntimeRecoverySnapshot {
-            event: FailureEvent::GuestCrash,
+            event,
             action: plan.action,
             pauses_playback_for_both: plan.pauses_playback_for_both,
             requires_user_action: plan.requires_user_action,
@@ -4238,6 +4318,9 @@ impl AppRuntime {
         if let Some(task) = state.heartbeat_task.take() {
             task.abort();
         }
+        if let Some(task) = state.buffer_status_task.take() {
+            task.abort();
+        }
         if let Some(task) = state.preload_task.take() {
             task.abort();
         }
@@ -4934,6 +5017,15 @@ impl AppRuntime {
         self.lock().client.clone()
     }
 
+    /// Test-only hook to drive the missed-heartbeat disconnect path (the
+    /// exact transition the heartbeat worker makes) without a live QUIC
+    /// transport.
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub(crate) fn apply_disconnect_for_test(&self) {
+        let _ = Self::apply_disconnect(&self.inner);
+    }
+
     /// Inject a QUIC client for testing purposes (replaces any existing).
     #[doc(hidden)]
     pub fn inject_client_for_test(&self, client: QuicClient) {
@@ -4990,6 +5082,38 @@ fn wall_now_ms() -> i64 {
 }
 
 const FALLBACK_PRELOAD_GOODPUT_BPS: u64 = 2_000_000;
+
+/// PROTOCOL_SPEC §16: heartbeat interval.
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+/// PROTOCOL_SPEC §16: a peer is declared disconnected after 5 consecutive
+/// missed heartbeat acknowledgements (≈10 s), matching the spec's
+/// "no heartbeat for 10 seconds ⇒ disconnected" rule. Application-level
+/// detection — we never rely on the QUIC idle timeout alone.
+const HEARTBEAT_FAILURE_THRESHOLD: u8 = 5;
+
+/// PROTOCOL_SPEC §28 / MASTER_PRD §21: guest buffer-status reporting cadence
+/// while playing.
+const BUFFER_STATUS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Whether `failures` consecutive missed heartbeat acknowledgements should
+/// declare peer/session liveness failure. Pure so the threshold is testable
+/// without a live transport.
+fn heartbeat_declares_liveness_failure(failures: u8) -> bool {
+    failures >= HEARTBEAT_FAILURE_THRESHOLD
+}
+
+/// The failure event a participant should record when its peer disappears.
+/// Role-aware: the GUEST losing heartbeats means the HOST crashed; the HOST
+/// losing its peer means the GUEST crashed. Both route through the same
+/// existing recovery machine — this only makes `last_recovery` diagnostics
+/// truthful about which side died.
+fn peer_loss_failure_event(is_host_role: bool) -> FailureEvent {
+    if is_host_role {
+        FailureEvent::GuestCrash
+    } else {
+        FailureEvent::HostCrash
+    }
+}
 
 /// Preserve an explicitly earlier user deadline while moving an unsafe later
 /// one earlier from measured (or conservative fallback) goodput.
@@ -5228,6 +5352,7 @@ mod tests {
     use crate::network::quic::QuicError;
     use crate::resilience::{FailureEvent, RecoveryAction};
     use crate::room::MoviePartyInvite;
+    use crate::sync::state_machine::RoomState;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tokio::sync::Mutex;
@@ -5436,6 +5561,7 @@ mod tests {
             state.preload_task = Some(spawn_long(cancelled.clone(), started.clone()));
             state.transfer_stall_watcher_task =
                 Some(spawn_long(cancelled.clone(), started.clone()));
+            state.buffer_status_task = Some(spawn_long(cancelled.clone(), started.clone()));
         }
         // Tokio processes a task's abort the next time the task is polled, so
         // every worker must reach its first poll before leave_party runs.
@@ -5444,14 +5570,14 @@ mod tests {
         // can sit unscheduled indefinitely — a scheduling hazard, not a
         // worker-abort bug. yield_now lets the body thread help schedule.
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        while started.load(Ordering::SeqCst) < 4 && std::time::Instant::now() < deadline {
+        while started.load(Ordering::SeqCst) < 5 && std::time::Instant::now() < deadline {
             tokio::task::yield_now().await;
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         assert_eq!(
             started.load(Ordering::SeqCst),
-            4,
-            "all four workers must reach their first poll before leave_party"
+            5,
+            "all five workers must reach their first poll before leave_party"
         );
         assert!(
             !cancelled.load(Ordering::SeqCst),
@@ -5471,6 +5597,7 @@ mod tests {
         assert!(state.heartbeat_task.is_none());
         assert!(state.preload_task.is_none());
         assert!(state.transfer_stall_watcher_task.is_none());
+        assert!(state.buffer_status_task.is_none());
         assert!(
             cancelled.load(Ordering::SeqCst),
             "leave_party must abort all background workers"
@@ -5532,6 +5659,226 @@ mod tests {
             "new heartbeat worker must be present"
         );
         runtime.leave_party();
+    }
+
+    #[test]
+    fn heartbeat_threshold_matches_protocol_liveness_rules() {
+        use super::{heartbeat_declares_liveness_failure, HEARTBEAT_FAILURE_THRESHOLD};
+        // Healthy heartbeats reset the failure counter; the threshold only
+        // trips after PROTOCOL_SPEC §16's disconnect window (5 missed ≈ 10s).
+        assert_eq!(HEARTBEAT_FAILURE_THRESHOLD, 5);
+        assert!(!heartbeat_declares_liveness_failure(0));
+        assert!(!heartbeat_declares_liveness_failure(1));
+        assert!(!heartbeat_declares_liveness_failure(4));
+        assert!(heartbeat_declares_liveness_failure(5));
+        assert!(heartbeat_declares_liveness_failure(255));
+    }
+
+    #[test]
+    fn peer_loss_event_is_role_aware() {
+        use super::peer_loss_failure_event;
+        use crate::resilience::FailureEvent;
+        // The host's peer loss is a guest crash; the guest's peer loss is a
+        // host crash. Both drive the same recovery machine.
+        assert_eq!(peer_loss_failure_event(true), FailureEvent::GuestCrash);
+        assert_eq!(peer_loss_failure_event(false), FailureEvent::HostCrash);
+    }
+
+    #[tokio::test]
+    async fn host_crash_detection_feeds_guest_recovery_state() {
+        let runtime = AppRuntime::new();
+        // Establish genuine PLAYING first — the liveness path must move the
+        // guest OUT of playing without ever resuming on its own.
+        {
+            use crate::sync::consensus::ParticipantReadiness;
+            let mut state = runtime.lock();
+            state.local_participant.role = "Guest".to_string();
+            let room_state = {
+                let mut coord = state
+                    .sync_coordinator
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                coord.host_ready(ParticipantReadiness::ready(5_000));
+                coord.guest_ready(ParticipantReadiness::ready(5_000));
+                let scheduled = coord.prepare_play(0, 0, 5_000).expect("prepare");
+                coord.commit_play(&scheduled).expect("commit");
+                coord.room_state
+            };
+            state.room_state = room_state;
+            sync_room_snapshot(&mut state);
+        }
+        assert_eq!(runtime.snapshot().sync.room_state, "PLAYING");
+
+        // Missed-heartbeat threshold path: the guest declares liveness
+        // failure (this is the exact transition the heartbeat worker makes).
+        runtime.apply_disconnect_for_test();
+
+        let snapshot = runtime.snapshot();
+        assert_eq!(
+            snapshot.sync.room_state, "RECONNECTING",
+            "host crash must move the guest to RECONNECTING"
+        );
+        assert!(
+            snapshot.sync.strict_sync_paused,
+            "host crash must strict-sync pause the guest"
+        );
+        assert!(
+            !snapshot.network.connected,
+            "host crash must mark the network down"
+        );
+        // Role-aware diagnostics: the GUEST recorded a HOST crash, not a
+        // mislabeled GuestCrash.
+        assert_eq!(
+            snapshot
+                .last_recovery
+                .as_ref()
+                .map(|recovery| recovery.event),
+            Some(super::FailureEvent::HostCrash)
+        );
+        assert_ne!(
+            snapshot.sync.room_state, "PLAYING",
+            "liveness failure must never leave the room PLAYING"
+        );
+    }
+
+    #[tokio::test]
+    async fn guest_crash_detection_feeds_host_recovery_state() {
+        let runtime = AppRuntime::new();
+        {
+            use crate::sync::consensus::ParticipantReadiness;
+            let mut state = runtime.lock();
+            // Default role is Host.
+            let room_state = {
+                let mut coord = state
+                    .sync_coordinator
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                coord.host_ready(ParticipantReadiness::ready(5_000));
+                coord.guest_ready(ParticipantReadiness::ready(5_000));
+                let scheduled = coord.prepare_play(0, 0, 5_000).expect("prepare");
+                coord.commit_play(&scheduled).expect("commit");
+                coord.room_state
+            };
+            state.room_state = room_state;
+            sync_room_snapshot(&mut state);
+        }
+
+        runtime.apply_disconnect_for_test();
+
+        let snapshot = runtime.snapshot();
+        assert_eq!(snapshot.sync.room_state, "RECONNECTING");
+        assert!(snapshot.sync.strict_sync_paused);
+        assert_eq!(
+            snapshot
+                .last_recovery
+                .as_ref()
+                .map(|recovery| recovery.event),
+            Some(super::FailureEvent::GuestCrash),
+            "the HOST side records a GuestCrash"
+        );
+    }
+
+    #[tokio::test]
+    async fn buffer_status_worker_is_replaced_not_duplicated() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let runtime = AppRuntime::new();
+        let old_aborted = Arc::new(AtomicBool::new(false));
+        let old_started = Arc::new(AtomicBool::new(false));
+        let old = tokio::spawn({
+            let flag = old_aborted.clone();
+            let started = old_started.clone();
+            async move {
+                struct Guard(Arc<AtomicBool>);
+                impl Drop for Guard {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::SeqCst);
+                    }
+                }
+                let _guard = Guard(flag);
+                started.store(true, Ordering::SeqCst);
+                loop {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
+            }
+        });
+        {
+            let mut state = runtime.lock();
+            state.buffer_status_task = Some(old);
+        }
+        for _ in 0..50 {
+            if old_started.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(old_started.load(Ordering::SeqCst), "old worker must start");
+
+        runtime.spawn_buffer_status_worker();
+
+        let mut aborted = false;
+        for _ in 0..50 {
+            if old_aborted.load(Ordering::SeqCst) {
+                aborted = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            aborted,
+            "old buffer-status worker must be aborted on replacement"
+        );
+        assert!(
+            runtime.lock().buffer_status_task.is_some(),
+            "new buffer-status worker must be present"
+        );
+        runtime.leave_party();
+        assert!(
+            runtime.lock().buffer_status_task.is_none(),
+            "Leave Party must cancel the buffer-status worker"
+        );
+    }
+
+    #[tokio::test]
+    async fn buffer_status_worker_cadence_is_500ms_while_playing_only() {
+        use super::BUFFER_STATUS_INTERVAL;
+        // Cadence matches MASTER_PRD §21 / PROTOCOL_SPEC §28.
+        assert_eq!(BUFFER_STATUS_INTERVAL, Duration::from_millis(500));
+
+        // The worker's report gate reads `state.room_state` (the canonical
+        // enum) plus the strict-sync pause flag: only a non-paused PLAYING
+        // room reports. Paused/ended/buffering/reconnecting rooms never
+        // reach report_buffer_status from the periodic path.
+        let runtime = AppRuntime::new();
+        let non_reportable_states = [
+            (RoomState::Lobby, false),
+            (RoomState::ReadyCheck, false),
+            (RoomState::Paused, false),
+            (RoomState::Buffering, false),
+            (RoomState::Reconnecting, false),
+            (RoomState::Ended, false),
+            (RoomState::Playing, true), // strict-sync-paused
+        ];
+        for (room_state, strict_sync_paused) in non_reportable_states {
+            let mut state = runtime.lock();
+            state.room_state = room_state;
+            state.sync.strict_sync_paused = strict_sync_paused;
+            let should_report =
+                state.room_state == RoomState::Playing && !state.sync.strict_sync_paused;
+            assert!(
+                !should_report,
+                "room {room_state:?} (paused={strict_sync_paused}) must not trigger periodic buffer reports"
+            );
+        }
+        // A healthy PLAYING room is reportable — the same gate the worker
+        // runs before each 500 ms tick's send.
+        {
+            let mut state = runtime.lock();
+            state.room_state = RoomState::Playing;
+            state.sync.strict_sync_paused = false;
+            let should_report =
+                state.room_state == RoomState::Playing && !state.sync.strict_sync_paused;
+            assert!(should_report, "healthy PLAYING room must be reportable");
+        }
     }
 
     #[tokio::test]

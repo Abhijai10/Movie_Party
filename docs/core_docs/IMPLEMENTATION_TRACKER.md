@@ -14,23 +14,34 @@ It must be updated continuously.
 
 ```text
 Project State:
-🟨 LOCAL PERFECT MEDIA DELIVERY/PLAYBACK AUDIT PASS COMPLETE (code-level).
-    Audited the full Host file → fingerprint → QUIC 1 MiB chunk transfer →
-    sparse cache → range server → libmpv → playback-readiness → strict-sync
-    path against PROTOCOL_SPEC. Media identity (BLAKE3 full hash + size +
-    first/last-4MiB quick fingerprint), chunk validation (media_id, index,
-    length, per-chunk hash), sparse cache, demand-driven transfer, bounded
-    retry, 503-on-unavailable range semantics all verified correct. Fixed
-    three real defects: (1) range server could fabricate a contiguous
-    Content-Range from non-adjacent sparse chunks at wait timeout;
-    (2) a plain full-file GET could serve a partially cached file as a
-    complete 200 OK (fabricated EOF); (3) enter_cinema fabricated PLAYING
-    before any play commit and host_play did not refuse a genuinely
-    unavailable player. 69 frontend + 284 Rust lib + 81 integration tests
-    pass.
+🟨 DESKTOP + RUNTIME PRODUCTION CLOSURE COMPLETE (code-level).
+    Batch 10 closed the remaining desktop/runtime integration gaps:
+    Windows now presents real libmpv software-rendered frames into the
+    existing child HWND behind the transparent WebView (GDI StretchDIBits,
+    32bpp BI_RGB top-down DIB — byte-identical to mpv's bgr0 output, no
+    per-pixel conversion, no second rendering architecture); the previously
+    ungated macOS-only msg helper no longer breaks the Windows build; macOS
+    presentation revalidated (bgr0→CGImage mapping, layer ownership,
+    resize, cleanup all verified correct); guest BUFFER_STATUS now reports
+    on the PRD §21/§28 500 ms cadence while Playing via a single
+    replace+abort worker; heartbeat liveness is application-level
+    (2 s interval, 5-missed ≈10 s threshold per PROTOCOL_SPEC §16) with
+    role-aware recovery events (guest detecting host loss records
+    HostCrash, not GuestCrash) and recovery still never auto-resumes;
+    reconnect/lifecycle revalidated (bounded backoff, cache survives,
+    completed chunks not re-fetched, no auto-resume, all session workers
+    aborted on leave/create/join); structured logging wired to a local-only
+    tracing subscriber (INFO default per PRD §87, RUST_LOG override, no
+    cloud, no credentials); chat persistence revalidated — V1 chat is
+    ephemeral per PRD (SQLite functions stay dormant by design); readiness
+    revalidated truthful (no fabricated PLAYING/buffer); PROTOCOL_SPEC vs
+    implementation wire-format discrepancy (CBOR/256 KiB/numeric IDs vs
+    JSON/serde tags/2 MiB) verified real and documented as a protocol
+    reconciliation follow-up. Not manually verified: real Windows/macOS
+    playback and cross-device flows remain ⚠ EXTERNAL VERIFICATION PENDING.
 
 Current Phase:
-BATCH 9 — LOCAL PERFECT MEDIA DELIVERY AND PLAYBACK READINESS AUDIT
+BATCH 10 — DESKTOP + RUNTIME PRODUCTION CLOSURE
 
 Current Release:
 V1 Development
@@ -39,13 +50,236 @@ Architecture:
 LOCKED
 
 Critical Blockers:
-M3: Native mpv Cinema host is implemented; real macOS/Windows libmpv playback requires external verification
+M3: Native mpv Cinema host implemented on macOS AND Windows (SW render →
+    NSView/CALayer and child-HWND GDI presentation); real playback on both
+    OSes still requires external verification
 M4: OS Keychain/Credential Manager and notification dispatch require platform verification
 M5: Real two-device WebRTC call needs physical devices and OS permission prompts
 M6: Real Chrome/provider login and media playback require external verification
 M7: ScreenCaptureKit needs macOS permission dialog
-M8: Chrome/player crash watchers not wired
+M8: Chrome crash watchers not wired (player crash/liveness paths ARE wired
+    as of Batch 10: heartbeat → missed detection → recovery state, with
+    role-aware events and no auto-resume)
 ```
+
+---
+
+# BATCH 10 — DESKTOP + RUNTIME PRODUCTION CLOSURE (2026-09-05)
+
+## Objective
+
+Close the remaining desktop/runtime integration gaps identified by the
+full audit, preserving the locked architecture. Code-level only: all
+real-device/real-OS behaviors remain developer-owned acceptance tests.
+
+## Windows native video presentation (item 1) — ✅ code-complete, 🧪 external verification pending
+
+`src-tauri/src/media/player/native_surface.rs`:
+
+- `display_frame` on Windows is no longer a no-op. It now validates the
+  frame exactly like the macOS path (non-null surface, positive w/h,
+  stride ≥ w·4, data ≥ stride·h, i32-range dims) and blits it into the
+  existing child HWND's client rect via GDI `StretchDIBits`.
+- mpv's `bgr0` (B,G,R,0 per pixel) is byte-identical to a 32bpp `BI_RGB`
+  DIB with negative `biHeight` (top-down), so no per-pixel conversion and
+  no second rendering architecture were introduced — this is the same
+  SW-render path the render loop already drives on macOS. Stride is honored
+  the same way macOS honors `bytesPerRow`: the DIB is declared
+  `stride/4` pixels wide so GDI addresses rows at the mpv stride, and the
+  blit's source rectangle samples only the real frame columns (padding
+  never displayed). The frame is presented directly from the render
+  buffer (no intermediate copy).
+- The surface stays behind the transparent WebView (`HWND_BOTTOM`,
+  `SWP_NOACTIVATE` on attach — unchanged) and remains the only native
+  presentation surface.
+- Fixed a real cross-platform compile defect: the macOS-only `msg_void_id`
+  helper (references `selector()`/`objc_msgSend` externs) was not
+  cfg-gated, so the Windows build of this file could not compile. It is
+  now `#[cfg(target_os = "macos")]`.
+- Deterministic Windows-only unit tests added (compile+run on Windows CI;
+  no window needed): `windows_frame_validation_accepts_strided_bgr0_buffer`,
+  `windows_frame_validation_rejects_malformed_frames`,
+  `windows_frame_validation_handles_i32_overflowing_dimensions`.
+- Windows integration harness added: `tests/windows_native_surface_e2e.rs`
+  (`#![cfg(windows)]`) drives the full production path — real child HWND →
+  production `MpvPlayer` → `attach_native_surface` → `render_next_frame`
+  → `display_frame` → StretchDIBits — and skips gracefully when the
+  bundled `libmpv.dll` or test video is absent.
+- 🧪 Real Windows playback (frames visibly presented, resize, pause/seek
+  correctness) is NOT claimed; it requires the developer to run the app on
+  Windows with a real movie.
+
+## macOS presentation revalidation (item 2) — ✅ verified correct, no defects
+
+Audited `NativeVideoBounds` validation, NSView ownership/retain semantics,
+`addSubview:positioned:relativeTo:` (below the webview), layer
+`setDrawsBackground:false`, CGImage creation (`kCGImageAlphaNoneSkipFirst |
+kCGBitmapByteOrder32Little` — verified to be the exact byte order of mpv
+bgr0), per-frame layer content update, `setFrame` resize, and detach
+cleanup. No concrete defect found; no change made beyond the msg helper
+cfg-gate that was breaking cross-platform compilation. Bridge description
+strings (`presentation.rs`) were corrected from the stale "via libmpv wid"
+(wid embedding is not used by this LGPL SW-render build) to the truthful
+"via libmpv SW render" on both platforms. 🧪 Real macOS movie playback
+remains externally verified (existing macOS harness covers the code path;
+manual movie test remains pending).
+
+## Strict-sync BUFFER_STATUS cadence (item 3) — ✅ wired
+
+`app_runtime.rs`:
+
+- New single periodic worker `spawn_buffer_status_worker`: guests report
+  buffer status every 500 ms (`BUFFER_STATUS_INTERVAL`, matching PRD §21
+  and PROTOCOL_SPEC §28) while `room_state == Playing && !strict_sync_paused`
+  with a player and client present. Paused/Ended/Buffering/Reconnecting
+  rooms do not spam reports.
+- Transition-triggered reports in the player event loop are unchanged and
+  remain supported.
+- Exactly one worker can exist: spawn replaces + aborts the previous
+  (verified by test). Aborted in `leave_party`, `create_local_party`
+  duplicate-hygiene, and `join_party` teardown, so it cannot leak across
+  rooms or publish into a replaced session. Each tick reads the current
+  client, so a reconnected transport is used immediately.
+- Buffer fields remain truthful: `stalled` is the player's genuine
+  Buffering state, headroom is the player's buffered-ahead value, and
+  transfer percent stays the separate whole-file verified-progress concept.
+  No Batch 9B fake-readiness regression.
+- Tests: `buffer_status_worker_is_replaced_not_duplicated` (incl. Leave
+  Party cancels it), `buffer_status_worker_cadence_is_500ms_while_playing_only`.
+
+## Host-crash / heartbeat liveness (item 4) — ✅ wired
+
+`app_runtime.rs`:
+
+- Heartbeat constants extracted: `HEARTBEAT_INTERVAL` (2 s) and
+  `HEARTBEAT_FAILURE_THRESHOLD` (5 consecutive missed acks ≈ 10 s) match
+  PROTOCOL_SPEC §16's application-level disconnect rule. Detection is
+  application-level (not only QUIC idle timeout): the guest heartbeat
+  worker counts consecutive failed `heartbeat()` calls and declares
+  liveness failure via the testable pure helper
+  `heartbeat_declares_liveness_failure`.
+- Role-aware peer-loss events: `apply_disconnect` now records
+  `HostCrash` when the local participant is the guest (its peer — the
+  host — died) and `GuestCrash` when it is the host. Previously both
+  sides recorded GuestCrash, so the guest's recovery snapshot mislabeled
+  a host crash. Both route through the same existing recovery machine
+  (`peer_disconnected` → RECONNECTING, strict-sync pause, bounded
+  reconnect backoff) — no new recovery architecture.
+- No auto-resume: recovery never returns the room to PLAYING by itself;
+  readiness consensus is required again (existing
+  `runtime_failures_drive_recovery_state` test plus the new role-aware
+  variants).
+- New tests: `heartbeat_threshold_matches_protocol_liveness_rules`,
+  `peer_loss_event_is_role_aware`,
+  `host_crash_detection_feeds_guest_recovery_state` (real PLAYING →
+  disconnect → RECONNECTING + HostCrash + never PLAYING),
+  `guest_crash_detection_feeds_host_recovery_state`.
+  Existing `leave_party_aborts_reconnect_heartbeat_preload_and_watch_workers`
+  extended to also cover the buffer-status worker (cancellation).
+
+## Reconnect / retry revalidation (item 5) — ✅ verified, follow-up documented
+
+Reverified: bounded backoff `[250, 750, 1500, 3000, 5000, 8000]` ms with 6
+attempt cap; single reconnect worker (replace + abort); guest cache
+survives disconnect (detached from state, preserved on disk — completed
+chunks never re-fetched, sparse holes remain requestable); old transport
+dropped; the authenticated-sequence guard prevents a stale session's
+messages from mutating the new room; reconnect does not resume playback.
+The PROTOCOL_SPEC's optional resume-token optimization remains
+intentionally unimplemented — the guest re-fetches only genuinely missing
+ranges via the existing demand path. Documented as a protocol
+reconciliation follow-up below; NOT implemented in this batch.
+
+## Leave-party / worker lifecycle (item 6) — ✅ verified
+
+All session workers (`player_event`, `player_render`, `transfer`,
+`transfer_stall_watcher`, `reconnect`, `heartbeat`, `buffer_status` (new),
+`preload`, `peer_event`, `host_event`, `calibration`) are aborted before
+replacement and cancelled by `leave_party`, `create_local_party`
+duplicate-create hygiene, and `join_party` teardown. Range server
+shutdown, player close, on-disk cache preservation, and
+`old_transfer_task` diagnostics retention revalidated. No broad refactor
+performed; the only lifecycle change is the new buffer-status worker
+joining the existing abort lists.
+
+## Telemetry / structured logging (item 7) — ✅ wired
+
+`telemetry/mod.rs` + `lib.rs`:
+
+- The existing `DEFAULT_LOG_LEVEL` ("INFO") is now actually used:
+  `init_local_logging()` installs a local stdout `tracing-subscriber`
+  (fmt, `RUST_LOG`-overridable, uptime timer, idempotent) in `run()`
+  before any setup, per PRD §87.
+- Local only. No cloud sink, no network sender. Existing
+  `tracing::warn!` calls (deep-link registration failure) now actually
+  emit. No credentials/cookies/passwords/media paths/full chat content
+  are logged (PRD §86 constraints honored by the pipeline's call sites).
+- Tests: `default_log_level_matches_prd_section_87`,
+  `local_logging_init_is_idempotent_and_never_panics`.
+
+## Chat persistence (item 8) — ✅ kept ephemeral (per PRD)
+
+Revalidated against MASTER_PRD: V1 chat is "temporary chat messages"
+(ephemeral, party-duration). The `chat_messages` SQLite table is described
+as "Optional local history. Default retention: party duration only".
+Current code matches the PRD: chat lives in runtime state for the session;
+`storage/sqlite.rs` `insert_chat_message`/`get_chat_messages` remain
+dormant utilities (tested) with zero runtime callers. No persistence was
+wired — the PRD does not require it for V1 and reconnect/app-restart chat
+persistence is not specified for V1. If a future phase requires history,
+wire the existing functions rather than building a new architecture.
+
+## Playback readiness (item 9) — ✅ revalidated truthful
+
+`local_media_genuinely_ready` unchanged (Batch 7/9B guards intact);
+`enter_cinema`/`host_play` honesty unchanged; guest BufferLow echo still
+drives strict-sync pause; BufferRecovered still routes to ReadyCheck
+(never auto-resume); transfer percent ≠ readiness; no fabricated buffer
+or PLAYING anywhere in the changed paths. Protocol-test simulation
+behavior preserved (integration suites pass unchanged).
+
+## Path/file/resource audit (item 10) — ✅ no defects found
+
+Media id validation (`..`, `/`, `\` rejection), cache keyed by validated
+media_id under a host-provided root, range-server token + media_id scope,
+loopback-only bind, canonicalization guards — all reverified. No change
+required.
+
+## Spec / code discrepancy (item 11) — ⚠ documented as follow-up (intentional non-fix)
+
+Verified real, documented in the **Protocol reconciliation follow-ups**
+section below. Not fixed in this batch (a wire-format migration is a
+versioned protocol change, not a runtime patch).
+
+## Protocol reconciliation follow-ups (Batch 10 finding)
+
+1. **Wire format**: PROTOCOL_SPEC §3 specifies canonical CBOR with string
+   keys (V1). Implementation uses JSON (`serde_json`) with serde enum
+   tags (`#[serde(tag = "type", content = "payload")]`). The JSON V1 wire
+   format is the intentional current implementation; migrating to CBOR is
+   a versioned protocol change requiring coordinated host/guest upgrades.
+2. **Request size limit**: PROTOCOL_SPEC §5 specifies 256 KiB control
+   messages (MP-PROTO-004 MESSAGE_TOO_LARGE). The transport enforces
+   `MAX_REQUEST_BYTES = 2 MiB` in `network/quic.rs`
+   (`protocol::MAX_CONTROL_MESSAGE_BYTES = 256 KiB` exists but is unused
+   by the transport). The enforced transport limit is the operative one;
+   tightening to 256 KiB is part of the same reconciliation.
+3. **Message IDs**: `protocol/mod.rs` defines numeric `MessageType` IDs
+   matching the spec's table, but the wire uses serde tags, so numeric
+   IDs are currently declarative only.
+4. **Reconnect resume token**: PROTOCOL_SPEC's optional resume-token
+   optimization is unimplemented; reconnect re-fetches only missing ranges
+   (correct, just not optimized).
+
+These require a single coordinated `PROTOCOL_SPEC` + implementation pass
+in a dedicated future batch (must be versioned; must not silently change
+either side).
+
+## Frontend impact
+
+None. No `src/` file changed; bridge-string changes are backend-only
+(the frontend displays the string verbatim). No pnpm validation required
+per batch rules ("frontend validation passes if frontend changed").
 
 ---
 
