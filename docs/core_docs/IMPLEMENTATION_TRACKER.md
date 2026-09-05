@@ -14,6 +14,20 @@ It must be updated continuously.
 
 ```text
 Project State:
+🟨 V1 COMPLETION PLAN ISSUED — 2026-09-05 full-project audit found 18
+    findings (P1–P18) and produced a 13-batch plan to V1
+    (`docs/core_docs/V1_COMPLETION_PLAN.md`). The three biggest:
+    P1 wire protocol violates the locked PROTOCOL_SPEC (JSON + 2 MiB +
+    string tags vs CBOR + 256 KiB + numeric IDs; message-ID collisions
+    with the SCHEDULE range); P2 the video call is a local loopback with
+    no real remote video rendering; P3 Provider Sync never dispatches
+    canonical playback ops to provider adapters. Stale milestone-era docs
+    were deleted the same day; findings were merged into
+    `0_Remaining_Things.md` (see its "2026-09-05 full-project audit"
+    section). Batches 11–23 are next; decision points D1–D4 (protocol,
+    chat layout, Shared scope, cadence) need user input before Batch 11.
+
+Previous:
 🟨 SOCIAL UX + GHOST/PRIVACY CLOSURE COMPLETE (code-level).
     Batch 10 (social UX) closed the remaining frontend/social gaps on
     top of the desktop/runtime closure: Ghost Mode now restores the

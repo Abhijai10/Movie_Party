@@ -3,7 +3,7 @@
 > **Purpose:** This is the living source of truth for everything still required to finish Movie Party V1.  
 > **Scope:** Two-person private desktop watch parties on macOS and Windows.  
 > **Current branch:** `main`  
-> **Latest checkpoint:** Batch 10 — desktop + runtime production closure (code-level)  
+> **Latest checkpoint:** 2026-09-05 full-project audit → V1 completion plan (Batches 11–23); Batch 10 closed desktop/runtime + social UX/privacy (code-level)  
 > **Rule:** “Code exists” is not the same as “production-ready.” Items that need real devices, real accounts, real media, or OS behavior remain pending until manually verified.
 
 ---
@@ -59,7 +59,82 @@ V1 correctness rules was performed):
   report genuine buffer before pressing Ready.
 
 Remaining V1 work is dominated by **real-device and real-account
-verification** plus the long-pending native libmpv presentation fix.
+verification** plus closing the 2026-09-05 audit findings (P1–P18, below).
+
+## 2026-09-05 full-project audit — new findings (P1–P18)
+
+Every core doc was verified against the current code (main @ 64bf79a)
+and cross-checked with MASTER_PRD §113, UI_UX_SPEC, and PROTOCOL_SPEC.
+The batch plan, estimates, and decision points live in
+`docs/core_docs/V1_COMPLETION_PLAN.md`. The stale milestone-era docs
+(worklogs, closure audits, runbook, integration status) were deleted the
+same day. Highest-impact findings:
+
+1. 🔴 **P1 — Wire protocol violates the locked PROTOCOL_SPEC**: production
+   uses JSON + a 2 MiB limit + string serde tags; the spec mandates
+   Canonical CBOR + 256 KiB + numeric IDs, and `MAX_CONTROL_MESSAGE_BYTES`
+   (256 KiB) sits unused in `protocol/mod.rs`. The wire envelope also lacks
+   v_major/v_minor/room_id, and message IDs collide with the spec registry
+   (`ReadyState=200 / BufferStatus=201 / ControlRequest=202` redefine the
+   SCHEDULE_CREATE/ACCEPT/UPDATE range — §68 forbids redefining message
+   IDs). Resolution requires ADR-0001 (migrate to CBOR or amend the spec)
+   — Batch 11.
+2. 🔴 **P2 — The video call is a local loopback, not cross-device**: each
+   device creates two local RTCPeerConnections talking to each other;
+   real getUserMedia exists but only feeds the self-test; received remote
+   signals are stored but never applied; the call tile renders a
+   placeholder icon — no `<video>`/`<audio>` element exists in the app.
+   Real offer/answer/ICE over the existing QUIC relay — Batch 12.
+3. 🔴 **P3 — Provider Sync never dispatches canonical playback ops**:
+   coordinator commits do not reach provider adapters (play/pause/seek
+   commands exist with no runtime callers); provider position/buffer never
+   feed the sync engine — Batch 14.
+4. 🟡 **P4/P5/P7 — Spec-vs-implementation drift in the social UI**:
+   Ready Check countdown is a frontend timer (spec: sync-engine-driven);
+   chat layout contradicts UI_UX_SPEC §34–36 (see the note in §16 below —
+   the two core docs disagree, decision D2 required); camera card is
+   24vw/260px vs spec 220px default, 120–360 clamp, locally persisted
+   position, 48px minimized circle — Batch 17.
+5. 🟡 **P6 — Missing spec'd screens**: Settings (§55–62), Schedule form
+   (§18–19), First Run + prerequisite checks (§10–11), Home Upcoming
+   (§53), QR invite (§16), Error screen with MP codes + Technical Details
+   (§64), Debug HUD (§63), window-close-during-party prompt (§69), guest
+   media retention prompt (§52) — Batches 15–16.
+6. 🟡 **P8 — Scheduling has no frontend and no protocol messages**
+   (SCHEDULE_CREATE/ACCEPT/UPDATE/CANCEL and PRELOAD_STATE absent from the
+   wire); notification-permission flow not surfaced — Batch 16.
+7. 🟡 **P9 — SQLite has 4 of 9 PRD §85 tables** (device_identity,
+   schedules, cache_entries, chat_messages; missing trusted_peers, rooms,
+   media_items, providers, network_history) — tracked with Batch 16.
+8. 🟡 **P10 — Provider Shared pipeline is policy-only**:
+   capture/macos + capture/windows are constant-string plans,
+   encode/macos + encode/windows are 1-line files, and the pipeline
+   "proof" is an #[ignore] test that shells out to ffmpeg. Phases 20–26
+   have no production code — Batches 19–21 (diagnostic-first, honest DRM
+   reality per PRD §109).
+9. 🟡 **P11 — Zero ADRs exist** (only the template) while multiple locked
+   decisions deviate undocumented (wire format, chat sizes) — Batch 11.
+10. 🟡 **P12/P13 — Release/watcher gaps**: no CSP, no release cargo
+    profile, no dependency audits in CI, macOS signing/notarization
+    absent; Chrome-crash + player-failure watchers still unwired
+    (recovery plans exist) — Batches 18, 22.
+11. 🔴 **P14 — Preload units bug (verify-then-fix)**: two duplicate
+    preload-start implementations disagree — `scheduling/mod.rs` is
+    bits-correct, but `storage/sqlite.rs::calculate_preload_start`
+    divides bytes by goodput_bps without ×8 (treats bits as bytes — 8×
+    off at the call site) — Batch 16.
+12. 🧪 **P18 — the entire §31 manual verification matrix remains
+    pending** (by design; agents must never fake it).
+
+Verified-correct highlights from the same audit (do NOT redo): sync math
+is spec-exact (drift bands / p95 RTT / lead-time formula), drift
+correction IS runtime-wired (stale claim retired — see §23), chat and
+reaction limits, the preload formula in `scheduling/mod.rs`, Ed25519
+identity in the real Keychain/Credential Manager, local-only telemetry,
+the Phase-28 recovery table, CDP provider adapters, macOS/Windows frame
+presentation, heartbeat/buffer cadence, and reconnect semantics.
+
+---
 
 ## Highest-priority current items
 
@@ -559,7 +634,8 @@ strict synchronized playback
 
 ## 6.2 Current priorities
 
-- 🔴 Native player presentation must be fixed first.
+- ✅ Native player presentation is code-complete on both OSes (Batch 10) —
+  the old "fix first" blocker is retired; only manual playback proof remains.
 - 🧪 Real host playback must be tested.
 - 🧪 Real guest cache/range playback must be tested.
 - 🧪 Pause/Play/Seek must be tested against actual player state.
@@ -909,7 +985,10 @@ A bare short room code is insufficient without adding a rendezvous/lookup servic
 
 ## Status
 
-🔴 Current manual testing exposed a likely local/remote state-model/UI mismatch.
+✅ Local/remote state separation closed (Batch 10). 🔴 The deeper 2026-09-05
+audit finding (P2): the call itself is a local loopback — real cross-device
+offer/answer/ICE plus real remote video rendering is the remaining work
+(Batch 12).
 
 ## 13.1 Required separation
 
@@ -1113,6 +1192,13 @@ gaps around it.
 - Green/unread indicator when message arrives while hidden.
 - Active typing should not be unexpectedly destroyed by the transient timer.
 - Lobby and Cinema use the same visual family.
+
+> **2026-09-05 audit note (finding P5 / decision D2):** the sizes above
+> match the implementation and this document, but UI_UX_SPEC §34–36
+> specifies a different family — compose `min(560px, 70vw)` bottom-center;
+> history `min(620px, 75vw) × min(560px, 70vh)` centered; lower-third
+> ephemeral 5 s bubbles, max 3 visible. The two core docs disagree; one
+> must be amended via ADR before the Batch 17 chat work.
 
 ---
 
@@ -1332,15 +1418,20 @@ Host-authoritative resume
 
 ## Audit findings requiring current-branch revalidation
 
-⚠️ Before implementing changes, verify whether these are still true:
+Revalidated 2026-09-05 (old claims retired against main @ 64bf79a):
 
-- drift-correction helper has no runtime caller;
-- no continuous drift measurement/correction loop;
-- reconnect/backoff may be incomplete;
-- host crash detection may depend mainly on QUIC idle timeout;
-- heartbeat exists but may not be fully scheduled;
-- overlapping operation cancellation/abort semantics may be incomplete;
-- some coordinator state may still depend on large `app_runtime.rs` synchronization blocks.
+- ✅ drift correction IS runtime-wired: the guest player event loop calls
+  `apply_drift_correction` (rate nudge / micro-seek / hard-seek / restore
+  1.0×). The old "no runtime caller" claim is stale (also wired in Batch 9B).
+- ✅ reconnect/backoff is bounded, single-worker, cache-preserving, with
+  no auto-resume (Batch 7 revalidation).
+- ✅ heartbeat is fully scheduled (2 s interval, ≈10 s threshold,
+  role-aware recovery events — Batch 10).
+- ✅ host/guest crash detection is application-level (heartbeat), not
+  dependent on QUIC idle timeout.
+- ⚠️ Still true: coordinator state depends on large `app_runtime.rs`
+  synchronization blocks (maintainability, not correctness).
+- 🧪 Real two-device drift measurement (p95 < 100 ms target) still pending.
 
 Do not “fix” stale audit findings without confirming current code.
 
@@ -1444,7 +1535,7 @@ The following old audit findings are no longer assumed current:
 
 ## 28.2 Revalidate before production
 
-⚠️ Check current branch for:
+⚠️ Revalidated 2026-09-05 — most items below are now ✅ (QUIC retry/backoff, reconnect, heartbeat scheduling, range-server bounds, malformed-UUID rejection, error propagation, snapshot typing, structured logging, telemetry, diagnostics export, bandwidth measurement, native notification wiring, path canonicalization; chat persistence stays dormant by design). Open items: stream/data limits (see P1), CSP, release profile, dependency audits, graceful-shutdown sweep, `app_runtime.rs` monolith. Original checklist retained for reference:
 
 - QUIC transport retry/backoff;
 - reconnect behavior;
@@ -1653,116 +1744,48 @@ Verify:
 
 # 32. Recommended Implementation Order
 
-## Phase 1 — Critical playback gate
+Superseded 2026-09-05: the previous 68-item phase list described the
+pre-Batch-10 state (its playback, social-UI, Ghost/Privacy, and drift
+items are done at the code level). The current order is the batch plan
+from the full-project audit; full detail, estimates, and decision points
+D1–D4 live in `docs/core_docs/V1_COMPLETION_PLAN.md`.
 
-1. 🔴 Native libmpv presentation on macOS
-2. 🧪 Real single-device local playback
-3. 🟡 Windows native presentation path
-4. 🧪 Windows local playback
+1. **Batch 11 — Protocol truth & ADR foundation** (P1/P11): decide D1
+   (CBOR vs ADR-amended JSON), fix message-ID collisions, envelope
+   version/room fields, size-limit enforcement, malformed-input tests.
+2. **Batch 12 — Real cross-device call** (P2): true offer/answer/ICE over
+   the existing QUIC relay; real remote video/audio rendering in the tile.
+3. **Batch 13 — Adaptive camera ladder** (P17): 480p20 → 240p10 → frozen,
+   once-per-event degradation notice, movie-first priority policy.
+4. **Batch 14 — Provider Sync runtime completion** (P3): canonical commits
+   dispatch to provider adapters; provider position/buffer feed the
+   coordinator; YouTube first.
+5. **Batch 15 — Missing screens I** (P6): Settings, First Run,
+   Error screen, Debug HUD, window-close-during-party prompt.
+6. **Batch 16 — Scheduling frontend + protocol** (P8/P14): Schedule form,
+   Home Upcoming, offline warning, SCHEDULE_*/PRELOAD_STATE messages,
+   fix the preload units duplication.
+7. **Batch 17 — Chat & cinema spec alignment** (P4/P5/P7): lower-third
+   ephemeral bubbles, backend-driven countdown, camera card spec values.
+8. **Batch 18 — Resilience watchers + recovery UX** (P13): Chrome-crash
+   and player-failure watchers, disconnect overlay with host-only
+   Continue Without Guest.
+9. **Batch 19 — macOS Provider Shared capture spike** (P10):
+   diagnostic-only capture/encode/30 s sample with honest DRM
+   classification (black-frame detection exists; no circumvention).
+10. **Batch 20 — Provider Shared transport** (conditional on Batch 19 +
+    decision D3): QUIC media stream, 5 s presentation buffer, host
+    loopback, strict sync, automatic quality ladder.
+11. **Batch 21 — Windows Provider Shared spike** (needs a physical
+    Windows machine).
+12. **Batch 22 — Release hardening** (P12): CSP, release profile,
+    dependency audits, macOS libmpv bundling verification.
+13. **Batch 23 — Regression + beta prep**: chaos tests where feasible,
+    the full §31 manual matrix, beta build cut.
 
-## Phase 2 — First-run connectivity
-
-5. 🔮 Tailscale installation detection
-6. 🔮 Tailscale sign-in handoff/status
-7. 🔮 partner/tailnet/share setup guidance
-8. 🔮 reachability validation
-9. 🔮 onboarding persistence/recovery
-
-## Phase 3 — Confirmed social/UI correctness issues
-
-10. 🔴 Separate local vs remote call states
-11. 🔴 Fix call-tile dragging
-12. 🔴 Prevent text selection while dragging
-13. 🔴 Fix call-tile z-order
-14. 🔴 Implement real minimize semantics
-15. 🔴 Implement close/hide semantics
-16. 🔴 Remove unnecessary remote tile device buttons
-17. 🔴 Add small remote mute indicator
-18. 🔴 Fix Lobby Ready Check overflow only
-19. 🔴 Restore larger translucent chat in Lobby
-20. 🔴 Restore larger translucent chat in Cinema
-21. 🔴 Fix provider selector white-field bug
-22. 🔴 Reduce Lobby clutter
-
-## Phase 4 — Ghost / privacy UX
-
-23. 🔮 Ghost Mode final state-preserving implementation
-24. 🔮 Privacy Mode verification
-25. 🧪 Verify camera continues during Ghost Mode
-26. 🧪 Verify Privacy exit does not reactivate devices
-
-## Phase 5 — Real two-device Local Perfect
-
-27. 🧪 macOS ↔ Windows
-28. 🧪 strict sync
-29. 🧪 buffering — code-level honest percent/headroom separation completed
-    in Batch 9B (no fabricated 100%; recovery never auto-resumes; resume
-    only via fresh host play cycle); physical-device verification pending
-30. 🧪 disconnect/reconnect — code-level reconnect/backoff/cache preservation
-    completed; physical-device verification pending
-31. Fix only evidence-driven failures
-
-## Phase 6 — Provider Sync UX
-
-32. 🟡 provider sign-in via managed browser — code-level readiness flow completed in Batch 5
-33. 🟡 provider session status — readiness state machine completed in Batch 5
-34. 🟡 browse/select title on provider — provider-search navigation completed in Batch 5
-35. 🟡 prepare provider party — room creation gated on valid readiness in Batch 5
-36. 🧪 provider-specific compatibility tests — real-account verification pending
-
-## Phase 7 — Scheduling / preload
-
-37. 🧪 Local Perfect scheduled pre-transfer — code-level wiring completed
-38. 🧪 online/offline notification flow — retryable/rate-limited code path
-    completed; 15-minute per-schedule dedup extracted and tested in Batch 9B
-39. 🧪 preload percentage/readiness — cache-headroom fallback completed
-40. 🧪 retention flow proof — Batch 9B added focused proof that leave_party
-    preserves the on-disk guest cache until the retention decision
-41. 🔮 Provider Sync scheduled preflight
-
-## Phase 8 — Provider Shared
-
-42. capture
-43. audio capture
-44. encode
-45. timestamp sync
-46. dedicated QUIC stream
-47. guest buffering
-48. decode
-49. guest presentation
-50. protected-video failure/fallback
-51. 🧪 macOS/Windows/provider tests
-
-## Phase 9 — Reliability/security revalidation
-
-52. Re-run production audit on current branch
-53. Fix only confirmed remaining findings
-54. reconnect/backoff
-55. drift loop — Batch 9B wired `correction_for_drift` into the guest
-    player event loop (`apply_drift_correction`), with focused tests for
-    rate convergence and hard-seek back to the host commit; real
-    two-device drift measurement still pending
-56. bounds/limits
-57. CSP
-58. logging/diagnostics
-59. release hardening
-
-## Phase 10 — External visual polish
-
-60. 🎨 Hero reel redesign by another AI
-61. 🎨 Curtain/spotlight/countdown polish by another AI
-62. Other small visual polish after functionality freezes
-
-## Phase 11 — Final release gate
-
-63. complete cross-platform matrix
-64. package native dependencies
-65. installer tests
-66. privacy/security review
-67. final production audit
-68. V1 release candidate
-
----
+Out-of-V1 items are enumerated in MASTER_PRD §111/§112 and must not be
+built (music, mobile, Linux, >2 users, cloud accounts, manual quality
+selector, 1080p webcam, auto-updater, public marketing).
 
 # 33. Definition of V1 Complete
 
