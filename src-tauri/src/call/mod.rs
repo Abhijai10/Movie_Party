@@ -204,7 +204,8 @@ impl CallSignalLedger {
 }
 
 pub fn validate_signal(signal: &CallSignal, ledger: &mut CallSignalLedger) -> Result<(), String> {
-    const MAX_SIGNAL_BYTES: usize = 1_000_000;
+    // PROTOCOL_SPEC §52: CALL_SIGNAL payload max 64 KiB.
+    const MAX_SIGNAL_BYTES: usize = 64 * 1024;
 
     let data = signal.data.trim();
     if data.is_empty() || data.len() > MAX_SIGNAL_BYTES {
@@ -248,7 +249,24 @@ pub fn validate_signal(signal: &CallSignal, ledger: &mut CallSignalLedger) -> Re
             }
             Ok(())
         }
-        CallSignalType::Renegotiate => Err("MP-CALL-008 unsupported renegotiation".to_string()),
+        CallSignalType::Renegotiate => {
+            // Batch 12: a renegotiation REQUEST (not an SDP) — the peer's
+            // session restarted (mode change, privacy exit, view remount)
+            // and needs a fresh offer from this device. Payload is a small
+            // marker object. The ledger reset is CONDITIONAL: only an
+            // exchange that never completed (offer pending, no answer)
+            // blocks a fresh OFFER (MP-CALL-002), so only that state is
+            // superseded. A completed exchange already accepts a new
+            // OFFER, and resetting it would poison an ANSWER still in
+            // flight (MP-CALL-003).
+            if data.len() > 2_048 {
+                return Err("MP-CALL-001 invalid call signal".to_string());
+            }
+            if ledger.offer_pending && !ledger.answer_seen {
+                ledger.reset();
+            }
+            Ok(())
+        }
     }
 }
 
@@ -444,5 +462,104 @@ mod tests {
         let mut ledger = CallSignalLedger::default();
 
         assert!(validate_signal(&signal, &mut ledger).is_err());
+    }
+
+    // ── Batch 12: Renegotiate marker semantics (§52) ─────────────────────
+
+    const MARKER: &str = r#"{"request":"renegotiate","v":1,"id":"s1-abc123"}"#;
+    const OFFER_DATA: &str = r#"{"type":"offer","sdp":"v=0\r\n"}"#;
+    const ANSWER_DATA: &str = r#"{"type":"answer","sdp":"v=0\r\n"}"#;
+
+    fn marker_signal() -> CallSignal {
+        CallSignal {
+            signal_type: CallSignalType::Renegotiate,
+            data: MARKER.to_owned(),
+        }
+    }
+
+    fn offer_signal() -> CallSignal {
+        CallSignal {
+            signal_type: CallSignalType::Offer,
+            data: OFFER_DATA.to_owned(),
+        }
+    }
+
+    fn answer_signal() -> CallSignal {
+        CallSignal {
+            signal_type: CallSignalType::Answer,
+            data: ANSWER_DATA.to_owned(),
+        }
+    }
+
+    #[test]
+    fn renegotiate_marker_resets_a_never_completed_exchange() {
+        // Session restart with a pending, unanswered offer: the fresh
+        // session's next OFFER must validate (the marker supersedes the
+        // stale exchange) instead of tripping MP-CALL-002.
+        let mut ledger = CallSignalLedger::default();
+        assert!(validate_signal(&offer_signal(), &mut ledger).is_ok());
+        assert!(validate_signal(&marker_signal(), &mut ledger).is_ok());
+        assert!(validate_signal(&offer_signal(), &mut ledger).is_ok());
+    }
+
+    #[test]
+    fn renegotiate_marker_preserves_a_completed_exchange() {
+        // A completed exchange already accepts a fresh OFFER; resetting it
+        // would poison an ANSWER still in flight (MP-CALL-003).
+        let mut ledger = CallSignalLedger::default();
+        assert!(validate_signal(&offer_signal(), &mut ledger).is_ok());
+        assert!(validate_signal(&answer_signal(), &mut ledger).is_ok());
+        assert!(validate_signal(&marker_signal(), &mut ledger).is_ok());
+        // The completed state is untouched: another ANSWER without a new
+        // OFFER is still rejected (no state was cleared)...
+        assert!(validate_signal(&answer_signal(), &mut ledger).is_err());
+        // ...and a fresh OFFER proceeds as the normal renegotiation path.
+        assert!(validate_signal(&offer_signal(), &mut ledger).is_ok());
+    }
+
+    #[test]
+    fn renegotiate_marker_allows_answer_after_reset() {
+        // Reset sequence: offer pending → marker clears it → fresh offer →
+        // answer validates (the ANSWER belongs to the fresh exchange).
+        let mut ledger = CallSignalLedger::default();
+        assert!(validate_signal(&offer_signal(), &mut ledger).is_ok());
+        assert!(validate_signal(&marker_signal(), &mut ledger).is_ok());
+        assert!(validate_signal(&offer_signal(), &mut ledger).is_ok());
+        assert!(validate_signal(&answer_signal(), &mut ledger).is_ok());
+    }
+
+    #[test]
+    fn renegotiate_marker_is_idempotent() {
+        // Mode-toggle thrash can produce several markers in a row; each is
+        // a conditional reset and must remain valid (no error, no state
+        // corruption).
+        let mut ledger = CallSignalLedger::default();
+        assert!(validate_signal(&offer_signal(), &mut ledger).is_ok());
+        assert!(validate_signal(&marker_signal(), &mut ledger).is_ok());
+        assert!(validate_signal(&marker_signal(), &mut ledger).is_ok());
+        assert!(validate_signal(&marker_signal(), &mut ledger).is_ok());
+        assert!(validate_signal(&offer_signal(), &mut ledger).is_ok());
+    }
+
+    #[test]
+    fn renegotiate_marker_rejects_oversized_payload() {
+        // The marker is a small request object (≤2 KiB); a session
+        // description can never fit, so a mislabeled SDP is rejected.
+        let oversized = CallSignal {
+            signal_type: CallSignalType::Renegotiate,
+            data: "x".repeat(2_049),
+        };
+        let mut ledger = CallSignalLedger::default();
+        assert!(validate_signal(&oversized, &mut ledger).is_err());
+    }
+
+    #[test]
+    fn renegotiate_marker_at_exact_limit_is_accepted() {
+        let at_limit = CallSignal {
+            signal_type: CallSignalType::Renegotiate,
+            data: "x".repeat(2_048),
+        };
+        let mut ledger = CallSignalLedger::default();
+        assert!(validate_signal(&at_limit, &mut ledger).is_ok());
     }
 }

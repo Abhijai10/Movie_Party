@@ -2873,7 +2873,13 @@ impl AppRuntime {
             // The host orchestrates its own protocol operations directly
             // (on_guest_*_ready / host_*); the host self-subscriber must NOT
             // re-apply its own PREPARE/COMMIT broadcasts as if it were the
-            // receiving peer.
+            // receiving peer. Batch 12: CallSignal joins this list — the
+            // host's own relayed signals would otherwise be re-validated
+            // against the same ledger it was validated in (duplicate-offer
+            // MP-CALL-002) and re-appended to call_signals. The same guard
+            // covers a guest receiving its own signal echoed back by the
+            // host broadcast: broadcast_guest_event preserves the original
+            // sender device id, so sender == local id on both sides.
             let is_self = sender == &state.local_participant.id;
             if is_self {
                 match &event {
@@ -2882,7 +2888,8 @@ impl AppRuntime {
                     | QuicServerEvent::PausePrepare { .. }
                     | QuicServerEvent::PauseCommit { .. }
                     | QuicServerEvent::SeekPrepare { .. }
-                    | QuicServerEvent::SeekCommit { .. } => return,
+                    | QuicServerEvent::SeekCommit { .. }
+                    | QuicServerEvent::CallSignal { .. } => return,
                     _ => {}
                 }
             }
@@ -6105,6 +6112,123 @@ mod tests {
         );
         assert!(!snapshot.call.connected);
         assert_eq!(snapshot.call_signals.len(), 1);
+        assert_eq!(snapshot.call_signals[0].signal_type, "OFFER");
+    }
+
+    /// Batch 12 / PROTOCOL_SPEC §52: a CALL_SIGNAL body above 64 KiB must
+    /// be rejected by validate_signal (the transport still allows it — it
+    /// is under §5's 256 KiB — so this is the call subsystem's own gate).
+    #[test]
+    fn call_signal_over_64kib_is_rejected() {
+        let runtime = AppRuntime::new();
+
+        // 64 KiB + 1 of legal SDP-ish padding.
+        let oversized = format!(
+            r#"{{"type":"offer","sdp":"v=0\r\n{}"}}"#,
+            "x".repeat(64 * 1024)
+        );
+        let result = runtime.submit_call_signal(CallSignal {
+            signal_type: CallSignalType::Offer,
+            data: oversized,
+        });
+
+        assert!(
+            matches!(&result, Err(e) if e == "MP-CALL-001 invalid call signal"),
+            "signals above the §52 64 KiB limit must be rejected, got {result:?}"
+        );
+        // Exactly at the limit still parses (structure check may reject a
+        // synthetic body, but never with a size error).
+        let prefix = r#"{"type":"offer","sdp":"v=0\r\n{WILL_PAD}"}"#;
+        // `prefix` embeds the token {WILL_PAD}; replace it with padding
+        // sized so the final body is exactly 64 KiB.
+        let overhead = prefix.len() - "{WILL_PAD}".len();
+        let at_limit = CallSignal {
+            signal_type: CallSignalType::Offer,
+            data: prefix.replace("{WILL_PAD}", &"x".repeat(64 * 1024 - overhead)),
+        };
+        assert_eq!(at_limit.data.len(), 64 * 1024);
+        let mut ledger = crate::call::CallSignalLedger::default();
+        assert!(crate::call::validate_signal(&at_limit, &mut ledger).is_ok());
+    }
+
+    /// Batch 12: the host self-subscriber must not re-apply its own relayed
+    /// CallSignal (duplicate-offer MP-CALL-002 + double append), and a guest
+    /// must not re-apply its own signal echoed back by the host broadcast.
+    /// Both cases are `sender == local id` envelopes.
+    #[test]
+    fn call_signal_self_echo_is_not_reapplied() {
+        let runtime = AppRuntime::new();
+        // Submitting a valid offer appends exactly one snapshot entry…
+        let first = runtime
+            .submit_call_signal(CallSignal {
+                signal_type: CallSignalType::Offer,
+                data: r#"{"type":"offer","sdp":"v=0\r\n"}"#.to_string(),
+            })
+            .expect("offer");
+        assert_eq!(first.call_signals.len(), 1);
+
+        // …now simulate the self-echo: the same offer coming back through
+        // the broadcast with sender == local device id.
+        let local_id = {
+            let state = runtime.lock();
+            state.local_participant.id.clone()
+        };
+        let envelope = crate::network::quic::EventEnvelope {
+            v_major: crate::protocol::ENVELOPE_V_MAJOR,
+            v_minor: crate::protocol::ENVELOPE_V_MINOR,
+            room_id: "self-echo-test".to_string(),
+            seq: 2,
+            sender: local_id,
+            sent_mono_us: 1,
+            event: crate::network::quic::ServerEvent::CallSignal {
+                signal_type: "OFFER".to_string(),
+                data: r#"{"type":"offer","sdp":"v=0\r\n"}"#.to_string(),
+            },
+        };
+
+        AppRuntime::apply_peer_event(&runtime.inner, &envelope, envelope.event.clone());
+
+        // The echo must have been dropped by the is_self guard: no
+        // duplicate-offer Degraded state, no second snapshot entry.
+        let snapshot = runtime.snapshot();
+        assert_eq!(
+            snapshot.call_signals.len(),
+            1,
+            "self-echoed call signal must not be re-applied"
+        );
+        assert_ne!(
+            snapshot.call.status,
+            crate::call::CallRuntimeStatus::Degraded,
+            "self-echo must not trip the duplicate-offer validation"
+        );
+    }
+
+    /// Batch 12 negative control: a CallSignal from the PEER still applies
+    /// (the guard must not swallow genuine remote signals).
+    #[test]
+    fn call_signal_from_peer_is_applied() {
+        let runtime = AppRuntime::new();
+        let envelope = crate::network::quic::EventEnvelope {
+            v_major: crate::protocol::ENVELOPE_V_MAJOR,
+            v_minor: crate::protocol::ENVELOPE_V_MINOR,
+            room_id: "peer-signal-test".to_string(),
+            seq: 1,
+            sender: "peer-device-id".to_string(),
+            sent_mono_us: 1,
+            event: crate::network::quic::ServerEvent::CallSignal {
+                signal_type: "OFFER".to_string(),
+                data: r#"{"type":"offer","sdp":"v=0\r\n"}"#.to_string(),
+            },
+        };
+
+        AppRuntime::apply_peer_event(&runtime.inner, &envelope, envelope.event.clone());
+
+        let snapshot = runtime.snapshot();
+        assert_eq!(
+            snapshot.call_signals.len(),
+            1,
+            "a peer-originated call signal must be applied"
+        );
         assert_eq!(snapshot.call_signals[0].signal_type, "OFFER");
     }
 
