@@ -14,6 +14,60 @@ It must be updated continuously.
 
 ```text
 Project State:
+🟨 BATCH 12 (REAL CROSS-DEVICE CALL SESSION) COMPLETE (code-level).
+    Audit finding P2 closed: the video call is now a real per-device
+    RTCPeerConnection session signalled through the host relay instead
+    of the single-device loopback demo. Backend (Rust): submit_call_signal
+    validates against a call signal ledger (OFFER needs no unanswered
+    offer pending; ANSWER needs a pending offer; violations →
+    MP-CALL-001, rejected signals are never appended), enforces the §52
+    64 KiB payload cap with an over-64KiB rejection test, relays via
+    host broadcast / guest client push, and an is_self guard in
+    apply_peer_event stops a publisher's own signal from re-entering
+    its own receive path (self-echo test). RENEGOTIATE is specified as a
+    restart-REQUEST marker, not an SDP (§52.1: ≤2 KiB JSON with a
+    session-unique id; a mislabeled SDP can never fit and is rejected;
+    a valid marker conditionally resets the ledger — only a never-
+    completed exchange resets, so an in-flight ANSWER cannot be
+    poisoned MP-CALL-003). Six new ledger tests: never-completed reset,
+    completed-exchange preservation, answer-after-reset, marker
+    idempotency, >2 KiB rejection, exact-2 KiB acceptance. Frontend
+    (src/call/callSession.ts, ~600 lines): startRealCallSession builds
+    one peer connection per device — host=offerer, guest=answerer
+    (AGENTS §15); NON-TRICKLE ICE (waits icegatheringcomplete 5s,
+    candidates embedded in SDP — eliminates fire-and-forget send-order
+    hazards); applyRemoteSignal is internally SERIALIZED (queued
+    promise chain) so two cursor batches cannot interleave
+    setRemoteDescription; host-side glare guard skips a redundant
+    ANSWER at stable signaling state; wire recovery re-offers carry
+    iceRestart:true (a plain offer would reuse failed candidate
+    pairs); failed→immediate re-offer, disconnected→2.5s grace, 4s
+    anti-spam backoff; RENEGOTIATE pokes are never suppressed (a
+    suppressed poke deadlocks recovery — the restarted peer's cursor
+    pinned past all earlier offers). Both sides publish their marker at
+    session start; the host drops its own self-echo by session-unique
+    markerId, the guest drops all markers by role.
+    src/views/CinemaView.tsx runs the session lifecycle (key =
+    mode:role:privacy — camera/mic toggles deliberately excluded, PRD
+    §41 keeps them local track.enabled flips) with an index-based
+    signal cursor (mixed clock domains: submit stamps host_time_us,
+    receive stamps quic::monotonic_us — timestamps are unusable for
+    ordering; index cursor + shrink-reset + startup hold instead) and
+    nextPendingSignals() applies PER-ROLE COALESCING: guest keeps the
+    last OFFER at/after the last marker + trailing ICE; host keeps
+    ANSWER/ICE + the last marker unless an ANSWER follows or it is
+    own-id self-echo; malformed entries are consumed-but-skipped (§67:
+    skip, never crash). CallTile renders live remote video, remote
+    audio, and a PiP self-view (Lobby/ReadyCheck use presentation-only
+    null streams; the session lives in CinemaView alone). Gates:
+    cargo fmt/clippy -D warnings/cargo test 326 (0 fail), frontend
+    lint/vitest/tsc clean. Loopback self-test retained behind a
+    localhost+localStorage opt-in flag for diagnostics. NOT verifiable
+    here: a REAL two-device call (camera/mic permissions, Tailscale
+    direct path, Windows guest) → ⚠ EXTERNAL VERIFICATION PENDING.
+    Next permitted: Batch 13.
+
+Previous:
 🟨 BATCH 11 (PROTOCOL TRUTH & ADR FOUNDATION) COMPLETE (code-level).
     Audit finding P1/P11 closed: the wire protocol now matches an honest,
     ADR-ratified spec instead of a known-false one. ADR-0001 (accepted,

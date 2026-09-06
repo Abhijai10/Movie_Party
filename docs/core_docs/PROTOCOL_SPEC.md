@@ -1181,6 +1181,49 @@ Maximum payload:
 64 KiB
 ```
 
+## 52.1 RENEGOTIATE semantics
+
+`RENEGOTIATE` is NOT an SDP. It is a session-restart REQUEST marker —
+a small JSON object, never a session description:
+
+```
+{
+  "request": "renegotiate",
+  "v": 1,
+  "id": "s3-x7q9z"
+}
+```
+
+Rules:
+
+1. `RENEGOTIATE` payloads are capped at **2 KiB** (all other signal types
+   may use the full 64 KiB). A session description can never fit 2 KiB,
+   so a mislabeled SDP is rejected and the two meanings cannot be
+   confused. Oversized markers fail with `MP-CALL-001`.
+2. `id` is a session-unique identity string generated locally (monotonic
+   counter + random suffix). A device that sees its OWN marker echoed
+   back (the local snapshot contains every locally-published signal)
+   MUST NOT apply it; only a peer's marker is applied.
+3. A valid marker conditionally resets the call signal ledger: a
+   reset happens ONLY when an exchange was started but never completed
+   (`offer_pending` and no answer seen). A completed exchange is left
+   intact so an in-flight ANSWER cannot be poisoned (MP-CALL-003).
+4. Both devices publish their marker at call-session start (host and
+   guest), then the host publishes the OFFER. This unblocks a fresh
+   exchange regardless of what a previous session left pending and
+   pokes a still-live peer whose wire looks connected.
+
+## 52.2 Validation summary
+
+| Signal      | Valid when                                    | Ledger effect                    |
+| ----------- | --------------------------------------------- | -------------------------------- |
+| OFFER       | no unanswered offer pending                   | marks offer pending             |
+| ANSWER      | an offer is pending                           | marks exchange completed        |
+| ICE         | any time (late/duplicate candidates are no-op at the session layer) | none |
+| RENEGOTIATE | payload ≤ 2 KiB                               | conditional reset (see 52.1.3)  |
+
+All violations fail with `MP-CALL-001` (invalid call signal).
+
 ---
 
 # 53. CHAT_MESSAGE

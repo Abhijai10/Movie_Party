@@ -87,12 +87,16 @@ same day. Highest-impact findings:
    §67/§69 amended to match. Gates: fmt/clippy -D warnings/315 tests
    green. ⚠ Windows + two-device QUIC session: EXTERNAL VERIFICATION
    PENDING.
-2. 🔴 **P2 — The video call is a local loopback, not cross-device**: each
-   device creates two local RTCPeerConnections talking to each other;
-   real getUserMedia exists but only feeds the self-test; received remote
-   signals are stored but never applied; the call tile renders a
-   placeholder icon — no `<video>`/`<audio>` element exists in the app.
-   Real offer/answer/ICE over the existing QUIC relay — Batch 12.
+2. ✅ **P2 — The video call is a local loopback, not cross-device** — CLOSED
+   by Batch 12 (2026-09-05): each device now runs ONE real
+   RTCPeerConnection signalled over the QUIC relay (host=offerer,
+   guest=answerer; non-trickle ICE embedded in SDP; ledger-validated
+   signals with §52.1 RENEGOTIATE restart markers; per-role coalescing
+   cursor in the view; CallTile renders real remote video/audio + PiP
+   self-view). The loopback demo survives only behind the localhost
+   opt-in self-test flag. Gates green (326 Rust tests, lint/vitest/tsc
+   clean). ⚠ REAL two-device call (camera/mic permissions, Tailscale
+   direct path, Windows guest): EXTERNAL VERIFICATION PENDING.
 3. 🔴 **P3 — Provider Sync never dispatches canonical playback ops**:
    coordinator commits do not reach provider adapters (play/pause/seek
    commands exist with no runtime callers); provider position/buffer never
@@ -996,10 +1000,13 @@ A bare short room code is insufficient without adding a rendezvous/lookup servic
 
 ## Status
 
-✅ Local/remote state separation closed (Batch 10). 🔴 The deeper 2026-09-05
-audit finding (P2): the call itself is a local loopback — real cross-device
-offer/answer/ICE plus real remote video rendering is the remaining work
-(Batch 12).
+✅ Local/remote state separation closed (Batch 10). ✅ The deeper 2026-09-05
+audit finding (P2) CLOSED by Batch 12: real cross-device offer/answer/ICE
+over the QUIC relay with real remote video rendering now ships in
+`src/call/callSession.ts` + CinemaView's session lifecycle (ledger
+validation and §52.1 marker semantics in `src-tauri/src/call/mod.rs`;
+per-role coalescing cursor; CallTile `<video>`/`<audio>` rendering).
+⚠ REAL two-device call: EXTERNAL VERIFICATION PENDING.
 
 ## 13.1 Required separation
 
@@ -1767,8 +1774,18 @@ D1–D4 live in `docs/core_docs/V1_COMPLETION_PLAN.md`.
    fields enforced on receive; 256 KiB size limit enforced both ends;
    §67 malformed-input tests added; PROTOCOL_SPEC amended to match.
    ⚠ Windows/two-device QUIC verification pending.
-2. **Batch 12 — Real cross-device call** (P2): true offer/answer/ICE over
-   the existing QUIC relay; real remote video/audio rendering in the tile.
+2. ✅ **Batch 12 — Real cross-device call** (P2) — DONE 2026-09-05 (code
+   level): one RTCPeerConnection per device over the QUIC relay
+   (host=offerer, guest=answerer; non-trickle ICE embedded in SDP);
+   ledger-validated signals (OFFER/ANSWER state rules, §52 64 KiB cap,
+   is_self self-echo guard); §52.1 RENEGOTIATE restart markers (≤2 KiB,
+   session-unique id, conditional ledger reset that preserves a
+   completed exchange); serialized remote-signal application; wire
+   recovery re-offers with iceRestart + backoff; per-role coalescing
+   cursor in CinemaView; CallTile renders remote video/audio + PiP
+   self-view. Loopback demo behind localhost opt-in flag only.
+   ⚠ REAL two-device call verification pending (camera/mic permissions,
+   Tailscale direct path, Windows guest).
 3. **Batch 13 — Adaptive camera ladder** (P17): 480p20 → 240p10 → frozen,
    once-per-event degradation notice, movie-first priority policy.
 4. **Batch 14 — Provider Sync runtime completion** (P3): canonical commits
