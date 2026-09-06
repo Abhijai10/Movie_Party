@@ -43,29 +43,41 @@ Host binds to the Tailscale address only.
 
 # 3. SERIALIZATION
 
-Production serialization:
+Production serialization (amended by ADR-0001):
 
 ```
-Canonical CBOR
+JSON (UTF-8) with a u32 big-endian length prefix per QUIC stream message
 ```
 
-Debug tooling may render the same structures as JSON.
-
-CBOR maps use string keys in V1.
+Serde enum tags (`"type": "<MessageName>"`) discriminate messages on the
+wire. The numeric message-ID registry (§11) is the authoritative
+cross-version registry but is not carried on the wire in V1.
 
 Reason:
 
-- easier diagnostics;
-- human-readable packet dumps;
-- protocol traffic volume is tiny relative to movie traffic.
+- both ends ship from this single repository on the same cadence, so
+  interop with an independent CBOR client is not a V1 constraint;
+- JSON keeps packet dumps human-readable during QUIC bring-up debugging;
+- protocol traffic volume is tiny relative to movie traffic, so encoding
+  size is irrelevant at V1 scale.
 
-Future protocol versions may introduce compact numeric keys.
+Future protocol versions may introduce compact binary encodings and/or
+numeric keys; doing so requires a protocol minor bump plus §11-first
+registry planning (AGENTS §9), and per §68 no registered ID may ever be
+redefined.
+
+Original V1 draft locked Canonical CBOR (RFC 8949); the implementation
+shipped JSON from its first QUIC transport milestone and the divergence
+was ratified as the canonical format by ADR-0001 (Option B: amend the
+spec to match audited reality rather than destabilize the wire during
+V1 feature completion).
 
 ---
 
 # 4. BYTE ORDER
 
-Any explicit fixed-width binary integers outside CBOR:
+Any explicit fixed-width binary integers outside the serialized payload
+(length prefixes, magic numbers, chunk indices):
 
 ```
 network byte order / big endian
@@ -87,7 +99,13 @@ Any control message larger than this must be rejected:
 MP-PROTO-004 MESSAGE_TOO_LARGE
 ```
 
-Movie/file chunks are transported on dedicated streams and are not subject to this control-message limit.
+Enforcement (implemented, Batch 11): the length prefix is checked against
+the limit BEFORE any allocation on both ends — a peer advertising an
+oversized frame is rejected at the framing layer without reading the body.
+The same gate applies to locally-built frames on the send path.
+
+Movie/file chunks are transported on dedicated streams and are not subject
+to this control-message limit.
 
 ---
 
@@ -163,10 +181,13 @@ Every application message uses:
   "seq": 42,
   "sender": "device-id",
   "sent_mono_us": 125992311,
-  "type": 100,
+  "type": "ReadyState",
   "payload": {}
 }
 ```
+
+Per ADR-0001, `type` is a serde string tag in V1 (the §11 registry
+remains the authoritative numeric mapping for future encodings).
 
 Fields:
 
@@ -220,11 +241,17 @@ Not directly assumed to be comparable across devices.
 
 ## `type`
 
-Unsigned integer message type.
+Message type discriminator.
+
+V1 wire format: serde string tag (ADR-0001), e.g. `"ReadyState"`.
+
+The §11 numeric registry is authoritative for future numeric encodings;
+unknown discriminators (string or numeric) must fail parsing and be
+rejected per §67.
 
 ## `payload`
 
-CBOR map.
+JSON object (V1 wire format per ADR-0001).
 
 ---
 
@@ -1418,16 +1445,17 @@ Tailscale membership alone does not grant room access.
 
 # 67. FUZZ TEST REQUIREMENT
 
-Protocol parser must be fuzz tested for:
+Protocol parser must be fuzz/property tested for (V1 wire format is JSON
+per ADR-0001; a future binary encoding inherits the same requirement):
 
-- malformed CBOR;
-- oversized maps;
+- malformed frames (invalid JSON / malformed CBOR in future encodings);
+- oversized frames (length prefix above §5 limit → MP-PROTO-004);
 - missing fields;
 - negative values where unsigned required;
 - very large integers;
 - malformed UTF-8;
 - unknown message types;
-- duplicate map keys.
+- duplicate keys.
 
 Malformed peer input must not crash application.
 
@@ -1452,8 +1480,8 @@ increment minor if appropriate.
 Protocol V1 is complete when:
 
 - all message structs exist;
-- round-trip CBOR tests pass;
-- malformed message tests pass;
+- round-trip serialization tests pass (JSON per ADR-0001);
+- malformed message tests pass (§67 suite);
 - host/guest simulator passes;
 - playback operation idempotency passes;
 - reconnect protocol passes;

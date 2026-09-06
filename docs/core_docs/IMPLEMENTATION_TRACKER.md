@@ -14,6 +14,36 @@ It must be updated continuously.
 
 ```text
 Project State:
+🟨 BATCH 11 (PROTOCOL TRUTH & ADR FOUNDATION) COMPLETE (code-level).
+    Audit finding P1/P11 closed: the wire protocol now matches an honest,
+    ADR-ratified spec instead of a known-false one. ADR-0001 (accepted,
+    Option B) amends §3: JSON + u32-BE length prefix + serde string tags
+    is the canonical V1 format (the CBOR text was never implemented;
+    migrating during feature completion traded zero user value for wire
+    destabilization — full rationale, options, and rollback in
+    docs/architecture/adr/ADR-0001-wire-format.md). ADR-0002 aligns the
+    code's MessageType registry to §11 exactly: 61 registered IDs, zero
+    collisions (the old enum had ReadyState/BufferStatus/ControlRequest
+    squatting on the SCHEDULE 200–204 range), from_u16 parsing with
+    unknown-ID rejection, and machine-enforced spec-parity + uniqueness +
+    round-trip tests so drift cannot recur silently. The §5 256 KiB
+    control limit is now enforced at the framing layer on BOTH ends
+    (MP-PROTO-004 MESSAGE_TOO_LARGE; the old silent 2 MiB cap is gone,
+    oversized length prefixes rejected before any allocation) and every
+    EventEnvelope carries v_major/v_minor/room_id (§10), validated on the
+    guest receive path plus a room-match defense-in-depth check in
+    apply_peer_event. §67 malformed-input property tests added: oversized
+    frame (rejected pre-allocation), exact-256 KiB boundary acceptance,
+    unknown type tag, missing required fields (incl. legacy envelopes
+    missing the §10 fields → parse error), negative-where-unsigned, and
+    seq=0/stale-sequence rejection over live loopback QUIC. All gates
+    green: cargo fmt --check, clippy -D warnings, 315 Rust tests
+    (0 fail), PROTOCOL_SPEC §3/§4/§5/§10/§67/§69 amended to match
+    implementation. Not verifiable here: Windows + two-device QUIC
+    session → ⚠ EXTERNAL VERIFICATION PENDING. Batch 12 (real
+    cross-device call, P2) is next; it builds on the now-stable relay.
+
+Previous:
 🟨 V1 COMPLETION PLAN ISSUED — 2026-09-05 full-project audit found 18
     findings (P1–P18) and produced a 13-batch plan to V1
     (`docs/core_docs/V1_COMPLETION_PLAN.md`). The three biggest:

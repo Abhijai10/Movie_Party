@@ -70,15 +70,23 @@ The batch plan, estimates, and decision points live in
 (worklogs, closure audits, runbook, integration status) were deleted the
 same day. Highest-impact findings:
 
-1. 🔴 **P1 — Wire protocol violates the locked PROTOCOL_SPEC**: production
-   uses JSON + a 2 MiB limit + string serde tags; the spec mandates
-   Canonical CBOR + 256 KiB + numeric IDs, and `MAX_CONTROL_MESSAGE_BYTES`
-   (256 KiB) sits unused in `protocol/mod.rs`. The wire envelope also lacks
-   v_major/v_minor/room_id, and message IDs collide with the spec registry
-   (`ReadyState=200 / BufferStatus=201 / ControlRequest=202` redefine the
-   SCHEDULE_CREATE/ACCEPT/UPDATE range — §68 forbids redefining message
-   IDs). Resolution requires ADR-0001 (migrate to CBOR or amend the spec)
-   — Batch 11.
+1. ✅ **P1 — Wire protocol violates the locked PROTOCOL_SPEC** — FIXED in
+   Batch 11 (2026-02-14). Resolution was D1 Option B: ADR-0001
+   (docs/architecture/adr/ADR-0001-wire-format.md, Accepted) amends the
+   spec to match the audited reality — JSON + u32-BE length prefix +
+   serde string tags is canonical V1; the CBOR text was never implemented
+   and migrating during feature completion would have traded zero user
+   value for wire destabilization. The 256 KiB §5 limit is now enforced
+   at the framing layer on both ends (MP-PROTO-004, was a silent 2 MiB
+   cap); every EventEnvelope carries v_major/v_minor/room_id (§10),
+   validated on receive plus a room-match check in apply_peer_event;
+   ADR-0002 aligned the MessageType registry to §11 exactly (61 IDs, zero
+   collisions — the 200–204 squatters moved to their spec-assigned IDs);
+   §67 malformed-input property tests added (oversized/unknown-type/
+   missing-field/bad-seq/negative-unsigned). PROTOCOL_SPEC §3/§4/§5/§10/
+   §67/§69 amended to match. Gates: fmt/clippy -D warnings/315 tests
+   green. ⚠ Windows + two-device QUIC session: EXTERNAL VERIFICATION
+   PENDING.
 2. 🔴 **P2 — The video call is a local loopback, not cross-device**: each
    device creates two local RTCPeerConnections talking to each other;
    real getUserMedia exists but only feeds the self-test; received remote
@@ -112,8 +120,11 @@ same day. Highest-impact findings:
    "proof" is an #[ignore] test that shells out to ffmpeg. Phases 20–26
    have no production code — Batches 19–21 (diagnostic-first, honest DRM
    reality per PRD §109).
-9. 🟡 **P11 — Zero ADRs exist** (only the template) while multiple locked
-   decisions deviate undocumented (wire format, chat sizes) — Batch 11.
+9. ✅ **P11 — Zero ADRs exist** — FIXED in Batch 11: ADR-0001 (wire format)
+   and ADR-0002 (message-ID registry) are Accepted with full evidence,
+   options, rollback, and test plans; both follow
+   docs/architecture/adr/ADR_TEMPLATE.md. Chat-size and other deviations
+   are queued for ADRs as their batches land (Batch 17 per the plan).
 10. 🟡 **P12/P13 — Release/watcher gaps**: no CSP, no release cargo
     profile, no dependency audits in CI, macOS signing/notarization
     absent; Chrome-crash + player-failure watchers still unwired
@@ -1750,9 +1761,12 @@ items are done at the code level). The current order is the batch plan
 from the full-project audit; full detail, estimates, and decision points
 D1–D4 live in `docs/core_docs/V1_COMPLETION_PLAN.md`.
 
-1. **Batch 11 — Protocol truth & ADR foundation** (P1/P11): decide D1
-   (CBOR vs ADR-amended JSON), fix message-ID collisions, envelope
-   version/room fields, size-limit enforcement, malformed-input tests.
+1. ✅ **Batch 11 — Protocol truth & ADR foundation** (P1/P11) — DONE
+   2026-02-14: D1 decided as Option B via ADR-0001 (JSON canonical);
+   ADR-0002 fixed the message-ID collisions; envelope version/room
+   fields enforced on receive; 256 KiB size limit enforced both ends;
+   §67 malformed-input tests added; PROTOCOL_SPEC amended to match.
+   ⚠ Windows/two-device QUIC verification pending.
 2. **Batch 12 — Real cross-device call** (P2): true offer/answer/ICE over
    the existing QUIC relay; real remote video/audio rendering in the tile.
 3. **Batch 13 — Adaptive camera ladder** (P17): 480p20 → 240p10 → frozen,
