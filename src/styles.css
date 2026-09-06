@@ -3824,6 +3824,44 @@ input[type=range].mp-range::-webkit-slider-thumb {
   font-size: 1.55rem;
 }
 
+/* Batch 12: live remote media fills the stage; placeholder/avatar render
+   only when there is no wire video to show. */
+.camera-remote-video {
+  grid-area: 1 / 1;
+  width: 100%;
+  height: 100%;
+  min-height: 112px;
+  object-fit: cover;
+  border-radius: 12px;
+  background: rgba(5, 5, 11, 0.6);
+}
+
+/* Small self-view (PiP) pinned bottom-right of the stage; muted by
+   construction so it never echoes locally. */
+.camera-self-view {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 2;
+  width: 64px;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border: 1px solid rgba(159, 122, 234, 0.4);
+  border-radius: 8px;
+  background: rgba(5, 5, 11, 0.72);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.45);
+}
+
+.camera-card.is-minimized .camera-self-view {
+  width: 40px;
+  right: 4px;
+  bottom: 4px;
+}
+
+.camera-remote-audio {
+  display: none;
+}
+
 .camera-card.is-minimized {
   width: 144px;
   min-width: 144px;

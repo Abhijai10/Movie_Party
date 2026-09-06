@@ -1,5 +1,10 @@
 import { runLocalPeerConnectionLoopback } from "../call/webrtc";
 import {
+  nextPendingSignals,
+  startRealCallSession,
+  type LiveCallSession,
+} from "../call/callSession";
+import {
   pausePlayback,
   attachNativeVideoSurface,
   detachNativeVideoSurface,
@@ -52,6 +57,29 @@ const chatBodyLimitBytes = 2_000;
 const privacyNoticeMs = 2_200;
 const ghostNoticeMs = 800;
 
+/**
+ * Batch 12: the production call path is the real cross-device session.
+ * The loopback self-test stays available only as a dev diagnostic on
+ * localhost behind an explicit opt-in flag (AGENTS §30: unfinished/
+ * diagnostic features behind flags), so default behavior never silently
+ * falls back to a fake call (AGENTS §29).
+ */
+function isCallLoopbackSelfTestEnabled(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  const isLocalDev =
+    window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+  if (!isLocalDev) {
+    return false;
+  }
+  try {
+    return window.localStorage.getItem("mp:call-loopback-selftest") === "1";
+  } catch {
+    return false;
+  }
+}
+
 function formatMs(ms: number): string {
   const totalSeconds = Math.floor(ms / 1_000);
   const hours = Math.floor(totalSeconds / 3_600);
@@ -78,8 +106,26 @@ export function CinemaView({
   const [hasUnreadChat, setHasUnreadChat] = useState(false);
   const [cameraManuallyEnabled, setCameraManuallyEnabled] = useState(false);
   const [microphoneManuallyEnabled, setMicrophoneManuallyEnabled] = useState(false);
+  const [callLocalStream, setCallLocalStream] = useState<MediaStream | null>(null);
+  const [callRemoteStream, setCallRemoteStream] = useState<MediaStream | null>(null);
+  /**
+   * Mirrors `callSessionRef.current !== null` as state so the signal-cursor
+   * effect re-runs when a held batch (signals that arrived while the
+   * session was still starting) must flush the moment the session goes
+   * live — callSignals alone would not change at that instant.
+   */
+  const [callSessionLive, setCallSessionLive] = useState(false);
   const prefersReducedMotion = useReducedMotion();
   const callSessionKey = useRef("");
+  const callSessionRef = useRef<LiveCallSession | null>(null);
+  const callSignalCursorRef = useRef(0);
+  /**
+   * While true, the signal-cursor effect holds: a session is starting and
+   * signals arriving in the interim (e.g. the host's OFFER while the
+   * guest's session is still acquiring media) must land on the fresh
+   * session rather than being skipped as stale.
+   */
+  const callSessionStartingRef = useRef(false);
   const controlsTimer = useRef<number | null>(null);
   const previousChatLength = useRef(snapshot.chat.length);
   const chatPreviewTimer = useRef<number | null>(null);
@@ -248,10 +294,28 @@ export function CinemaView({
     }
   };
 
+  // ── Batch 12: real cross-device call session ───────────────────────────
+  //
+  // Lifecycle effect: starts ONE RTCPeerConnection per call configuration.
+  // Host offers; guest answers. The key deliberately EXCLUDES camera/mic
+  // toggles — PRD §41 keeps those local-only (track.enabled, no
+  // renegotiation). Mode change or privacy tears the session down; a
+  // restart asks the offerer for a fresh exchange via a RENEGOTIATE
+  // marker (the guest may restart without the host touching anything,
+  // so "guest always answers" cannot alone cover restarts).
+  //
+  // Media effects after start (acquire, publish OFFER / RENEGOTIATE) go
+  // through the session module; this effect only owns create/teardown.
   useEffect(() => {
-    const nextKey = `${callMode}:${String(localCameraEnabled)}:${String(localMicrophoneEnabled)}:${String(isPrivacyMode)}`;
+    const nextKey = `${callMode}:${isHost ? "HOST" : "GUEST"}:${String(isPrivacyMode)}`;
     if (callMode === "OFF" || isPrivacyMode) {
       callSessionKey.current = "";
+      callSessionRef.current?.close();
+      callSessionRef.current = null;
+      callSessionStartingRef.current = false;
+      setCallSessionLive(false);
+      setCallLocalStream(null);
+      setCallRemoteStream(null);
       return;
     }
     if (callSessionKey.current === nextKey) {
@@ -259,35 +323,175 @@ export function CinemaView({
     }
 
     callSessionKey.current = nextKey;
-    const controller = new AbortController();
-    void runLocalPeerConnectionLoopback(
+    callSessionRef.current?.close();
+    callSessionRef.current = null;
+    setCallSessionLive(false);
+    setCallLocalStream(null);
+    setCallRemoteStream(null);
+    // Hold the signal cursor from the current list length: everything
+    // already in the list belongs to the previous exchange. Signals
+    // arriving while THIS session is starting must apply to it, so the
+    // cursor effect must not advance past this base until the session is
+    // live.
+    callSignalCursorRef.current = snapshot.callSignals.length;
+    callSessionStartingRef.current = true;
+
+    if (isCallLoopbackSelfTestEnabled()) {
+      // Dev diagnostic path (localhost + explicit opt-in flag): the legacy
+      // two-connection loopback self-test, unchanged. No live session
+      // exists, so release the startup hold immediately.
+      callSessionStartingRef.current = false;
+      const controller = new AbortController();
+      void runLocalPeerConnectionLoopback(
+        callMode,
+        localCameraEnabled,
+        localMicrophoneEnabled,
+        async (signal) => {
+          const next = await submitCallSignal(signal);
+          if (next) {
+            onSnapshot(next);
+          }
+        },
+        controller.signal,
+      ).then((result) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        if (!result.connected) {
+          setPrivacyNotice(
+            result.status === "unavailable"
+              ? `Call unavailable${result.errorCode ? ` (${result.errorCode})` : ""}.`
+              : "Call degraded. Movie playback remains prioritized.",
+          );
+        }
+      });
+      return () => {
+        controller.abort();
+      };
+    }
+
+    let cancelled = false;
+    void startRealCallSession(
+      isHost ? "HOST" : "GUEST",
       callMode,
       localCameraEnabled,
       localMicrophoneEnabled,
-      async (signal) => {
-        const next = await submitCallSignal(signal);
-        if (next) {
-          onSnapshot(next);
-        }
+      {
+        onSignal: async (signal) => {
+          const next = await submitCallSignal(signal);
+          if (next) {
+            onSnapshot(next);
+          }
+        },
+        onStatusChange: (status) => {
+          if (status === "degraded") {
+            setPrivacyNotice("Call degraded. Movie playback remains prioritized.");
+          }
+        },
       },
-      controller.signal,
-    ).then((result) => {
-      if (controller.signal.aborted) {
-        return;
-      }
-      if (!result.connected) {
-        setPrivacyNotice(
-          result.status === "unavailable"
-            ? `Call unavailable${result.errorCode ? ` (${result.errorCode})` : ""}.`
-            : "Call degraded. Movie playback remains prioritized.",
-        );
-      }
-    });
+    )
+      .then((session) => {
+        if (cancelled) {
+          session.close();
+          return;
+        }
+        callSessionRef.current = session;
+        setCallSessionLive(true);
+        // Startup is complete: the next signal-cursor run may advance
+        // freely; entries at/before the base were skipped on purpose.
+        callSessionStartingRef.current = false;
+        setCallLocalStream(session.localStream);
+        setCallRemoteStream(session.remoteStream);
+        if (!session.usedRealMedia && session.mediaErrorCode) {
+          setPrivacyNotice(
+            session.mediaErrorCode === "MP-CALL-011"
+              ? "Camera/microphone permission denied. Voice/video call is off; movie playback is unaffected."
+              : `Call unavailable (${session.mediaErrorCode}). Movie playback remains prioritized.`,
+          );
+        }
+      })
+      .catch((error: unknown) => {
+        if (cancelled) {
+          return;
+        }
+        callSessionStartingRef.current = false;
+        setCallSessionLive(false);
+        const errorCode =
+          typeof error === "object" && error !== null && "errorCode" in error
+            ? String((error as { errorCode: unknown }).errorCode)
+            : "MP-CALL-015";
+        setPrivacyNotice(`Call unavailable (${errorCode}). Movie playback remains prioritized.`);
+      });
 
     return () => {
-      controller.abort();
+      cancelled = true;
+      callSessionStartingRef.current = false;
+      setCallSessionLive(false);
+      callSessionRef.current?.close();
+      callSessionRef.current = null;
     };
-  }, [callMode, localCameraEnabled, localMicrophoneEnabled, isPrivacyMode, onSnapshot]);
+    // onSnapshot is a stable AppShell callback; the deps are the session
+    // identity. localCameraEnabled/localMicrophoneEnabled are read at
+    // session start (initial track.enabled), then toggles stay local.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [callMode, isHost, isPrivacyMode]);
+
+  // Signal cursor effect: applies peer-originated signals from the
+  // snapshot to the live session. The cursor is snapshot-index-based —
+  // never timestamps (submit uses host_time_us, receive uses
+  // quic::monotonic_us — mixed clock domains) and never string equality
+  // (a renegotiation legitimately repeats a signal type). The host
+  // appends monotonically; a SHRINK means set_call_mode cleared the list
+  // and the cursor resets with it.
+  useEffect(() => {
+    const cursor = callSignalCursorRef.current;
+    const signals = snapshot.callSignals;
+    const session = callSessionRef.current;
+
+    if (signals.length < cursor) {
+      // The backend cleared the list (mode change): start over.
+      callSignalCursorRef.current = 0;
+      return;
+    }
+    if (!session) {
+      // No live session (off/privacy/still starting): keep the cursor
+      // pinned to the list so stale signals never replay into a future
+      // session — EXCEPT hold during session startup, when the cursor
+      // must not advance past signals the fresh session needs (the
+      // lifecycle effect pinned it at session start).
+      if (callSessionStartingRef.current) {
+        return;
+      }
+      callSignalCursorRef.current = signals.length;
+      return;
+    }
+
+    const { pending, nextCursor } = nextPendingSignals(
+      signals,
+      cursor,
+      isHost ? "HOST" : "GUEST",
+      { ownMarkerId: session.markerId },
+    );
+    callSignalCursorRef.current = nextCursor;
+    if (pending.length > 0) {
+      // Apply the coalesced batch SEQUENTIALLY: a marker poke must land on
+      // the session before a later OFFER it triggered, and the guest's
+      // answer to an OFFER must not race the ICE batch that follows it.
+      const applySequentially = async () => {
+        for (const signal of pending) {
+          try {
+            await session.applyRemoteSignal(signal);
+          } catch {
+            setPrivacyNotice("Call degraded. Movie playback remains prioritized.");
+          }
+        }
+      };
+      void applySequentially();
+    }
+    // callSessionLive re-triggers the held-batch flush the moment a
+    // starting session goes live (callSignals alone would not change).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshot.callSignals, callSessionLive]);
 
   useEffect(() => {
     let noticeTimeout: number | undefined;
@@ -471,6 +675,8 @@ export function CinemaView({
           remoteCameraEnabled={peer?.cameraEnabled ?? false}
           remoteMicrophoneEnabled={peer?.microphoneEnabled ?? false}
           remoteConnected={peer?.connected ?? false}
+          remoteStream={callRemoteStream}
+          localStream={callLocalStream}
           session={callTileSession}
           onSessionChange={onCallTileSessionChange}
         />

@@ -362,6 +362,8 @@ export function LobbyView({
         remoteCameraEnabled={peer?.cameraEnabled ?? false}
         remoteMicrophoneEnabled={peer?.microphoneEnabled ?? false}
         remoteConnected={peer?.connected ?? false}
+        remoteStream={null}
+        localStream={null}
         session={callTileSession}
         onSessionChange={onCallTileSessionChange}
       />

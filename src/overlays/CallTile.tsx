@@ -15,6 +15,10 @@ type CallTileProps = {
   remoteCameraEnabled: boolean;
   remoteMicrophoneEnabled: boolean;
   remoteConnected: boolean;
+  /** Live remote media from the cross-device session (Batch 12). */
+  remoteStream: MediaStream | null;
+  /** Live self-view media (muted; never plays locally). */
+  localStream: MediaStream | null;
   session: CallTileSessionState;
   onSessionChange: (next: CallTileSessionState) => void;
 };
@@ -24,10 +28,15 @@ export function CallTile({
   remoteCameraEnabled,
   remoteMicrophoneEnabled,
   remoteConnected,
+  remoteStream,
+  localStream,
   session,
   onSessionChange,
 }: CallTileProps) {
   const tileRef = useRef<HTMLElement>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const selfViewRef = useRef<HTMLVideoElement | null>(null);
   const dragOffset = useRef({ x: 0, y: 0 });
   const activePointerId = useRef<number | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -36,6 +45,63 @@ export function CallTile({
     remoteMicrophoneEnabled,
     remoteConnected,
   );
+  const hasRemoteVideoTrack =
+    remoteStream?.getVideoTracks().some((track) => track.readyState === "live") ?? false;
+  const hasRemoteAudioTrack =
+    remoteStream?.getAudioTracks().some((track) => track.readyState === "live") ?? false;
+  // Presentation matrix:
+  // - wire video + remote camera on  → live <video>
+  // - remote camera on, no wire yet  → placeholder icon (pre-connect)
+  // - remote camera off             → avatar (element unmounts; the peer
+  //   re-enabling remounts it and autoplay resumes immediately)
+  const showLiveRemoteVideo = hasRemoteVideoTrack && remote.showVideo;
+
+  // Attach live media: the wire has media whenever the session exists, so
+  // the remote video renders whenever the peer actually sends frames.
+  // remoteCameraEnabled only governs presentation when no wire media
+  // exists yet (keep the avatar/muted indicators meaningful pre-connect).
+  // showLiveRemoteVideo is a dep because the <video> element UNMOUNTS on
+  // camera-off and REMOUNTS on camera-back-on — a remounted element has
+  // no srcObject until this effect re-runs, and remoteStream alone would
+  // not change in that flip.
+  useEffect(() => {
+    const element = remoteVideoRef.current;
+    if (!element) {
+      return;
+    }
+    if (element.srcObject !== remoteStream) {
+      element.srcObject = remoteStream;
+    }
+    if (remoteStream) {
+      void element.play().catch(() => undefined);
+    }
+  }, [remoteStream, showLiveRemoteVideo]);
+
+  useEffect(() => {
+    const element = remoteAudioRef.current;
+    if (!element) {
+      return;
+    }
+    if (element.srcObject !== remoteStream) {
+      element.srcObject = remoteStream;
+    }
+    if (remoteStream) {
+      void element.play().catch(() => undefined);
+    }
+  }, [remoteStream]);
+
+  useEffect(() => {
+    const element = selfViewRef.current;
+    if (!element) {
+      return;
+    }
+    if (element.srcObject !== localStream) {
+      element.srcObject = localStream;
+    }
+    if (localStream) {
+      void element.play().catch(() => undefined);
+    }
+  }, [localStream]);
 
   const clampPosition = useCallback((x: number, y: number) => {
     const rect = tileRef.current?.getBoundingClientRect();
@@ -165,7 +231,15 @@ export function CallTile({
       )}
 
       <div className="camera-video-stage">
-        {remote.showVideo ? (
+        {showLiveRemoteVideo ? (
+          <video
+            ref={remoteVideoRef}
+            className="camera-remote-video"
+            autoPlay
+            playsInline
+            aria-label={`${peerName} video`}
+          />
+        ) : remote.showVideo ? (
           <div className="camera-video-placeholder" aria-label={`${peerName} video`}>
             <Video className="w-7 h-7" strokeWidth={1.4} />
           </div>
@@ -174,10 +248,23 @@ export function CallTile({
             {initials}
           </div>
         )}
+        {/* Remote audio: attached whenever wire media exists; autoplay
+            policy is satisfied by the user gesture that started the call. */}
+        <audio ref={remoteAudioRef} autoPlay aria-label={`${peerName} audio`} />
         {remote.showMutedIndicator ? (
           <span className="remote-muted-indicator" aria-label={`${peerName} microphone muted`}>
             <MicOff className="w-3.5 h-3.5" strokeWidth={1.8} />
           </span>
+        ) : null}
+        {localStream && localStream.getVideoTracks().length > 0 ? (
+          <video
+            ref={selfViewRef}
+            className="camera-self-view"
+            autoPlay
+            playsInline
+            muted
+            aria-label="Your camera preview"
+          />
         ) : null}
         {session.isMinimized ? (
           <button
