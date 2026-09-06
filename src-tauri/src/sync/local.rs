@@ -56,6 +56,10 @@ pub struct LocalSyncCoordinator {
     /// fn(&LocalSyncCoordinator, &str, &broadcast::Sender<EventEnvelope>)
     pub coordinator_tx: broadcast::Sender<crate::network::quic::EventEnvelope>,
     pub coordinator_local_id: String,
+    /// Room whose envelopes this coordinator broadcasts (§10 room_id).
+    /// Host setup assigns this from the room credentials; the broadcast fn
+    /// pointer cannot capture state, so it reads the room from here.
+    pub coordinator_room_id: String,
     pub coordinator_broadcast_fn: Option<
         fn(&LocalSyncCoordinator, &str, &broadcast::Sender<crate::network::quic::EventEnvelope>),
     >,
@@ -78,6 +82,7 @@ impl LocalSyncCoordinator {
                 tx
             },
             coordinator_local_id: String::new(),
+            coordinator_room_id: String::new(),
             coordinator_broadcast_fn: None,
         }
     }

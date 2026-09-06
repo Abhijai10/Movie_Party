@@ -1814,12 +1814,16 @@ impl AppRuntime {
             let my_id = state.local_participant.id.clone();
             let mut coord = LocalSyncCoordinator::new();
             coord.coordinator_local_id = my_id;
+            coord.coordinator_room_id = credentials.room_id.clone();
             coord.coordinator_tx = event_tx_arc.as_ref().clone();
             coord.coordinator_broadcast_fn = Some(
                 |coord_arg: &LocalSyncCoordinator,
                  sender: &str,
                  tx: &broadcast::Sender<EventEnvelope>| {
                     let _ = tx.send(EventEnvelope {
+                        v_major: crate::protocol::ENVELOPE_V_MAJOR,
+                        v_minor: crate::protocol::ENVELOPE_V_MINOR,
+                        room_id: coord_arg.coordinator_room_id.clone(),
                         seq: coord_arg.coordinator_event_seq,
                         sender: sender.to_string(),
                         sent_mono_us: monotonic_us(),
@@ -2836,6 +2840,19 @@ impl AppRuntime {
         let snapshot = {
             let mut state = inner.lock();
 
+            // §10 / AGENTS.md §10: an event envelope from another room must
+            // never be applied, even though the QUIC layer already checked
+            // the version and room presence. Host-side local broadcasts
+            // (sender == self) skip this because the host trusts its own
+            // coordinator-built envelopes.
+            if sender != &state.local_participant.id {
+                if let Some(credentials) = state.credentials.as_ref() {
+                    if envelope.room_id != credentials.room_id {
+                        return;
+                    }
+                }
+            }
+
             if sender != &state.local_participant.id {
                 if seq
                     <= state
@@ -3377,6 +3394,13 @@ impl AppRuntime {
                 coordinator.coordinator_event_seq
             };
             let envelope = EventEnvelope {
+                v_major: crate::protocol::ENVELOPE_V_MAJOR,
+                v_minor: crate::protocol::ENVELOPE_V_MINOR,
+                room_id: state
+                    .credentials
+                    .as_ref()
+                    .map(|c| c.room_id.clone())
+                    .unwrap_or_default(),
                 seq,
                 sender: state.local_participant.id.clone(),
                 sent_mono_us: monotonic_us(),
@@ -6704,6 +6728,9 @@ mod tests {
         }
 
         let envelope = EventEnvelope {
+            v_major: crate::protocol::ENVELOPE_V_MAJOR,
+            v_minor: crate::protocol::ENVELOPE_V_MINOR,
+            room_id: "test-room".to_string(),
             seq: 1,
             sender: "host-id".to_string(),
             sent_mono_us: 1,
