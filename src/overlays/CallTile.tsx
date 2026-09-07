@@ -47,8 +47,6 @@ export function CallTile({
   );
   const hasRemoteVideoTrack =
     remoteStream?.getVideoTracks().some((track) => track.readyState === "live") ?? false;
-  const hasRemoteAudioTrack =
-    remoteStream?.getAudioTracks().some((track) => track.readyState === "live") ?? false;
   // Presentation matrix:
   // - wire video + remote camera on  → live <video>
   // - remote camera on, no wire yet  → placeholder icon (pre-connect)

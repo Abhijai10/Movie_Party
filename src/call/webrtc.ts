@@ -25,7 +25,14 @@ export type LocalCallLoopbackResult = {
   errorCode: string | null;
 };
 
-export function buildCallMediaIntent(mode: CallMode, cameraEnabled: boolean): CallMediaIntent {
+/**
+ * What the wire can carry for a call mode — the acquisition contract.
+ * Driven by MODE only: PRD §41 toggles are local track.enabled flips,
+ * so a camera enabled mid-session must already have a track to enable
+ * (re-acquiring would need a renegotiation). The initial enabled state
+ * is applied to the acquired tracks, not to this intent.
+ */
+export function buildCallMediaIntent(mode: CallMode): CallMediaIntent {
   if (mode === "OFF") {
     return {
       audio: false,
@@ -36,7 +43,7 @@ export function buildCallMediaIntent(mode: CallMode, cameraEnabled: boolean): Ca
   return {
     audio: true,
     video:
-      mode === "VIDEO_VOICE" && cameraEnabled
+      mode === "VIDEO_VOICE"
         ? {
             width: { ideal: 640, max: 640 },
             height: { ideal: 360, max: 360 },
@@ -277,16 +284,16 @@ export async function acquireRealCallMedia(
     return { stream: new MediaStream(), usedRealMedia: false, errorCode: null };
   }
 
+  // Acquisition is driven by the MODE (what the wire can carry), not the
+  // current enabled state: a VIDEO_VOICE session acquires BOTH track kinds
+  // even when the camera starts disabled, because PRD §41 toggles are
+  // local track.enabled flips — a camera enabled mid-session must already
+  // have a track to enable (re-acquiring would need a renegotiation).
+  // The initial enabled state is applied to the acquired tracks below.
+  const intent = buildCallMediaIntent(mode);
   const constraints: MediaStreamConstraints = {
-    audio: { echoCancellation: true, noiseSuppression: true },
-    video:
-      mode === "VIDEO_VOICE" && cameraEnabled
-        ? {
-            width: { ideal: 640, max: 640 },
-            height: { ideal: 360, max: 360 },
-            frameRate: { ideal: 15, max: 20 },
-          }
-        : false,
+    audio: intent.audio ? { echoCancellation: true, noiseSuppression: true } : false,
+    video: intent.video,
   };
 
   try {
@@ -297,6 +304,9 @@ export async function acquireRealCallMedia(
     const stream = await devices.getUserMedia(constraints);
     for (const track of stream.getAudioTracks()) {
       track.enabled = microphoneEnabled;
+    }
+    for (const track of stream.getVideoTracks()) {
+      track.enabled = cameraEnabled;
     }
     return { stream, usedRealMedia: true, errorCode: null };
   } catch (error) {

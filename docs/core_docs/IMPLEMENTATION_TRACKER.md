@@ -49,15 +49,18 @@ Project State:
     markerId, the guest drops all markers by role.
     src/views/CinemaView.tsx runs the session lifecycle (key =
     mode:role:privacy — camera/mic toggles deliberately excluded, PRD
-    §41 keeps them local track.enabled flips) with an index-based
-    signal cursor (mixed clock domains: submit stamps host_time_us,
-    receive stamps quic::monotonic_us — timestamps are unusable for
-    ordering; index cursor + shrink-reset + startup hold instead) and
-    nextPendingSignals() applies PER-ROLE COALESCING: guest keeps the
-    last OFFER at/after the last marker + trailing ICE; host keeps
-    ANSWER/ICE + the last marker unless an ANSWER follows or it is
-    own-id self-echo; malformed entries are consumed-but-skipped (§67:
-    skip, never crash). CallTile renders live remote video, remote
+    §41 keeps them local track.enabled flips — and a dedicated toggle
+    effect pushes every later camera/mic change to the live session's
+    tracks; acquisition is MODE-driven so a camera enabled mid-session
+    already has a track to flip, never a renegotiation) with an
+    index-based signal cursor (mixed clock domains: submit stamps
+    host_time_us, receive stamps quic::monotonic_us — timestamps are
+    unusable for ordering; index cursor + shrink-reset + startup hold
+    instead) and nextPendingSignals() applies PER-ROLE COALESCING:
+    guest keeps the last OFFER at/after the last marker + trailing ICE;
+    host keeps ANSWER/ICE + the last marker unless an ANSWER follows or
+    it is own-id self-echo; malformed entries are consumed-but-skipped
+    (§67: skip, never crash). CallTile renders live remote video, remote
     audio, and a PiP self-view (Lobby/ReadyCheck use presentation-only
     null streams; the session lives in CinemaView alone). Gates:
     cargo fmt/clippy -D warnings/cargo test 326 (0 fail), frontend

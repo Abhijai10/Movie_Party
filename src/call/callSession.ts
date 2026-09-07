@@ -198,8 +198,13 @@ export type LiveCallSession = {
   mediaErrorCode: string | null;
   /** Apply a peer-originated signal (cursor-guarded by the view). */
   applyRemoteSignal: (signal: WellFormedCallSignal) => Promise<void>;
-  /** Local-only media toggle — never renegotiates (PRD §41). */
-  setLocalTracksEnabled: (enabled: boolean) => void;
+  /**
+   * Local-only media toggle — never renegotiates (PRD §41). Sets
+   * track.enabled per kind; a disabled-at-start track that is later
+   * enabled already flows (it was acquired and added — enabled=false
+   * only mutes it).
+   */
+  setLocalTracksEnabled: (cameraEnabled: boolean, microphoneEnabled: boolean) => void;
   /** Tear down media + connection. Idempotent. */
   close: () => void;
   /** Wire status. */
@@ -453,9 +458,12 @@ export async function startRealCallSession(
     usedRealMedia: media.usedRealMedia,
     mediaErrorCode: media.errorCode,
     applyRemoteSignal,
-    setLocalTracksEnabled(enabled: boolean) {
-      for (const track of localStream.getTracks()) {
-        track.enabled = enabled;
+    setLocalTracksEnabled(cameraEnabled: boolean, microphoneEnabled: boolean) {
+      for (const track of localStream.getVideoTracks()) {
+        track.enabled = cameraEnabled;
+      }
+      for (const track of localStream.getAudioTracks()) {
+        track.enabled = microphoneEnabled;
       }
     },
     close() {
@@ -525,7 +533,8 @@ const DISCONNECT_REOFFER_GRACE_MS = 2_500;
  * echoed marker while honoring the peer's.
  */
 function generateMarkerId(): string {
-  return `s${++markerIdCounter}-${Math.random().toString(36).slice(2, 8)}`;
+  markerIdCounter += 1;
+  return `s${String(markerIdCounter)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 let markerIdCounter = 0;
 
@@ -571,7 +580,7 @@ function parseIceCandidate(data: string): RTCIceCandidateInit {
   if (typeof candidate !== "string" && typeof candidate !== "undefined") {
     throw new CallSessionError("MP-CALL-005", "malformed ICE payload");
   }
-  return parsed as RTCIceCandidateInit;
+  return parsed;
 }
 
 async function waitForNonTrickleIce(

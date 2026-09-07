@@ -2,8 +2,12 @@ import { describe, expect, it } from "vitest";
 import { buildCallMediaIntent } from "./webrtc";
 
 describe("buildCallMediaIntent", () => {
-  it("keeps an audio track requested while the microphone starts muted", () => {
-    const intent = buildCallMediaIntent("VIDEO_VOICE", true);
+  it("requests both track kinds for VIDEO_VOICE (mode drives acquisition, not the enabled state)", () => {
+    // PRD §41: toggles are local track.enabled flips. A camera enabled
+    // mid-session must already have a track to enable — re-acquiring
+    // would need a renegotiation — so VIDEO_VOICE acquires video even
+    // when the camera starts disabled.
+    const intent = buildCallMediaIntent("VIDEO_VOICE");
 
     expect(intent.audio).toBe(true);
     expect(intent.video).toEqual({
@@ -14,11 +18,11 @@ describe("buildCallMediaIntent", () => {
   });
 
   it("supports voice only and off modes", () => {
-    expect(buildCallMediaIntent("VOICE_ONLY", true)).toEqual({
+    expect(buildCallMediaIntent("VOICE_ONLY")).toEqual({
       audio: true,
       video: false,
     });
-    expect(buildCallMediaIntent("OFF", true)).toEqual({
+    expect(buildCallMediaIntent("OFF")).toEqual({
       audio: false,
       video: false,
     });

@@ -418,7 +418,7 @@ export function CinemaView({
         setCallSessionLive(false);
         const errorCode =
           typeof error === "object" && error !== null && "errorCode" in error
-            ? String((error as { errorCode: unknown }).errorCode)
+            ? String(error.errorCode)
             : "MP-CALL-015";
         setPrivacyNotice(`Call unavailable (${errorCode}). Movie playback remains prioritized.`);
       });
@@ -492,6 +492,21 @@ export function CinemaView({
     // starting session goes live (callSignals alone would not change).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [snapshot.callSignals, callSessionLive]);
+
+  // Local media toggle sync (PRD §41): camera/mic toggles are LOCAL-ONLY
+  // track.enabled flips — they never renegotiate the wire. The session
+  // reads the enabled state at start (initial track.enabled in
+  // acquireRealCallMedia); every later change must be pushed to the live
+  // session's tracks or the remote peer keeps receiving stale media (the
+  // backend state update only drives the remote INDICATOR, not media).
+  // callSessionLive re-runs this at session start so the fresh session
+  // immediately reflects any toggle made while it was starting.
+  useEffect(() => {
+    callSessionRef.current?.setLocalTracksEnabled(
+      localCameraEnabled,
+      localMicrophoneEnabled,
+    );
+  }, [localCameraEnabled, localMicrophoneEnabled, callSessionLive]);
 
   useEffect(() => {
     let noticeTimeout: number | undefined;
