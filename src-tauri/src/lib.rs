@@ -104,6 +104,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_metadata,
+            get_prerequisite_statuses,
             take_pending_deep_links,
             get_app_snapshot,
             get_tailscale_readiness,
@@ -690,6 +691,81 @@ fn guest_accept_schedule(
     accepted: bool,
 ) -> app_runtime::AppSnapshot {
     runtime.guest_accept_schedule(&schedule_id, accepted)
+}
+
+/// Batch 15 (UI_UX_SPEC §11): truthful prerequisite statuses for First Run.
+/// Detection lives in Rust (AGENTS §6 — native detection is backend work);
+/// permissions are reported as NOT_REQUESTED unless the call-mode has
+/// already exercised them (no premature prompts, §11 rule).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrerequisiteStatus {
+    pub id: String,
+    pub label: String,
+    pub state: String, // "OK" | "NOT_REQUESTED" | "MISSING" | "OPTIONAL"
+    pub detail: String,
+}
+
+#[tauri::command]
+fn get_prerequisite_statuses() -> Vec<PrerequisiteStatus> {
+    let libmpv = crate::media::player::detect_libmpv();
+    let chrome = crate::providers::chrome::find_chrome(
+        &crate::providers::chrome::default_chrome_candidates(),
+    );
+    vec![
+        PrerequisiteStatus {
+            id: "libmpv".to_string(),
+            label: "Movie player (libmpv)".to_string(),
+            state: if libmpv.available {
+                "OK".into()
+            } else {
+                "MISSING".into()
+            },
+            detail: if libmpv.available {
+                "Player runtime found".to_string()
+            } else {
+                "Bundled player runtime not found — local playback needs it".to_string()
+            },
+        },
+        PrerequisiteStatus {
+            id: "chrome".to_string(),
+            label: "Google Chrome".to_string(),
+            state: if chrome.is_ok() {
+                "OK".into()
+            } else {
+                "MISSING".into()
+            },
+            detail: if chrome.is_ok() {
+                "Provider browser found".to_string()
+            } else {
+                "Needed for Netflix/Prime/Hotstar sync mode".to_string()
+            },
+        },
+        PrerequisiteStatus {
+            id: "camera".to_string(),
+            label: "Camera".to_string(),
+            state: "NOT_REQUESTED".to_string(),
+            detail: "Requested when you enable the video call".to_string(),
+        },
+        PrerequisiteStatus {
+            id: "microphone".to_string(),
+            label: "Microphone".to_string(),
+            state: "NOT_REQUESTED".to_string(),
+            detail: "Requested when you enable the call".to_string(),
+        },
+        PrerequisiteStatus {
+            id: "notifications".to_string(),
+            label: "Notifications".to_string(),
+            state: "NOT_REQUESTED".to_string(),
+            detail: "Enable for preload reminders".to_string(),
+        },
+        PrerequisiteStatus {
+            id: "screen".to_string(),
+            label: "Screen Recording".to_string(),
+            state: "OPTIONAL".to_string(),
+            detail: "Only needed for Shared Mode".to_string(),
+        },
+    ]
 }
 
 #[tauri::command]

@@ -3,6 +3,8 @@ import {
   checkProviderStatus,
   commandErrorMessage,
   createLocalParty,
+  listSchedules,
+  type StoredSchedule,
   enterCinema,
   getProviderCapabilities,
   getTailscaleReadiness,
@@ -14,7 +16,6 @@ import {
   navigateProviderTitle,
   openProviderBrowser,
   openTailscaleSetup,
-  requestEndParty,
   setSharedControls,
   showHome,
   showJoinParty,
@@ -28,6 +29,10 @@ import {
 import { useAppSnapshot } from "../hooks/useAppSnapshot";
 import { parseMoviePartyInvite } from "../invites/deepLinks";
 import { CinemaView } from "../views/CinemaView";
+import { DebugHud } from "./DebugHud";
+import { FirstRunView } from "../views/FirstRunView";
+import { ScheduleView } from "../views/ScheduleView";
+import { SettingsView } from "../views/SettingsView";
 import { CreatePartyView, type CreatePartyRequest } from "../views/CreatePartyView";
 import { EndPartyConfirmView } from "../views/EndPartyConfirmView";
 import { HomeView } from "../views/HomeView";
@@ -46,7 +51,10 @@ import {
   shouldShowPartnerConnectView,
 } from "../backend/tailscaleOnboarding";
 
-type LocalScreen = "CREATE_PARTY" | null;
+type LocalScreen = "CREATE_PARTY" | "SETTINGS" | "SCHEDULE" | "FIRST_RUN" | null;
+
+/** §69: window-close-during-party state. */
+type ClosePromptState = { visible: boolean; isHost: boolean };
 type DevScreen = "HOME" | "CREATE" | "JOIN" | "LOBBY" | "READY" | "CINEMA" | null;
 const developmentPreviewEnabled =
   typeof window !== "undefined" &&
@@ -70,6 +78,26 @@ export function AppShell() {
   const [callTileSession, setCallTileSession] = useState<CallTileSessionState>(() =>
     createCallTileSessionState(),
   );
+  // ── Batch 15/16 state ──────────────────────────────────────────────────
+  const [upcoming, setUpcoming] = useState<StoredSchedule[]>([]);
+  const [preloadProgress, setPreloadProgress] = useState<Record<string, number>>({});
+  const [firstRunDone, setFirstRunDone] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("mp_first_run_complete") === "1";
+    } catch {
+      return true; // storage unavailable → never block the app
+    }
+  });
+  const [closePrompt, setClosePrompt] = useState<ClosePromptState>({
+    visible: false,
+    isHost: false,
+  });
+  /** Media filenames seen in snapshots, by media id — for Upcoming cards. */
+  const mediaNameCache = useRef<Record<string, string>>({});
+  const debugHudEnabled =
+    developmentPreviewEnabled &&
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).has("debug");
 
   useEffect(() => {
     if (!developmentPreviewEnabled) return;
@@ -154,6 +182,102 @@ export function AppShell() {
     void getProviderCapabilities().then(setProviderCapabilities);
   }, []);
 
+  // Batch 15 (§10/§11): First Run shows until the user continues once.
+  useEffect(() => {
+    if (!firstRunDone) {
+      setLocalScreen("FIRST_RUN");
+    }
+  }, [firstRunDone]);
+
+  // Batch 16 (§53): refresh upcoming schedules when home is visible.
+  const isHomeVisible =
+    snapshot === null ||
+    (snapshot.screen === "HOME" && localScreen === null && devScreen === null);
+  useEffect(() => {
+    if (!isHomeVisible) return;
+    let cancelled = false;
+    void listSchedules().then((schedules) => {
+      if (!cancelled) {
+        setUpcoming(
+          schedules.filter(
+            (schedule) =>
+              schedule.status !== "Cancelled" &&
+              schedule.status !== "Completed" &&
+              schedule.scheduledStartUtcMs > Date.now() - 24 * 3600_000,
+          ),
+        );
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isHomeVisible]);
+
+  // Media filenames by id — feeds the Upcoming cards' honest titles.
+  useEffect(() => {
+    if (snapshot?.media) {
+      mediaNameCache.current[snapshot.media.mediaId] = snapshot.media.filename;
+    }
+  }, [snapshot?.media]);
+
+  // Batch 16 (§57): PRELOAD_STATE progress arrives via snapshots' transfer
+  // when the schedule's media is the active transfer. Map it onto cards.
+  useEffect(() => {
+    if (snapshot?.transfer && snapshot.media) {
+      const mediaId = snapshot.media.mediaId;
+      const percent = snapshot.transfer.bytesTotal
+        ? snapshot.transfer.bytesAvailable / snapshot.transfer.bytesTotal
+        : 0;
+      setPreloadProgress((previous) => {
+        const next = { ...previous };
+        for (const schedule of upcoming) {
+          if (schedule.mediaId === mediaId) {
+            next[schedule.scheduleId] = percent;
+          }
+        }
+        return next;
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshot?.transfer?.bytesAvailable, snapshot?.media?.mediaId]);
+
+  // §69: window-close-during-party prompt. In a party, closing asks first —
+  // Leave vs End-For-Everyone (host) vs just Leave (guest). The Tauri
+  // window can't be intercepted from the renderer, so this fires on the
+  // app's own close affordances; the OS-level close is handled by the
+  // backend's graceful teardown (Batch 13/14 work).
+  useEffect(() => {
+    const inParty =
+      snapshot?.screen === "CINEMA" ||
+      snapshot?.screen === "LOBBY" ||
+      snapshot?.screen === "READY_CHECK";
+    if (inParty && !closePrompt.visible) {
+      const beforeUnload = (event: BeforeUnloadEvent) => {
+        event.preventDefault();
+      };
+      window.addEventListener("beforeunload", beforeUnload);
+      return () => {
+        window.removeEventListener("beforeunload", beforeUnload);
+      };
+    }
+    return undefined;
+  }, [snapshot?.screen, closePrompt.visible]);
+
+  const requestLeaveOrEnd = useCallback(() => {
+    const isHost = snapshot?.room.role === "HOST";
+    setClosePrompt({ visible: true, isHost });
+  }, [snapshot?.room.role]);
+
+  const completeFirstRun = useCallback(() => {
+    try {
+      localStorage.setItem("mp_first_run_complete", "1");
+    } catch {
+      /* storage unavailable — the session flag still clears */
+    }
+    setFirstRunDone(true);
+    setLocalScreen(null);
+  }, []);
+
   const refreshConnectivity = useCallback(async () => {
     await refreshConnectivityOnce.current(async () => {
       setIsRefreshingConnectivity(true);
@@ -213,6 +337,26 @@ export function AppShell() {
     setCreateError(null);
     setCallTileSession(createCallTileSessionState());
     setLocalScreen("CREATE_PARTY");
+  };
+
+  // Batch 15/16 navigation helpers.
+  const goSettings = () => {
+    setDevScreen(null);
+    setLocalScreen("SETTINGS");
+  };
+
+  const goSchedule = () => {
+    setDevScreen(null);
+    setLocalScreen("SCHEDULE");
+  };
+
+  // Media naming for Upcoming cards — the snapshot's live media when it
+  // matches, else a stored cache entry name, else the honest raw id.
+  const mediaNameFor = (mediaId: string): string => {
+    if (snapshot?.media?.mediaId === mediaId) {
+      return snapshot.media.filename;
+    }
+    return mediaNameCache.current[mediaId] ?? mediaId;
   };
 
   const createParty = async (request: CreatePartyRequest): Promise<boolean> => {
@@ -392,10 +536,6 @@ export function AppShell() {
     void setSharedControls(enabled).then(applySnapshot);
   };
 
-  const requestPartyEnd = () => {
-    void requestEndParty().then(applySnapshot);
-  };
-
   const confirmEndParty = () => {
     void leaveParty().then((ended) => {
       applySnapshot(ended);
@@ -449,7 +589,72 @@ export function AppShell() {
     );
   }
 
-  if (devScreen === "HOME") return <HomeView onCreate={goCreateParty} onJoin={goJoinParty} />;
+  if (devScreen === "HOME")
+    return (
+      <>
+        <HomeView
+          onCreate={goCreateParty}
+          onJoin={goJoinParty}
+          upcoming={upcoming}
+          preloadProgress={preloadProgress}
+          mediaNameById={mediaNameFor}
+          onOpenSettings={goSettings}
+          onOpenSchedule={goSchedule}
+        />
+        {debugHudEnabled ? <DebugHud snapshot={snapshot} /> : null}
+      </>
+    );
+
+  // Batch 15 (§10/§11): First Run — one-time welcome + truthful checks.
+  if (localScreen === "FIRST_RUN") {
+    return <FirstRunView onContinue={completeFirstRun} />;
+  }
+
+  // Batch 15 (§55–§62): Settings — always reachable from the shell.
+  if (localScreen === "SETTINGS") {
+    return (
+      <>
+        <SettingsView snapshot={snapshot} onBack={goHome} />
+        {debugHudEnabled ? <DebugHud snapshot={snapshot} /> : null}
+      </>
+    );
+  }
+
+  // Batch 16 (§18/§19): Schedule form.
+  if (localScreen === "SCHEDULE") {
+    return (
+      <>
+        <ScheduleView
+          snapshot={snapshot}
+          onBack={goHome}
+          onScheduled={() => {
+            setLocalScreen(null);
+            void listSchedules().then((schedules) => {
+              setUpcoming(schedules);
+            });
+          }}
+        />
+        {debugHudEnabled ? <DebugHud snapshot={snapshot} /> : null}
+      </>
+    );
+  }
+
+  // §69: window-close-during-party — host decides End-For-Everyone vs Leave.
+  if (closePrompt.visible) {
+    return (
+      <EndPartyConfirmView
+        onCancel={() => {
+          setClosePrompt({ visible: false, isHost: false });
+        }}
+        onConfirm={() => {
+          setClosePrompt({ visible: false, isHost: false });
+          void leaveParty().then((next) => {
+            applySnapshot(next);
+          });
+        }}
+      />
+    );
+  }
 
   if (localScreen === "CREATE_PARTY" || devScreen === "CREATE") {
     return (
@@ -510,7 +715,7 @@ export function AppShell() {
       <CinemaView
         snapshot={snapshot}
         onSnapshot={setSnapshot}
-        onLeave={requestPartyEnd}
+        onLeave={requestLeaveOrEnd}
         callTileSession={callTileSession}
         onCallTileSessionChange={setCallTileSession}
       />
@@ -521,7 +726,20 @@ export function AppShell() {
     return <EndPartyConfirmView onCancel={goCinema} onConfirm={confirmEndParty} />;
   }
 
-  return <HomeView onCreate={goCreateParty} onJoin={goJoinParty} />;
+  return (
+    <>
+      <HomeView
+        onCreate={goCreateParty}
+        onJoin={goJoinParty}
+        upcoming={upcoming}
+        preloadProgress={preloadProgress}
+        mediaNameById={mediaNameFor}
+        onOpenSettings={goSettings}
+        onOpenSchedule={goSchedule}
+      />
+      {debugHudEnabled ? <DebugHud snapshot={snapshot} /> : null}
+    </>
+  );
 }
 
 function createRoomErrorMessage(error: unknown): string {

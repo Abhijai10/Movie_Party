@@ -464,6 +464,97 @@ async function invokeSnapshot(
   }
 }
 
+// ── Batch 15/16: settings, first-run, and scheduling surfaces ───────────
+
+export type PrerequisiteStatus = {
+  id: string;
+  label: string;
+  state: "OK" | "NOT_REQUESTED" | "MISSING" | "OPTIONAL";
+  detail: string;
+};
+
+export type StoredSchedule = {
+  scheduleId: string;
+  roomId: string;
+  mediaId: string;
+  scheduledStartUtcMs: number;
+  plannedPreloadUtcMs: number;
+  guestDeviceId: string;
+  status: string;
+  createdAtMs: number;
+};
+
+export type AppMetadataInfo = {
+  appName: string;
+  protocolMajor: number;
+  protocolMinor: number;
+};
+
+export async function getPrerequisiteStatuses(): Promise<PrerequisiteStatus[]> {
+  try {
+    return await invoke<PrerequisiteStatus[]>("get_prerequisite_statuses");
+  } catch (error) {
+    const commandError = toBackendCommandError("get_prerequisite_statuses", error);
+    console.error(commandError.message, commandError);
+    return [];
+  }
+}
+
+export async function getAppMetadataInfo(): Promise<AppMetadataInfo | null> {
+  try {
+    return await invoke<AppMetadataInfo>("app_metadata");
+  } catch (error) {
+    const commandError = toBackendCommandError("app_metadata", error);
+    console.error(commandError.message, commandError);
+    return null;
+  }
+}
+
+export async function listSchedules(): Promise<StoredSchedule[]> {
+  try {
+    return await invoke<StoredSchedule[]>("list_schedules");
+  } catch (error) {
+    const commandError = toBackendCommandError("list_schedules", error);
+    console.error(commandError.message, commandError);
+    return [];
+  }
+}
+
+export async function createAndBroadcastSchedule(input: {
+  roomId: string;
+  mediaId: string;
+  scheduledStartUtcMs: number;
+  plannedPreloadUtcMs: number;
+  guestDeviceId: string;
+  callMode: string;
+}): Promise<string | null> {
+  try {
+    return await invoke<string>("create_and_broadcast_schedule", input);
+  } catch (error) {
+    const commandError = toBackendCommandError("create_and_broadcast_schedule", error);
+    console.error(commandError.message, commandError);
+    return null;
+  }
+}
+
+export async function cancelAndBroadcastSchedule(scheduleId: string): Promise<boolean> {
+  try {
+    await invoke("cancel_and_broadcast_schedule", { scheduleId });
+    return true;
+  } catch (error) {
+    const commandError = toBackendCommandError("cancel_and_broadcast_schedule", error);
+    console.error(commandError.message, commandError);
+    return false;
+  }
+}
+
+export async function guestAcceptSchedule(
+  scheduleId: string,
+  accepted: boolean,
+): Promise<AppSnapshot | null> {
+  return invokeSnapshot("guest_accept_schedule", { scheduleId, accepted });
+}
+
 async function invokeSnapshotOrThrow(
   command: string,
   args?: Record<string, unknown>,

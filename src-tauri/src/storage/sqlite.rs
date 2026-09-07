@@ -44,7 +44,11 @@ pub struct StoredIdentity {
 }
 
 /// A stored schedule record.
+/// Batch 16: camelCase on the wire — the TS contract (StoredSchedule)
+/// declares camelCase fields; snake_case here would deliver undefined at
+/// runtime (same class of bug as the Batch 13 CameraState serde fix).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StoredSchedule {
     pub schedule_id: String,
     pub room_id: String,
