@@ -886,7 +886,14 @@ impl AppRuntime {
     }
 
     pub fn close_provider_session(&self) {
-        self.lock().chrome_session = None;
+        // Graceful teardown: Browser.close over CDP lets Chrome flush the
+        // dedicated profile; SIGKILL (the old drop path) could leave the
+        // profile locked, making the next launch of that provider fail
+        // or show a restore banner. The session is taken OUT of the
+        // lock first so a slow close (up to 3s) never freezes the UI.
+        if let Some(mut session) = self.lock().chrome_session.take() {
+            session.close_gracefully();
+        }
     }
 
     pub fn store_launched_provider(
@@ -1723,7 +1730,11 @@ impl AppRuntime {
             state.media = None;
             state.transfer = None;
             state.player_snapshot = PlayerSnapshot::default();
-            state.chrome_session = None;
+            if let Some(mut session) = state.chrome_session.take() {
+                // Graceful: Browser.close lets Chrome flush the provider
+                // profile (SIGKILL could leave it locked → next launch fails).
+                session.close_gracefully();
+            }
             state.chat.clear();
             state.reactions.clear();
             state.invite = None;
@@ -2004,7 +2015,11 @@ impl AppRuntime {
             if let Some(range) = state.range_server_handle.take() {
                 range.shutdown();
             }
-            state.chrome_session = None;
+            if let Some(mut session) = state.chrome_session.take() {
+                // Graceful: Browser.close lets Chrome flush the provider
+                // profile (SIGKILL could leave it locked → next launch fails).
+                session.close_gracefully();
+            }
             state.player = None;
             state.guest_cache = None;
             state.media = None;
@@ -4361,7 +4376,11 @@ impl AppRuntime {
         if let Some(range) = state.range_server_handle.take() {
             range.shutdown();
         }
-        state.chrome_session = None;
+        if let Some(mut session) = state.chrome_session.take() {
+            // Graceful: Browser.close lets Chrome flush the provider
+            // profile (SIGKILL could leave it locked → next launch fails).
+            session.close_gracefully();
+        }
         state.player = None;
         state.guest_cache = None;
         state.media = None;

@@ -153,7 +153,18 @@ pub fn run() {
         .build(tauri::generate_context!());
 
     match result {
-        Ok(app) => app.run(|_, _| {}),
+        Ok(app) => app.run(|app_handle, event| {
+            // Graceful teardown on app exit: close the managed Chrome
+            // session (Browser.close flushes the provider profile) before
+            // the process dies. Without this, the Chrome child is either
+            // orphaned or SIGKILL'd by the OS, leaving the dedicated
+            // profile in a dirty state — the "Chrome exits unexpectedly"
+            // symptom on the next launch.
+            if matches!(event, tauri::RunEvent::Exit) {
+                let runtime = app_handle.state::<app_runtime::AppRuntime>();
+                runtime.close_provider_session();
+            }
+        }),
         Err(error) => {
             eprintln!("Movie Party failed to start: {error}");
             std::process::exit(1);
