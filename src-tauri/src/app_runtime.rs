@@ -17,8 +17,8 @@ use uuid::Uuid;
 
 use crate::{
     call::{
-        validate_signal, CallMode, CallRuntimeStatus, CallSignal, CallSignalLedger, CallSignalType,
-        CameraState, MicState,
+        recommend_camera_state, validate_signal, CallMode, CallRuntimeStatus, CallSignal,
+        CallSignalLedger, CallSignalType, CameraFeedback, CameraState, MicState,
     },
     chat::{
         allowed_reactions, validate_chat_message, validate_reaction, ChatMessage, ReactionMessage,
@@ -146,6 +146,7 @@ impl Default for AppSnapshot {
                 connected: false,
                 camera: CameraState::tier_b_enabled(),
                 microphone: MicState::default(),
+                camera_notice: None,
             },
             call_signals: vec![],
             provider: ProviderSnapshot {
@@ -225,6 +226,11 @@ pub struct CallSnapshot {
     pub connected: bool,
     pub camera: CameraState,
     pub microphone: MicState,
+    /// Once-per-event camera degradation notice (Batch 13 / audit P17 /
+    /// PRD §41 movie-first policy). Set when the ladder downgrades or
+    /// disables the camera to protect movie continuity; cleared by the
+    /// frontend consumer after display. None = nothing to show.
+    pub camera_notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -515,6 +521,16 @@ struct AppRuntimeState {
     // ── M6: Managed Chrome session ownership ────────────────────────────
     /// Owned Chrome child process (previously leaked via forget).
     chrome_session: Option<crate::providers::chrome::ManagedChromeSession>,
+    // ── Batch 13: adaptive camera ladder ────────────────────────────────
+    /// Monotonic timestamp of the last camera tier CHANGE applied by the
+    /// ladder. Flapping protection: a minimum dwell between changes (see
+    /// CAMERA_TIER_MIN_DWELL_MS) keeps a jittery goodput estimate from
+    /// oscillating the encoder settings.
+    camera_tier_changed_at: Option<std::time::Instant>,
+    /// Last camera tier reported in a degradation notice. The
+    /// once-per-event degradation notice (audit P17 / PRD §41) fires on
+    /// each NEW downgrade event, not on every evaluation tick.
+    camera_notice_tier: Option<crate::call::CameraTier>,
 }
 
 impl std::fmt::Debug for AppRuntimeState {
@@ -645,6 +661,7 @@ impl AppRuntime {
                         connected: false,
                         camera: CameraState::tier_b_enabled(),
                         microphone: MicState::default(),
+                        camera_notice: None,
                     },
                     call_signals: Vec::new(),
                     call_signal_ledger: CallSignalLedger::default(),
@@ -700,6 +717,8 @@ impl AppRuntime {
                     cache_root: None,
                     scheduler_task: None,
                     chrome_session: None,
+                    camera_tier_changed_at: None,
+                    camera_notice_tier: None,
                 }),
                 emitter: RwLock::new(emitter),
                 identity: Mutex::new(identity),
@@ -2657,6 +2676,10 @@ impl AppRuntime {
                 // report_buffer_status picks up the CURRENT client under its
                 // own lock and relays over QUIC (guest path).
                 runtime.report_buffer_status(position_ms, headroom_ms, stalled);
+                // Batch 13: every observation tick also re-evaluates the
+                // camera ladder with the fresh buffer/goodput inputs
+                // (movie-first degradation, PRD §41).
+                runtime.evaluate_camera_ladder();
             }
         });
         let mut state = self.lock();
@@ -3173,6 +3196,9 @@ impl AppRuntime {
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .room_state;
                     state.room_state = room_state;
+                    // Batch 13: fresh guest buffer observation → camera
+                    // ladder re-evaluation (movie-first, PRD §41).
+                    evaluate_camera_ladder_locked(&mut state);
                     sync_room_snapshot(&mut state);
                 }
                 QuicServerEvent::BufferRecovered { buffer_ahead_ms } => {
@@ -3182,6 +3208,9 @@ impl AppRuntime {
                     // window while the whole file is still transferring.
                     state.buffer.percent = transfer_percent_for_state(&state);
                     state.buffer.guest_buffer_ahead_ms = buffer_ahead_ms;
+                    // Batch 13: recovery is an upgrade-leaning observation —
+                    // re-evaluate the camera ladder with the fresh buffer.
+                    evaluate_camera_ladder_locked(&mut state);
                     // PROTOCOL_SPEC §30: BUFFER_RECOVERED does NOT auto-resume.
                     // The coordinator returns to READY_CHECK (only when the
                     // pause was strict-sync caused); resuming playback is a
@@ -4542,6 +4571,106 @@ impl AppRuntime {
         }
         snapshot_from_state(&state)
     }
+}
+
+/// Batch 13 (audit P17, PRD §41, AGENTS §37): minimum time between camera
+/// tier changes. The ladder's inputs (goodput estimate, guest buffer) are
+/// inherently jittery; without a dwell the tier would oscillate and the
+/// encoder would thrash. One second of stability is required before the
+/// ladder may move the tier again.
+const CAMERA_TIER_MIN_DWELL_MS: u64 = 1_000;
+
+/// Fallback movie bitrate estimate (bps) when no manifest/duration is
+/// available yet. 5 Mbps matches the audit's 5 Mbps movie-priority
+/// verification scenario and a typical HD stream; overestimating the
+/// movie keeps the camera conservative (movie-first, AGENTS §37).
+const FALLBACK_MOVIE_BITRATE_BPS: u64 = 5_000_000;
+
+/// Batch 13: adaptive camera ladder evaluation on an already-held state
+/// guard. Same policy as `AppRuntime::evaluate_camera_ladder` (which see);
+/// this form exists so the host event-loop arms — which hold the lock for
+/// the whole snapshot build — can evaluate inline without re-entrant
+/// locking (the runtime lock is not re-entrant).
+fn evaluate_camera_ladder_locked(state: &mut AppRuntimeState) {
+    if state.call.mode == CallMode::Off || state.privacy_mode || !state.call.camera.enabled {
+        // Call off / privacy / camera off by user choice: the ladder must
+        // not re-enable anything; keep the notice quiet.
+        if state.call.camera_notice.is_some() {
+            state.call.camera_notice = None;
+        }
+        return;
+    }
+    // No movie in flight (no manifest): nothing to protect, and the
+    // unmeasured goodput/buffer inputs would disable the camera for no
+    // reason. The ladder runs only while a movie is actually at stake
+    // (movie-first means the ladder exists to protect the movie).
+    if state.media.is_none() {
+        return;
+    }
+    let feedback = CameraFeedback {
+        measured_goodput_bps: state.network.goodput_bps,
+        estimated_movie_bitrate_bps: movie_bitrate_estimate_bps(state),
+        guest_buffer_ms: state.buffer.guest_buffer_ahead_ms,
+        rtt_ms: state.network.rtt_ms.unwrap_or(0),
+    };
+    let current = state.call.camera.tier;
+    let recommended = recommend_camera_state(current, state.call.camera.enabled, feedback);
+
+    if recommended.tier == current {
+        // Same tier: clear the changed-at timestamp so a LATER change is
+        // not blocked by dwell elapsed since an older change, but do not
+        // touch the notice (it is cleared on consumption).
+        if state.camera_tier_changed_at.is_some() {
+            state.camera_tier_changed_at = None;
+        }
+        return;
+    }
+    // Dwell check: skip the change when the last change is too recent.
+    if let Some(changed_at) = state.camera_tier_changed_at {
+        if (changed_at.elapsed().as_millis() as u64) < CAMERA_TIER_MIN_DWELL_MS {
+            return;
+        }
+    }
+    let downgraded = recommended.tier > current;
+    state.call.camera = recommended;
+    state.camera_tier_changed_at = Some(std::time::Instant::now());
+    if downgraded {
+        // Once-per-event degradation notice: only fire when this downgrade
+        // reaches a tier we have not already notified for this degradation
+        // episode. Upgrades reset the episode so a later degradation
+        // notifies again.
+        if state.camera_notice_tier != Some(recommended.tier) {
+            state.camera_notice_tier = Some(recommended.tier);
+            state.call.camera_notice = Some(if recommended.enabled {
+                format!(
+                    "Camera quality reduced to protect movie playback (tier {:?}).",
+                    recommended.tier
+                )
+            } else {
+                "Camera turned off to protect movie playback.".to_string()
+            });
+        }
+    } else {
+        state.camera_notice_tier = None;
+        state.call.camera_notice = None;
+    }
+}
+
+impl AppRuntime {
+    /// Batch 13: adaptive camera ladder evaluation. Reads the live
+    /// feedback (measured goodput, RTT, guest buffer ahead, movie bitrate
+    /// estimate) and applies the pure `recommend_camera_state` policy
+    /// (movie-first: the camera tier drops before movie quality, PRD §41).
+    ///
+    /// Callers: the periodic buffer/goodput observation points (guest
+    /// buffer-status worker, host BUFFER_STATUS receive, transfer-progress
+    /// goodput updates). Idempotent per tick; flapping protection is a
+    /// minimum dwell between tier CHANGES; the once-per-event degradation
+    /// notice fires only on each new downgrade event.
+    pub fn evaluate_camera_ladder(&self) {
+        let mut state = self.lock();
+        evaluate_camera_ladder_locked(&mut state);
+    }
 
     pub fn set_call_mode(&self, mode: CallMode) -> AppSnapshot {
         let mut state = self.lock();
@@ -4804,7 +4933,12 @@ impl AppRuntime {
                 .map_err(|e| format!("MP-MEDIA-002 initial cache write failed: {e}"))?;
             let elapsed_ms = started.elapsed().as_millis().max(1) as u64;
             let goodput_bps = packet.payload.len() as u64 * 8 * 1_000 / elapsed_ms;
-            self.lock().network.goodput_bps = goodput_bps;
+            {
+                let mut state = self.lock();
+                state.network.goodput_bps = goodput_bps;
+                // Batch 13: first measured goodput → camera ladder baseline.
+                evaluate_camera_ladder_locked(&mut state);
+            }
         }
         let initial_bytes_available = cache.bytes_available();
         if self.lock().db.is_some() {
@@ -5001,6 +5135,10 @@ impl AppRuntime {
                                             goodput_bps,
                                         ));
                                         state.buffer.percent = Self::transfer_percent(&state);
+                                        // Batch 13: fresh goodput sample →
+                                        // camera ladder re-evaluation
+                                        // (movie-first, PRD §41).
+                                        evaluate_camera_ladder_locked(&mut state);
                                         inner.emit(snapshot_from_state(&state));
                                     }
                                     chunk_wake_worker.notify();
@@ -5226,6 +5364,19 @@ impl crate::scheduling::preload::PreloadExecutor for AppRuntimePreloadExecutor {
 }
 
 // ── Snapshot builder & recovery helpers (unchanged) ───────────────────────────
+
+/// Batch 13: estimated movie bitrate (bps) = file bytes × 8 / duration.
+/// Falls back to a conservative 5 Mbps when the manifest or duration is
+/// unknown (typical HD stream; movie-first means erring high keeps the
+/// camera conservative, AGENTS §37).
+fn movie_bitrate_estimate_bps(state: &AppRuntimeState) -> u64 {
+    if let (Some(manifest), Some(duration_ms)) = (&state.media, state.player_snapshot.duration_ms) {
+        if duration_ms > 0 && manifest.file_size > 0 {
+            return (manifest.file_size as u128 * 8_000 / duration_ms as u128) as u64;
+        }
+    }
+    FALLBACK_MOVIE_BITRATE_BPS
+}
 
 fn snapshot_from_state(state: &AppRuntimeState) -> AppSnapshot {
     let mut participants = vec![state.local_participant.clone()];
@@ -7316,4 +7467,197 @@ fn local_device_toggles_never_mutate_peer_snapshot() {
         local_after.camera_enabled, local_before.camera_enabled,
         "local toggles must visibly change local state"
     );
+}
+
+// ── Batch 13: adaptive camera ladder runtime wiring (audit P17 / PRD §41) ───
+
+#[cfg(test)]
+mod camera_ladder_tests {
+    use super::{AppRuntime, AppRuntimeState};
+    use crate::call::{CameraState, CameraTier};
+
+    /// Seeds a fresh runtime's state with a movie context (the ladder
+    /// only runs while a movie is at stake) and the given feedback
+    /// inputs. The manifest + duration make the movie estimate exactly
+    /// 5 Mbps (1 GB × 8 / 1600 s = 5_000_000 bps).
+    fn state_with_movie(
+        runtime: &AppRuntime,
+        goodput_bps: u64,
+        buffer_ms: u64,
+        rtt_ms: Option<u32>,
+    ) -> std::sync::MutexGuard<'_, AppRuntimeState> {
+        let mut state = runtime.lock();
+        state.media = Some(crate::media::manifest::MediaManifest {
+            media_id: "m".to_string(),
+            filename: "movie.mkv".to_string(),
+            file_size: 1_000_000_000,
+            container: Some("mkv".to_string()),
+            full_hash: "h".to_string(),
+            quick_fingerprint: crate::media::manifest::QuickFingerprint {
+                file_size: 1_000_000_000,
+                first_hash: "a".to_string(),
+                last_hash: "b".to_string(),
+            },
+            chunk_size: 1_048_576,
+            chunk_count: 954,
+        });
+        state.player_snapshot.duration_ms = Some(1_600_000);
+        state.network.goodput_bps = goodput_bps;
+        state.network.rtt_ms = rtt_ms;
+        state.buffer.guest_buffer_ahead_ms = buffer_ms;
+        state
+    }
+
+    #[test]
+    fn movie_bitrate_estimate_uses_manifest_over_fallback() {
+        let runtime = AppRuntime::new();
+        let state = state_with_movie(&runtime, 0, 0, None);
+        assert_eq!(super::movie_bitrate_estimate_bps(&state), 5_000_000);
+    }
+
+    #[test]
+    fn movie_bitrate_estimate_falls_back_to_5mbps_without_media() {
+        let runtime = AppRuntime::new();
+        let state = runtime.lock();
+        assert_eq!(super::movie_bitrate_estimate_bps(&state), 5_000_000);
+    }
+
+    /// The audit's 5 Mbps movie-priority scenario: healthy goodput with a
+    /// 5 Mbps movie keeps Tier A; goodput below the movie (ratio < 1)
+    /// disables the camera entirely — movie-first, PRD §41.
+    #[test]
+    fn five_mbps_movie_priority_downgrades_before_sacrificing_movie() {
+        // Healthy: ratio 2.0, buffer >30s, rtt 100ms → upgrade path
+        // (the policy requires buffer strictly above 30 s to upgrade).
+        let runtime = AppRuntime::new();
+        let mut healthy = state_with_movie(&runtime, 10_000_000, 31_000, Some(100));
+        healthy.call.camera = CameraState::tier_b_enabled();
+        super::evaluate_camera_ladder_locked(&mut healthy);
+        assert_eq!(healthy.call.camera.tier, CameraTier::A);
+
+        // Starved: ratio < 1.0 → camera disabled, movie protected.
+        let runtime = AppRuntime::new();
+        let mut starved = state_with_movie(&runtime, 4_000_000, 20_000, Some(100));
+        starved.call.camera = CameraState::tier_b_enabled();
+        super::evaluate_camera_ladder_locked(&mut starved);
+        assert!(!starved.call.camera.enabled);
+        assert_eq!(starved.call.camera.tier, CameraTier::D);
+        assert_eq!(starved.call.camera.target_bitrate_bps, 0);
+        // Once-per-event notice fired for the disable event.
+        assert!(starved
+            .call
+            .camera_notice
+            .as_deref()
+            .unwrap_or_default()
+            .contains("movie playback"));
+    }
+
+    #[test]
+    fn downgrade_notice_fires_once_per_event() {
+        // First downgrade: notice set.
+        let runtime = AppRuntime::new();
+        let mut state = state_with_movie(&runtime, 5_800_000, 4_500, Some(80));
+        state.call.camera = CameraState::tier_b_enabled();
+        super::evaluate_camera_ladder_locked(&mut state);
+        assert_eq!(state.call.camera.tier, CameraTier::C);
+        let first_notice = state.call.camera_notice.clone();
+        assert!(first_notice.is_some());
+
+        // Consume (frontend clears) and re-evaluate at the same tier:
+        // no further tier change → no new notice.
+        state.call.camera_notice = None;
+        super::evaluate_camera_ladder_locked(&mut state);
+        assert_eq!(state.call.camera.tier, CameraTier::C);
+        assert!(state.call.camera_notice.is_none());
+    }
+
+    #[test]
+    fn upgrade_resets_the_notice_episode_so_later_downgrade_notifies_again() {
+        let runtime = AppRuntime::new();
+        let mut state = state_with_movie(&runtime, 10_000_000, 45_000, Some(60));
+        state.call.camera = CameraState::tier_c_enabled();
+        // Pre-seed a prior episode so the upgrade must clear it.
+        state.call.camera_notice = None;
+        super::evaluate_camera_ladder_locked(&mut state);
+        assert_eq!(state.call.camera.tier, CameraTier::B); // upgrade
+
+        // Later degradation to the same C tier notifies again (new event).
+        // Clear the dwell timestamp to simulate the minimum dwell having
+        // elapsed (the dwell itself has its own dedicated test).
+        state.network.goodput_bps = 5_800_000;
+        state.buffer.guest_buffer_ahead_ms = 4_500;
+        state.network.rtt_ms = Some(80);
+        state.camera_tier_changed_at = None;
+        super::evaluate_camera_ladder_locked(&mut state);
+        assert_eq!(state.call.camera.tier, CameraTier::C);
+        assert!(state.call.camera_notice.is_some());
+    }
+
+    #[test]
+    fn dwell_blocks_tier_flapping_within_one_second() {
+        // Change to C, then immediately try to change again: the dwell
+        // must hold the tier at C until the minimum dwell elapses.
+        let runtime = AppRuntime::new();
+        let mut state = state_with_movie(&runtime, 5_800_000, 4_500, Some(80));
+        state.call.camera = CameraState::tier_b_enabled();
+        super::evaluate_camera_ladder_locked(&mut state);
+        assert_eq!(state.call.camera.tier, CameraTier::C);
+
+        // Now inputs flip to upgrade-worthy, but within the dwell window.
+        state.network.goodput_bps = 10_000_000;
+        state.buffer.guest_buffer_ahead_ms = 45_000;
+        state.network.rtt_ms = Some(60);
+        super::evaluate_camera_ladder_locked(&mut state);
+        assert_eq!(
+            state.call.camera.tier,
+            CameraTier::C,
+            "dwell must block an immediate tier flip"
+        );
+    }
+
+    #[test]
+    fn no_movie_means_no_ladder_activity() {
+        // Unmeasured goodput (0) with no movie: the ladder must NOT
+        // disable the camera — there is nothing to protect.
+        let runtime = AppRuntime::new();
+        let mut state = runtime.lock();
+        state.call.camera = CameraState::tier_b_enabled();
+        state.network.goodput_bps = 0;
+        state.buffer.guest_buffer_ahead_ms = 0;
+        super::evaluate_camera_ladder_locked(&mut state);
+        assert_eq!(
+            state.call.camera.tier,
+            CameraTier::B,
+            "no movie in flight → tier untouched"
+        );
+        assert!(state.call.camera_notice.is_none());
+    }
+
+    #[test]
+    fn camera_off_by_user_or_privacy_means_no_ladder_notice() {
+        let runtime = AppRuntime::new();
+        let mut state = state_with_movie(&runtime, 4_000_000, 1_000, Some(400));
+        state.call.camera = CameraState::disabled();
+        super::evaluate_camera_ladder_locked(&mut state);
+        assert!(!state.call.camera.enabled);
+        assert!(state.call.camera_notice.is_none());
+
+        let privacy_runtime = AppRuntime::new();
+        let mut privacy = state_with_movie(&privacy_runtime, 4_000_000, 1_000, Some(400));
+        privacy.privacy_mode = true;
+        privacy.call.camera = CameraState::tier_b_enabled();
+        super::evaluate_camera_ladder_locked(&mut privacy);
+        assert_eq!(privacy.call.camera.tier, CameraTier::B);
+        assert!(privacy.call.camera_notice.is_none());
+    }
+
+    #[test]
+    fn camera_state_serializes_camel_case_for_the_frontend_contract() {
+        // The TS snapshot type declares targetBitrateBps/tier; the serde
+        // must match (this was silently snake_case before Batch 13).
+        let json = serde_json::to_string(&CameraState::tier_b_enabled()).unwrap();
+        assert!(json.contains("\"targetBitrateBps\""));
+        assert!(json.contains("\"tier\":\"B\""));
+        assert!(!json.contains("target_bitrate_bps"));
+    }
 }

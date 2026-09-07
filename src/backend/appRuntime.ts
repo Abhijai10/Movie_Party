@@ -129,6 +129,7 @@ export type AppSnapshot = {
     connected: boolean;
     camera: {
       enabled: boolean;
+      tier: "A" | "B" | "C" | "D";
       width: number;
       height: number;
       fps: number;
@@ -137,6 +138,8 @@ export type AppSnapshot = {
     microphone: {
       enabled: boolean;
     };
+    /** Once-per-event camera degradation notice (Batch 13 / PRD §41). */
+    cameraNotice: string | null;
   };
   callSignals: Array<{
     signalType: string;

@@ -146,3 +146,77 @@ describe("isWellFormedSignal", () => {
     expect(isWellFormedSignal({ signalType: "OFFER", data: "x".repeat(64 * 1024) })).toBe(true);
   });
 });
+
+// ── Batch 13: adaptive camera tier → sender/track mappings (PRD §41) ────────
+
+import {
+  senderParametersForTier,
+  trackConstraintsForTier,
+  type CameraTierState,
+} from "./callSession";
+
+const tierState = (overrides: Partial<CameraTierState>): CameraTierState => ({
+  enabled: true,
+  tier: "B",
+  width: 640,
+  height: 360,
+  fps: 15,
+  targetBitrateBps: 350_000,
+  ...overrides,
+});
+
+describe("senderParametersForTier — Batch 13 movie-first encoder caps", () => {
+  const baseParameters: RTCRtpSendParameters = {
+    transactionId: "tx-1",
+    encodings: [{ rid: "0", active: true, maxBitrate: 5_500_000, maxFramerate: 30 }],
+  };
+
+  it("caps bitrate and framerate to the tier's ladder values", () => {
+    const next = senderParametersForTier(tierState({}), baseParameters);
+    expect(next.encodings[0]?.maxBitrate).toBe(350_000);
+    expect(next.encodings[0]?.maxFramerate).toBe(15);
+  });
+
+  it("maps every encoder, not just the first (simulcast-proof)", () => {
+    const two: RTCRtpSendParameters = {
+      transactionId: "tx-2",
+      encodings: [
+        { rid: "0", active: true },
+        { rid: "1", active: true },
+      ],
+    };
+    const next = senderParametersForTier(tierState({ tier: "C", fps: 12, targetBitrateBps: 180_000 }), two);
+    expect(next.encodings.map((encoding) => encoding.maxBitrate)).toEqual([180_000, 180_000]);
+    expect(next.encodings.map((encoding) => encoding.maxFramerate)).toEqual([12, 12]);
+  });
+
+  it("never sets maxBitrate to 0 (0 reads as unlimited in some stacks)", () => {
+    const next = senderParametersForTier(tierState({ enabled: false, tier: "D", targetBitrateBps: 0 }), baseParameters);
+    expect(next.encodings[0]?.maxBitrate).toBeGreaterThanOrEqual(1);
+  });
+
+  it("preserves non-tier fields (transactionId, rid, active)", () => {
+    const next = senderParametersForTier(tierState({}), baseParameters);
+    expect(next.transactionId).toBe("tx-1");
+    expect(next.encodings[0]?.rid).toBe("0");
+    expect(next.encodings[0]?.active).toBe(true);
+  });
+});
+
+describe("trackConstraintsForTier — Batch 13 capture downscale", () => {
+  it("requests the tier's frame with ideal (nearest-safe) values", () => {
+    const constraints = trackConstraintsForTier(tierState({}));
+    expect(constraints.width).toEqual({ ideal: 640 });
+    expect(constraints.height).toEqual({ ideal: 360 });
+    expect(constraints.frameRate).toEqual({ ideal: 15 });
+  });
+
+  it("clamps a zero-fps disabled tier to ≥1 (constraints must stay valid)", () => {
+    const constraints = trackConstraintsForTier(
+      tierState({ enabled: false, tier: "D", width: 0, height: 0, fps: 0 }),
+    );
+    expect(constraints.width).toEqual({ ideal: 1 });
+    expect(constraints.height).toEqual({ ideal: 1 });
+    expect(constraints.frameRate).toEqual({ ideal: 1 });
+  });
+});

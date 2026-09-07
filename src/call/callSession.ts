@@ -34,6 +34,55 @@ import {
 
 export type CallRole = "HOST" | "GUEST";
 
+/**
+ * Batch 13: the runtime-recommended camera tier as it crosses the snapshot
+ * boundary. Mirrors `call::CameraState` (camelCase serde) from the Rust
+ * ladder; `tier` orders A < B < C < D (D = disabled).
+ */
+export type CameraTierState = {
+  enabled: boolean;
+  tier: "A" | "B" | "C" | "D";
+  width: number;
+  height: number;
+  fps: number;
+  targetBitrateBps: number;
+};
+
+/**
+ * Pure tier-→sender-parameter mapping (Batch 13). Given the snapshot's
+ * camera state and a live video sender's current parameters, produce the
+ * next parameters to set. Encoder caps only: no SDP renegotiation.
+ *
+ * - maxBitrate = targetBitrateBps (0 for a disabled tier is clamped to
+ *   1 kbps — 0 is treated by some stacks as "unlimited").
+ * - maxFramerate = fps.
+ */
+export function senderParametersForTier(
+  camera: CameraTierState,
+  current: RTCRtpSendParameters,
+): RTCRtpSendParameters {
+  const encodings: RTCRtpEncodingParameters[] = current.encodings.map((encoding) => ({
+    ...encoding,
+    maxBitrate: camera.targetBitrateBps > 0 ? camera.targetBitrateBps : 1_000,
+    maxFramerate: camera.fps > 0 ? camera.fps : 1,
+  }));
+  return { ...current, encodings };
+}
+
+/**
+ * Pure tier-→track-constraint mapping (Batch 13). Downscale the captured
+ * resolution to the tier's frame (aspect preserved via width/height pair).
+ * An exact frame is requested with ideal (browser may pick nearest).
+ */
+export function trackConstraintsForTier(camera: CameraTierState): MediaTrackConstraints {
+  return {
+    width: { ideal: Math.max(camera.width, 1) },
+    height: { ideal: Math.max(camera.height, 1) },
+    frameRate: { ideal: Math.max(camera.fps, 1) },
+  };
+}
+
+
 /** Snapshot callSignals entries (signalType is an unvalidated string). */
 export type IncomingCallSignal = {
   signalType: string;
@@ -196,6 +245,24 @@ export type LiveCallSession = {
   usedRealMedia: boolean;
   /** MP-CALL error code if media acquisition degraded. */
   mediaErrorCode: string | null;
+  /**
+   * Batch 13 (PRD §41 / audit P17): apply an adaptive-camera-tier state to
+   * the LIVE sender. Movie-first: the runtime ladder decides the tier;
+   * this maps it onto WebRTC sender parameters + track constraints.
+   *
+   * - maxBitrate/maxFramerate on the video sender (encoder-level; no SDP
+   *   renegotiation is required, so the non-trickle session keeps flowing
+   *   without a new exchange).
+   * - applyConstraints on the video track downscales the captured
+   *   resolution; failure is non-fatal (the sender caps still hold).
+   * - A camera-disabled tier (D) only freezes the local track (the peer
+   *   sees frozen video; track.enabled semantics per PRD §41 "freeze"
+   *   step).
+   *
+   * Returns false when there is no video sender/track to constrain (e.g.
+   * VOICE_ONLY) — the ladder state still flows via the snapshot.
+   */
+  applyCameraTier: (tier: CameraTierState) => Promise<boolean>;
   /** Apply a peer-originated signal (cursor-guarded by the view). */
   applyRemoteSignal: (signal: WellFormedCallSignal) => Promise<void>;
   /**
@@ -465,6 +532,47 @@ export async function startRealCallSession(
       for (const track of localStream.getAudioTracks()) {
         track.enabled = microphoneEnabled;
       }
+    },
+    async applyCameraTier(camera: CameraTierState) {
+      if (closed) {
+        return false;
+      }
+      const videoTracks = localStream.getVideoTracks();
+      if (videoTracks.length === 0) {
+        return false;
+      }
+      // Freeze semantics for a disabled tier (PRD §41 "freeze" step):
+      // the track keeps flowing frozen frames rather than a hard end,
+      // matching the ladder's temporary-off intent.
+      for (const track of videoTracks) {
+        track.enabled = camera.enabled;
+      }
+      if (!camera.enabled) {
+        return true;
+      }
+      // Sender caps: encoder-level bitrate/framerate, no renegotiation.
+      const sender = peerConnection
+        .getSenders()
+        .find((candidate) => candidate.track?.kind === "video");
+      if (sender) {
+        const parameters = sender.getParameters();
+        const next = senderParametersForTier(camera, parameters);
+        try {
+          await sender.setParameters(next);
+        } catch {
+          // Non-fatal: some stacks reject dynamic maxFramerate; the
+          // resolution constraint below still downgrades the feed.
+        }
+      }
+      // Track constraints: downscale the captured resolution.
+      for (const track of videoTracks) {
+        try {
+          await track.applyConstraints(trackConstraintsForTier(camera));
+        } catch {
+          // Non-fatal: the sender caps above still bound the encoder.
+        }
+      }
+      return true;
     },
     close() {
       if (closed) {
