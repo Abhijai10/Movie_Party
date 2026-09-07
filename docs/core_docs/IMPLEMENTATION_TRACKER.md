@@ -14,6 +14,49 @@ It must be updated continuously.
 
 ```text
 Project State:
+🟨 BATCHES 15 + 16 (SETTINGS/FIRST-RUN/ERROR SCREENS + SCHEDULING
+    FRONTEND & PROTOCOL) COMPLETE (code-level), incl. the audit P14
+    preload-units fix. Batch 15 closed audit P6: FirstRunView shows the
+    §10/§11 welcome with TRUTHFUL prerequisite checks from a new Rust
+    command (real libmpv/Chrome detection; camera/mic/notifications
+    honestly 'Not requested' — no premature permission prompts, the
+    §11 rule; screen recording 'Optional'). SettingsView delivers all
+    eight §55–§62 sections wired to real backend state — Strict Sync
+    visible but NOT disableable (§56 — core product behavior, AGENTS
+    §14), provider cards show empirical support + Open Provider +
+    Reset-with-confirm (reset logs out, §60), and Diagnostics exports a
+    local-only diagnostic bundle (never uploaded). ErrorScreenView (§64)
+    shows the stable MP code + human message + actionable options +
+    collapsible Technical Details, with humanMessageForCode mapping every
+    code family to actionable copy. DebugHud (§63) is dev-gated (?debug
+    in the dev preview only). §69: in-party close routes through the
+    host's End-For-Everyone vs Leave distinction. Batch 16 closed audit
+    P8: SCHEDULE_CREATE/ACCEPT/UPDATE/CANCEL + PRELOAD_STATE are now on
+    the wire (§55–§57) with serde round-trip tests; the guest persists
+    on SCHEDULE_CREATE (reminders survive the host app closing, §56),
+    duplicates are no-ops, missing-DB surfaces honest MP-STORE-001 (no
+    silent fallback, §29); the host marks Accepted on the guest's ack;
+    the scheduler worker broadcasts TRANSFERRING / WAITING_FOR_GUEST /
+    FAILED so the guest's Upcoming card never sits at a stale
+    percentage. ScheduleView (§18/§19) shows the bits-correct estimated
+    transfer + recommended preload start with preload moving EARLIER
+    only (negative adjustments clamp to the safe point — never later,
+    §18); the §19 offline warning is honest (the schedule still saves).
+    Notification permission is requested at save time only. HomeView
+    shows §53 Upcoming cards with real statuses. P14 CLOSED: the
+    storage-layer preload duplicate (bytes ÷ bps without ×8 → 8×
+    optimistic scheduling) is DELETED; scheduling::calculate_preload_
+    start is the single canonical bits-correct implementation and both
+    call sites + e2e test against it. StoredSchedule serde is now
+    camelCase (the TS contract; same bug class as Batch 13 CameraState).
+    Gates ALL green: cargo fmt --check, clippy -D warnings, 351 Rust
+    tests (0 fail), pnpm lint, tsc --noEmit, vitest 123 (0 fail), pnpm
+    build. NOT verifiable here: real two-device schedule flow (guest
+    persistence + reminders on Windows), live notification delivery,
+    first-run detection on a cold machine → ⚠ EXTERNAL VERIFICATION
+    PENDING. Next permitted: Batch 17.
+
+Previous:
 🟨 BATCHES 13 + 14 (CAMERA LADDER RUNTIME + PROVIDER SYNC DISPATCH) AND
     CHROME LIFECYCLE FIX COMPLETE (code-level). Batch 13 closed audit
     P17: the adaptive camera ladder now actually RUNS —

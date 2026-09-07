@@ -112,14 +112,25 @@ same day. Highest-impact findings:
    the two core docs disagree, decision D2 required); camera card is
    24vw/260px vs spec 220px default, 120–360 clamp, locally persisted
    position, 48px minimized circle — Batch 17.
-5. 🟡 **P6 — Missing spec'd screens**: Settings (§55–62), Schedule form
-   (§18–19), First Run + prerequisite checks (§10–11), Home Upcoming
-   (§53), QR invite (§16), Error screen with MP codes + Technical Details
-   (§64), Debug HUD (§63), window-close-during-party prompt (§69), guest
-   media retention prompt (§52) — Batches 15–16.
-6. 🟡 **P8 — Scheduling has no frontend and no protocol messages**
-   (SCHEDULE_CREATE/ACCEPT/UPDATE/CANCEL and PRELOAD_STATE absent from the
-   wire); notification-permission flow not surfaced — Batch 16.
+5. ✅ **P6 — Missing spec'd screens** — CLOSED code-level in Batches
+   15/16: Settings (§55–62, all 8 sections, Strict Sync visible-but-
+   locked), First Run + truthful prerequisite checks (§10–11, no
+   premature prompts), Schedule form (§18–19), Home Upcoming (§53),
+   Error screen (§64, stable codes + Technical Details), Debug HUD
+   (§63, dev-gated), window-close-during-party prompt (§69). Still open
+   within P6: QR invite (§16) and guest media retention prompt (§52)
+   — Batch 15 scope notes them for the next UI pass. ⚠ Real first-run
+   detection on a cold machine: EXTERNAL VERIFICATION PENDING.
+6. ✅ **P8 — Scheduling has no frontend and no protocol messages** —
+   CLOSED in Batch 16: SCHEDULE_CREATE/ACCEPT/UPDATE/CANCEL +
+   PRELOAD_STATE are on the wire (§55–§57) with serde round-trip tests;
+   guest persists + registers reminders on create (§56); host marks
+   Accepted on guest ack; scheduler broadcasts TRANSFERRING/
+   WAITING_FOR_GUEST/FAILED (§57); ScheduleView form (§18/§19) with
+   earlier-only preload adjustment; notification permission requested
+   at save time; Home Upcoming cards (§53). ⚠ REAL two-device schedule
+   flow (guest persistence + reminder delivery on Windows): EXTERNAL
+   VERIFICATION PENDING.
 7. 🟡 **P9 — SQLite has 4 of 9 PRD §85 tables** (device_identity,
    schedules, cache_entries, chat_messages; missing trusted_peers, rooms,
    media_items, providers, network_history) — tracked with Batch 16.
@@ -142,11 +153,14 @@ same day. Highest-impact findings:
     bounded wait everywhere (Drop, leave_party, return_home, app exit),
     fail-fast launch when the child dies pre-CDP — the crash WATCHERS
     (in-session failure overlay) are still Batch 18.
-11. 🔴 **P14 — Preload units bug (verify-then-fix)**: two duplicate
-    preload-start implementations disagree — `scheduling/mod.rs` is
-    bits-correct, but `storage/sqlite.rs::calculate_preload_start`
-    divides bytes by goodput_bps without ×8 (treats bits as bytes — 8×
-    off at the call site) — Batch 16.
+11. ✅ **P14 — Preload units bug** — FIXED in Batch 16 (verified then
+    fixed, exactly as the audit described): the storage/sqlite.rs
+    duplicate divided bytes by a bits-per-second goodput without ×8
+    (8× optimistic → preload scheduled 8× too late). The duplicate is
+    DELETED; scheduling::calculate_preload_start is the one canonical
+    bits-correct implementation; both call sites and the e2e test now
+    assert the correct 1e9-bytes@5-Mbps → 3_140_000 ms-before-start
+    value.
 12. 🧪 **P18 — the entire §31 manual verification matrix remains
     pending** (by design; agents must never fake it).
 
@@ -1812,11 +1826,16 @@ D1–D4 live in `docs/core_docs/V1_COMPLETION_PLAN.md`.
    provider watch worker feeds the coordinator, PlaybackReady gate,
    MP-PROVIDER-003/004 mapping, §44 badge. ⚠ Real provider browser
    verification pending.
-5. **Batch 15 — Missing screens I** (P6): Settings, First Run,
-   Error screen, Debug HUD, window-close-during-party prompt.
-6. **Batch 16 — Scheduling frontend + protocol** (P8/P14): Schedule form,
-   Home Upcoming, offline warning, SCHEDULE_*/PRELOAD_STATE messages,
-   fix the preload units duplication.
+5. ✅ **Batch 15 — Missing screens I** (P6) — COMPLETE: Settings
+   (8 sections), First Run (truthful checks), Error screen (MP codes +
+   Technical Details), Debug HUD (dev-gated), §69 close prompt. QR
+   invite (§16) + guest retention prompt (§52) deferred to the next UI
+   pass (tracked under P6 remainder).
+6. ✅ **Batch 16 — Scheduling frontend + protocol** (P8/P14) —
+   COMPLETE: wire messages live + guest persistence + scheduler
+   PreloadState broadcasts; Schedule form with earlier-only preload;
+   Home Upcoming cards; offline warning; notification-permission at
+   save; P14 duplicate deleted (one canonical bits-correct formula).
 7. **Batch 17 — Chat & cinema spec alignment** (P4/P5/P7): lower-third
    ephemeral bubbles, backend-driven countdown, camera card spec values.
 8. **Batch 18 — Resilience watchers + recovery UX** (P13): Chrome-crash
