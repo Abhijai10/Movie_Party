@@ -279,6 +279,89 @@ pub fn command_for_action(
     }
 }
 
+/// Batch 14 (audit P3): map a CANONICAL coordinator commit to the provider
+/// adapter action it implies. This is the bridge between the sync
+/// engine's commit kinds ("PLAY"/"PAUSE"/"SEEK", position in ms) and the
+/// provider CDP commands (actions with positions in seconds). None
+/// means the commit does not drive the provider (unknown kind).
+///
+/// The coordinator remains the single authority (AGENTS §15): providers
+/// never see guest-originated actions directly — only canonical commits
+/// produced by the host.
+pub fn provider_sync_action_for_commit(
+    commit_kind: &str,
+    target_position_ms: u64,
+) -> Option<ProviderSyncAction> {
+    match commit_kind {
+        "PLAY" => Some(ProviderSyncAction::Play),
+        "PAUSE" => Some(ProviderSyncAction::Pause),
+        "SEEK" => Some(ProviderSyncAction::Seek {
+            seconds: target_position_ms as f64 / 1_000.0,
+        }),
+        _ => None,
+    }
+}
+
+/// Batch 14: map a CDP/adapter execution failure to the honest runtime
+/// error (AGENTS §29 — no silent fallback; the user must see the
+/// provider-mode failure, never a fake local playback). Mirrors
+/// `map_provider_error`'s taxonomy for the command-execution path.
+pub fn command_error_to_runtime_error(
+    error: &crate::providers::chrome::ManagedChromeError,
+) -> ProviderRuntimeError {
+    match error {
+        // The browser died or was closed: the page cannot accept commands.
+        crate::providers::chrome::ManagedChromeError::Process(_) => {
+            ProviderRuntimeError::ProviderPageClosed
+        }
+        // CDP-level failures on a live browser: the command was rejected
+        // (page state does not accept it, player missing mid-navigation).
+        crate::providers::chrome::ManagedChromeError::CdpCommand(_) => {
+            ProviderRuntimeError::PlayerCommandRejected
+        }
+        crate::providers::chrome::ManagedChromeError::MalformedCdpResponse
+        | crate::providers::chrome::ManagedChromeError::CdpTimeout
+        | crate::providers::chrome::ManagedChromeError::Io(_) => ProviderRuntimeError::Unknown,
+        // Launch/config errors cannot occur on an already-running session
+        // but map honestly rather than silently succeeding.
+        crate::providers::chrome::ManagedChromeError::ChromeUnavailable
+        | crate::providers::chrome::ManagedChromeError::NonLocalCdpBind
+        | crate::providers::chrome::ManagedChromeError::InvalidProviderProfile
+        | crate::providers::chrome::ManagedChromeError::InvalidCdpPort => {
+            ProviderRuntimeError::Unknown
+        }
+    }
+}
+
+/// Batch 14: the user-facing error code + description for a provider
+/// runtime failure (stable MP-PROVIDER codes, AGENTS §23). Shared-mode
+/// fallback is never implied — Provider Sync failures surface as
+/// Provider Sync failures.
+pub fn provider_runtime_error_response(error: ProviderRuntimeError) -> (&'static str, String) {
+    match error {
+        ProviderRuntimeError::LoginRequired => (
+            "MP-PROVIDER-004 sign in to the provider before starting playback",
+            "Login required".to_string(),
+        ),
+        ProviderRuntimeError::MediaNotDetected => (
+            "MP-PROVIDER-003 no playable media is open in the provider",
+            "Media not detected".to_string(),
+        ),
+        ProviderRuntimeError::PlayerCommandRejected => (
+            "MP-PROVIDER-003 the provider rejected the playback command",
+            "Command rejected".to_string(),
+        ),
+        ProviderRuntimeError::ProviderPageClosed => (
+            "MP-PROVIDER-003 the provider browser is closed",
+            "Provider browser closed".to_string(),
+        ),
+        ProviderRuntimeError::Unknown => (
+            "MP-PROVIDER-003 provider command failed",
+            "Provider command failed".to_string(),
+        ),
+    }
+}
+
 pub fn login_required_command(provider: ProviderId, command_id: u64) -> CdpCommand {
     match provider {
         ProviderId::YouTube => GenericProviderAdapter.detect_page(command_id),
@@ -483,6 +566,89 @@ mod tests {
             assert!(url.starts_with("https://"));
             assert!(url.contains("Inception"));
             assert!(url.contains('+') || url.contains("%20"));
+        }
+    }
+
+    // ── Batch 14: canonical-commit dispatch + error mapping (audit P3) ─────
+
+    #[test]
+    fn canonical_commits_map_to_provider_actions_with_second_positions() {
+        assert_eq!(
+            provider_sync_action_for_commit("PLAY", 0),
+            Some(ProviderSyncAction::Play)
+        );
+        assert_eq!(
+            provider_sync_action_for_commit("PAUSE", 42_000),
+            Some(ProviderSyncAction::Pause)
+        );
+        assert_eq!(
+            provider_sync_action_for_commit("SEEK", 90_000),
+            Some(ProviderSyncAction::Seek { seconds: 90.0 })
+        );
+        // Unknown commit kinds drive nothing (never a guessed action).
+        assert_eq!(provider_sync_action_for_commit("REWIND", 1_000), None);
+        assert_eq!(provider_sync_action_for_commit("", 0), None);
+    }
+
+    #[test]
+    fn command_errors_map_to_honest_runtime_errors() {
+        use crate::providers::chrome::ManagedChromeError;
+        // A dead browser is a closed page, never a silent success.
+        assert_eq!(
+            command_error_to_runtime_error(&ManagedChromeError::Process("exited".into())),
+            ProviderRuntimeError::ProviderPageClosed
+        );
+        // A rejected CDP command is a rejected player command.
+        assert_eq!(
+            command_error_to_runtime_error(&ManagedChromeError::CdpCommand("no player".into())),
+            ProviderRuntimeError::PlayerCommandRejected
+        );
+        // Transport-level failures stay Unknown (no false specificity).
+        assert_eq!(
+            command_error_to_runtime_error(&ManagedChromeError::CdpTimeout),
+            ProviderRuntimeError::Unknown
+        );
+        assert_eq!(
+            command_error_to_runtime_error(&ManagedChromeError::MalformedCdpResponse),
+            ProviderRuntimeError::Unknown
+        );
+    }
+
+    #[test]
+    fn runtime_error_responses_use_stable_provider_codes() {
+        let (code, _) = provider_runtime_error_response(ProviderRuntimeError::LoginRequired);
+        assert!(
+            code.starts_with("MP-PROVIDER-004"),
+            "login gate code: {code}"
+        );
+        for error in [
+            ProviderRuntimeError::MediaNotDetected,
+            ProviderRuntimeError::PlayerCommandRejected,
+            ProviderRuntimeError::ProviderPageClosed,
+            ProviderRuntimeError::Unknown,
+        ] {
+            let (code, _) = provider_runtime_error_response(error);
+            assert!(code.starts_with("MP-PROVIDER-003"), "code: {code}");
+        }
+    }
+
+    #[test]
+    fn every_provider_dispatches_through_the_same_adapter_interface() {
+        // The coordinator's dispatch is provider-agnostic: the same action
+        // produces a CDP command for every provider (AGENTS §8 — no
+        // provider-specific logic outside adapters).
+        for provider in [
+            ProviderId::YouTube,
+            ProviderId::Netflix,
+            ProviderId::Prime,
+            ProviderId::JioHotstar,
+        ] {
+            let play = command_for_action(provider, 1, ProviderSyncAction::Play);
+            let pause = command_for_action(provider, 2, ProviderSyncAction::Pause);
+            let seek = command_for_action(provider, 3, ProviderSyncAction::Seek { seconds: 12.5 });
+            assert!(play.method.starts_with("Runtime."), "{provider:?}");
+            assert!(pause.method.starts_with("Runtime."), "{provider:?}");
+            assert!(seek.method.starts_with("Runtime."), "{provider:?}");
         }
     }
 

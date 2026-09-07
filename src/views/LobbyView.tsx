@@ -145,6 +145,21 @@ export function LobbyView({
               <span className="uppercase tracking-[0.2em] text-xs">{source}</span>
             </div>
             <span className="w-1 h-1 rounded-full bg-white/25" />
+            {/* UI_UX_SPEC §44: provider mode badge — lobby only, honest
+                about the experimental Shared mode (never implies support). */}
+            <span
+              className={`text-xs px-3 py-1 rounded-full border tracking-[0.16em] uppercase ${
+                snapshot.provider.mode === "PROVIDER_SHARED"
+                  ? "border-amber-400/40 text-amber-200/90 bg-amber-400/10"
+                  : "border-sky-400/30 text-sky-200/80 bg-sky-400/10"
+              }`}
+              data-testid="provider-mode-badge"
+            >
+              {snapshot.provider.mode === "PROVIDER_SHARED"
+                ? "Shared Mode · Experimental"
+                : "Sync Mode"}
+            </span>
+            <span className="w-1 h-1 rounded-full bg-white/25" />
             <div className="flex items-center gap-2">
               <Users className="w-4 h-4" strokeWidth={1.5} />
               <span className="uppercase tracking-[0.2em] text-xs">

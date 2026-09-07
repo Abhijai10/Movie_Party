@@ -168,6 +168,9 @@ const tierState = (overrides: Partial<CameraTierState>): CameraTierState => ({
 describe("senderParametersForTier — Batch 13 movie-first encoder caps", () => {
   const baseParameters: RTCRtpSendParameters = {
     transactionId: "tx-1",
+    codecs: [],
+    headerExtensions: [],
+    rtcp: { cname: "movie-party", reducedSize: true },
     encodings: [{ rid: "0", active: true, maxBitrate: 5_500_000, maxFramerate: 30 }],
   };
 
@@ -180,6 +183,9 @@ describe("senderParametersForTier — Batch 13 movie-first encoder caps", () => 
   it("maps every encoder, not just the first (simulcast-proof)", () => {
     const two: RTCRtpSendParameters = {
       transactionId: "tx-2",
+      codecs: [],
+      headerExtensions: [],
+      rtcp: { cname: "movie-party", reducedSize: true },
       encodings: [
         { rid: "0", active: true },
         { rid: "1", active: true },

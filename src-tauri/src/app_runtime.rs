@@ -507,6 +507,10 @@ struct AppRuntimeState {
     /// Guest periodic BUFFER_STATUS reporter (PROTOCOL_SPEC §28 / MASTER_PRD
     /// §21: report every ~500 ms while Playing). Exactly one may exist.
     buffer_status_task: Option<tokio::task::JoinHandle<()>>,
+    /// Batch 14: Provider Sync watch worker — polls the provider's own
+    /// player (position + buffer) over CDP and feeds the coordinator
+    /// (PLAYER_STATE / BUFFER_LOW equivalents). Exactly one may exist.
+    provider_watch_task: Option<tokio::task::JoinHandle<()>>,
     /// Scheduled preload preparation task, cancelled with the active party.
     preload_task: Option<tokio::task::JoinHandle<()>>,
     /// Last offline-preload notice per schedule, preventing scheduler spam.
@@ -711,6 +715,7 @@ impl AppRuntime {
                     reconnect_task: None,
                     heartbeat_task: None,
                     buffer_status_task: None,
+                    provider_watch_task: None,
                     preload_task: None,
                     preload_wait_notified_at: HashMap::new(),
                     db: None,
@@ -924,6 +929,11 @@ impl AppRuntime {
         let cdp_port = session.plan.cdp_port;
         let mut state = self.lock();
         state.chrome_session = Some(session);
+        // Batch 14: the provider browser is the room media — start the
+        // position/buffer watch worker (idempotent replace).
+        drop(state);
+        self.spawn_provider_watch_worker();
+        let mut state = self.lock();
         state.provider.mode = "PROVIDER_SYNC".to_string();
         state.provider.provider_id = Some(provider_id);
         state.provider.url = Some(url.clone());
@@ -1097,6 +1107,8 @@ impl AppRuntime {
     /// launching a new browser. Validates readiness before allowing the
     /// transition. The caller must have already created the room.
     pub fn attach_launched_provider(&self, provider_id: String, url: String) -> AppSnapshot {
+        // Batch 14: (re)attach the watch worker for the reused session.
+        self.spawn_provider_watch_worker();
         let mut state = self.lock();
         state.provider.mode = "PROVIDER_SYNC".to_string();
         state.provider.provider_id = Some(provider_id);
@@ -1721,6 +1733,9 @@ impl AppRuntime {
             if let Some(task) = state.buffer_status_task.take() {
                 task.abort();
             }
+            if let Some(task) = state.provider_watch_task.take() {
+                task.abort();
+            }
             if let Some(task) = state.reconnect_task.take() {
                 task.abort();
             }
@@ -2023,6 +2038,9 @@ impl AppRuntime {
                 task.abort();
             }
             if let Some(task) = state.buffer_status_task.take() {
+                task.abort();
+            }
+            if let Some(task) = state.provider_watch_task.take() {
                 task.abort();
             }
             if let Some(task) = state.preload_task.take() {
@@ -2393,6 +2411,9 @@ impl AppRuntime {
             Self::dispatch_player_play(&mut state);
             sync_room_snapshot(&mut state);
             let snapshot = snapshot_from_state(&state);
+            drop(state);
+            // Batch 14: PROVIDER_SYNC rooms drive the provider browser.
+            runtime.dispatch_provider_commit("PLAY", target);
             runtime.inner.emit(snapshot);
         });
     }
@@ -2460,6 +2481,9 @@ impl AppRuntime {
             Self::dispatch_player_pause(&mut state);
             sync_room_snapshot(&mut state);
             let snapshot = snapshot_from_state(&state);
+            drop(state);
+            // Batch 14: PROVIDER_SYNC rooms drive the provider browser.
+            runtime.dispatch_provider_commit("PAUSE", target);
             runtime.inner.emit(snapshot);
         });
     }
@@ -2525,6 +2549,9 @@ impl AppRuntime {
                 Self::dispatch_player_seek(&mut state, target);
                 sync_room_snapshot(&mut state);
                 let snapshot = snapshot_from_state(&state);
+                drop(state);
+                // Batch 14: PROVIDER_SYNC rooms drive the provider browser.
+                runtime.dispatch_provider_commit("SEEK", target);
                 runtime.inner.emit(snapshot);
             }
             // §31: when the seek resumes, the host follows with the play
@@ -3019,7 +3046,11 @@ impl AppRuntime {
                         Self::dispatch_player_play(&mut state);
                         sync_room_snapshot(&mut state);
                         let snapshot = snapshot_from_state(&state);
-
+                        drop(state);
+                        // Batch 14: PROVIDER_SYNC rooms drive the provider
+                        // browser with the same canonical commit.
+                        Self::from_inner(&inner_for_task)
+                            .dispatch_provider_commit("PLAY", target_position_ms);
                         inner_for_task.emit(snapshot);
                     });
                 }
@@ -3088,6 +3119,11 @@ impl AppRuntime {
                         Self::dispatch_player_pause(&mut state);
                         sync_room_snapshot(&mut state);
                         let snapshot = snapshot_from_state(&state);
+                        drop(state);
+                        // Batch 14: PROVIDER_SYNC rooms drive the provider
+                        // browser with the same canonical commit.
+                        Self::from_inner(&inner_for_task)
+                            .dispatch_provider_commit("PAUSE", target_position_ms);
                         inner_for_task.emit(snapshot);
                     });
                 }
@@ -3156,6 +3192,11 @@ impl AppRuntime {
                         Self::dispatch_player_seek(&mut state, target_position_ms);
                         sync_room_snapshot(&mut state);
                         let snapshot = snapshot_from_state(&state);
+                        drop(state);
+                        // Batch 14: PROVIDER_SYNC rooms drive the provider
+                        // browser with the same canonical commit.
+                        Self::from_inner(&inner_for_task)
+                            .dispatch_provider_commit("SEEK", target_position_ms);
                         inner_for_task.emit(snapshot);
                     });
                 }
@@ -3473,6 +3514,26 @@ impl AppRuntime {
                 && state.pending_operation_id.is_none()
                 && state.commit_scheduled_for.is_none()
             {
+                return snapshot_from_state(&state);
+            }
+            // Batch 14 readiness gate (audit P3): a Provider Sync room
+            // must not start the play protocol until the provider's own
+            // page reports playback-ready media over CDP. Starting the
+            // protocol on an unready provider would commit both sides
+            // to a black window (no silent fallback — honest error).
+            if Self::provider_browser_is_media(&state)
+                && state.provider.readiness
+                    != crate::providers::sync::ProviderReadiness::PlaybackReady
+            {
+                state.error = Some(match state.provider.readiness {
+                    crate::providers::sync::ProviderReadiness::LoginRequired => {
+                        "MP-PROVIDER-004 sign in to the provider before starting playback"
+                            .to_string()
+                    }
+                    _ => "MP-PROVIDER-003 open a title in the provider before starting playback"
+                        .to_string(),
+                });
+                sync_room_snapshot(&mut state);
                 return snapshot_from_state(&state);
             }
             // A protocol cycle is already in flight; ignore the repeat tap
@@ -3835,6 +3896,296 @@ impl AppRuntime {
                 && state.player.is_some()
                 && state.player_snapshot.error_message.is_none()
         }
+    }
+
+    /// Batch 14 (audit P3): Provider Sync watch worker. Polls the
+    /// provider's own HTML5 player over CDP (position + buffered-ahead)
+    /// while a provider-mode room is Playing, and feeds the readings into
+    /// the coordinator — the provider-side equivalents of the guest
+    /// PLAYER_STATE / BUFFER_LOW reports:
+    ///
+    /// - position → `state.sync.position_ms` (the host's own media clock in
+    ///   PROVIDER_SYNC mode IS the provider player)
+    /// - buffered-ahead < 3 s (PROTOCOL buffer gate) → strict-sync pause
+    ///   via the coordinator's `buffer_low` (AGENTS §14: the host stops
+    ///   when the movie source cannot continue)
+    /// - player gone (no media element / browser closed) → honest
+    ///   MP-PROVIDER-003 error + strict pause (no silent fallback)
+    ///
+    /// Exactly one worker exists; spawning replaces (aborts) the old one,
+    /// and the leave/end teardown paths abort it with the room.
+    fn spawn_provider_watch_worker(&self) {
+        use crate::providers::sync::{buffer_command, position_command};
+
+        let runtime = self.clone();
+        let task = tokio::spawn(async move {
+            let mut command_id: u64 = 1;
+            loop {
+                tokio::time::sleep(PROVIDER_WATCH_INTERVAL).await;
+                // Gate: only act for a Playing provider-mode room with a
+                // live browser. Anything else: idle-wait (the same worker
+                // adopts a later provider room).
+                let (should_poll, provider_id) = {
+                    let state = runtime.lock();
+                    let active = state.room_state == RoomState::Playing
+                        && !state.sync.strict_sync_paused
+                        && Self::provider_browser_is_media(&state)
+                        && state.chrome_session.is_some();
+                    let provider = state
+                        .provider
+                        .provider_id
+                        .clone()
+                        .and_then(|id| crate::providers::sync::provider_id_from_str(&id));
+                    (active && provider.is_some(), provider)
+                };
+                let Some(provider) = provider_id else {
+                    continue;
+                };
+                if !should_poll {
+                    continue;
+                }
+                command_id = command_id.wrapping_add(2);
+
+                // CDP round-trip out of the state lock (same take/execute/
+                // return pattern as dispatch_provider_commit).
+                let inner = runtime.inner.clone();
+                let session_taken = { runtime.lock().chrome_session.take() };
+                let poll_result = match session_taken {
+                    Some(session) => {
+                        let execution = match session.connect_page() {
+                            Ok(mut page) => {
+                                let position_cmd = position_command(provider, command_id);
+                                let buffer_cmd = buffer_command(provider, command_id + 1);
+                                let position = page.execute(&position_cmd);
+                                let buffer = page.execute(&buffer_cmd);
+                                match (position, buffer) {
+                                    (Ok(p), Ok(b)) => {
+                                        let seconds = p["result"]["value"].as_f64().or_else(|| {
+                                            p["result"]["value"].as_i64().map(|v| v as f64)
+                                        });
+                                        let buffered_end =
+                                            b["result"]["value"].as_f64().or_else(|| {
+                                                b["result"]["value"].as_i64().map(|v| v as f64)
+                                            });
+                                        Ok((seconds, buffered_end))
+                                    }
+                                    (Err(e), _) | (_, Err(e)) => Err(e),
+                                }
+                            }
+                            Err(error) => Err(error),
+                        };
+                        // Return the session to the state.
+                        let mut state = inner.lock();
+                        if state.chrome_session.is_none() {
+                            state.chrome_session = Some(session);
+                        }
+                        execution
+                    }
+                    None => continue,
+                };
+
+                match poll_result {
+                    Ok((Some(position_seconds), Some(buffered_end_seconds))) => {
+                        let ahead_seconds = (buffered_end_seconds - position_seconds).max(0.0);
+                        let recovery =
+                            crate::providers::sync::recovery_action(Some(ahead_seconds), true);
+                        let snapshot = {
+                            let mut state = runtime.lock();
+                            state.sync.position_ms = (position_seconds * 1_000.0).max(0.0) as u64;
+                            state.buffer.guest_buffer_ahead_ms = (ahead_seconds * 1_000.0) as u64;
+                            if recovery
+                                == crate::providers::sync::ProviderRecoveryAction::StrictGlobalPause
+                            {
+                                // Strict sync (AGENTS §14): the provider
+                                // source cannot continue → the room pauses.
+                                let _ = state
+                                    .sync_coordinator
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .buffer_low(PeerRole::Host, state.sync.position_ms);
+                                state.room_state = RoomState::Buffering;
+                                state.sync.strict_sync_paused = true;
+                            }
+                            snapshot_from_state(&state)
+                        };
+                        runtime.inner.emit(snapshot);
+                    }
+                    Ok((Some(_), None)) | Ok((None, Some(_))) => {
+                        // Partial media state: treat as no readable player.
+                        Self::record_provider_command_failure(
+                            &runtime.inner,
+                            crate::providers::sync::ProviderRuntimeError::MediaNotDetected,
+                        );
+                    }
+                    Ok((None, None)) => {
+                        // No media element on the page: honest failure.
+                        Self::record_provider_command_failure(
+                            &runtime.inner,
+                            crate::providers::sync::ProviderRuntimeError::MediaNotDetected,
+                        );
+                    }
+                    Err(error) => {
+                        let mapped = crate::providers::sync::command_error_to_runtime_error(&error);
+                        Self::record_provider_command_failure(&runtime.inner, mapped);
+                    }
+                }
+            }
+        });
+        let mut state = self.lock();
+        if let Some(old) = state.provider_watch_task.replace(task) {
+            old.abort();
+        }
+    }
+
+    // ── Batch 14: Provider Sync canonical-commit dispatch (audit P3) ──────
+
+    /// True when the room's media lives in the managed provider browser
+    /// (not the local mpv player) — canonical commits must drive the
+    /// provider adapter over CDP. GENERIC_LINK rooms use the same managed
+    /// browser; SHARED mode remains experimental/blocked (AGENTS §30).
+    fn provider_browser_is_media(state: &AppRuntimeState) -> bool {
+        matches!(
+            state.provider.mode.as_str(),
+            "PROVIDER_SYNC" | "GENERIC_LINK"
+        )
+    }
+
+    /// Batch 14: dispatch a canonical commit to the live provider browser
+    /// via its adapter (CDP play/pause/seek). The coordinator stays the
+    /// single authority (AGENTS §15): only canonical commits reach this —
+    /// guest CONTROL_REQUESTs are already normalized into host canonical
+    /// operations upstream.
+    ///
+    /// CDP is blocking TCP: the session is moved OUT of the state lock
+    /// (into a spawned task) so a slow browser never freezes the runtime.
+    /// Failures surface honestly (MP-PROVIDER-003/004, AGENTS §29) — no
+    /// silent fallback to any other media mode.
+    /// Private constructor from the shared inner: lets the static event
+    /// loop arms (which only hold `&Arc<RuntimeInner>`) call the runtime's
+    /// provider-dispatch method.
+    fn from_inner(inner: &Arc<RuntimeInner>) -> Self {
+        Self {
+            inner: inner.clone(),
+        }
+    }
+
+    fn dispatch_provider_commit(&self, commit_kind: &str, target_ms: u64) {
+        use crate::providers::sync::{command_for_action, provider_sync_action_for_commit};
+
+        let (provider_id, action) = {
+            let state = self.lock();
+            if !Self::provider_browser_is_media(&state) {
+                return;
+            }
+            let Some(provider_id) = state.provider.provider_id.clone() else {
+                return;
+            };
+            let Some(action) = provider_sync_action_for_commit(commit_kind, target_ms) else {
+                return;
+            };
+            if state.chrome_session.is_none() {
+                return;
+            }
+            (provider_id, action)
+        };
+
+        let inner = self.inner.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            // Snapshot execution context under the lock, run CDP outside it.
+            let context = {
+                let mut state = inner.lock();
+                let provider = match crate::providers::sync::provider_id_from_str(&provider_id) {
+                    Some(p) => p,
+                    None => return,
+                };
+                let session_alive = state
+                    .chrome_session
+                    .as_mut()
+                    .map(|session| session.is_alive())
+                    .unwrap_or(false);
+                (provider, session_alive)
+            };
+            let (provider, session_alive) = context;
+            if !session_alive {
+                Self::record_provider_command_failure(
+                    &inner,
+                    crate::providers::sync::ProviderRuntimeError::ProviderPageClosed,
+                );
+                return;
+            }
+            // Move the session OUT of the locked state for the CDP
+            // round-trip (blocking TCP, up to the CDP read timeout): a
+            // slow browser must never freeze the runtime lock. A
+            // concurrent dispatch during the window sees no session and
+            // honestly reports the browser as closed; canonical commits
+            // are serialized by the coordinator, so this window is rare.
+            let session_taken = {
+                let mut state = inner.lock();
+                state.chrome_session.take()
+            };
+            let result = match session_taken {
+                Some(session) => {
+                    let execution = match session.connect_page() {
+                        Ok(mut page) => {
+                            let command =
+                                command_for_action(provider, page.next_command_id(), action);
+                            page.execute(&command)
+                        }
+                        Err(error) => Err(error),
+                    };
+                    // Return the session to the state regardless of the
+                    // command outcome: only the RESULT is a failure, the
+                    // browser itself may be perfectly alive.
+                    let mut state = inner.lock();
+                    if state.chrome_session.is_none() {
+                        state.chrome_session = Some(session);
+                    }
+                    execution
+                }
+                None => Err(crate::providers::chrome::ManagedChromeError::Process(
+                    "browser not launched".to_string(),
+                )),
+            };
+            match result {
+                Ok(_) => {
+                    // Confirm: the provider executed the canonical action.
+                }
+                Err(error) => {
+                    let mapped = crate::providers::sync::command_error_to_runtime_error(&error);
+                    Self::record_provider_command_failure(&inner, mapped);
+                }
+            }
+        });
+    }
+
+    /// Batch 14: surface a provider command failure honestly (no silent
+    /// fallback): sets the provider snapshot to Error with the stable
+    /// MP-PROVIDER code, mirrors the code into the room error field, and
+    /// emits the snapshot so the UI reflects the failure immediately.
+    fn record_provider_command_failure(
+        inner: &Arc<RuntimeInner>,
+        error: crate::providers::sync::ProviderRuntimeError,
+    ) {
+        let (code, description) = crate::providers::sync::provider_runtime_error_response(error);
+        let snapshot = {
+            let mut state = inner.lock();
+            state.provider.readiness = crate::providers::sync::ProviderReadiness::Error;
+            state.provider.state = description;
+            state.error = Some(code.to_string());
+            // A dead provider browser is a strict-sync pause condition
+            // (AGENTS §14): both sides stop when the media source fails.
+            if state.room_state == RoomState::Playing {
+                let _ = state
+                    .sync_coordinator
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .buffer_low(PeerRole::Host, state.sync.position_ms);
+                state.room_state = RoomState::Buffering;
+                state.sync.strict_sync_paused = true;
+            }
+            snapshot_from_state(&state)
+        };
+        inner.emit(snapshot);
     }
 
     /// M3: Dispatch a play command to the live player instance, if present.
@@ -4396,6 +4747,9 @@ impl AppRuntime {
         if let Some(task) = state.buffer_status_task.take() {
             task.abort();
         }
+        if let Some(task) = state.provider_watch_task.take() {
+            task.abort();
+        }
         if let Some(task) = state.preload_task.take() {
             task.abort();
         }
@@ -4585,6 +4939,12 @@ const CAMERA_TIER_MIN_DWELL_MS: u64 = 1_000;
 /// verification scenario and a typical HD stream; overestimating the
 /// movie keeps the camera conservative (movie-first, AGENTS §37).
 const FALLBACK_MOVIE_BITRATE_BPS: u64 = 5_000_000;
+
+/// Batch 14: provider player poll cadence. 1 s balances CDP cost against
+/// the 3 s buffer gate the recovery policy applies (several consecutive
+/// low readings are needed before a strict pause triggers via
+/// `recovery_action`, so a single transient cannot pause the room).
+const PROVIDER_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Batch 13: adaptive camera ladder evaluation on an already-held state
 /// guard. Same policy as `AppRuntime::evaluate_camera_ladder` (which see);
@@ -7659,5 +8019,116 @@ mod camera_ladder_tests {
         assert!(json.contains("\"targetBitrateBps\""));
         assert!(json.contains("\"tier\":\"B\""));
         assert!(!json.contains("target_bitrate_bps"));
+    }
+}
+
+// ── Batch 14: Provider Sync runtime dispatch tests (audit P3) ────────────────
+
+#[cfg(test)]
+mod provider_dispatch_tests {
+    use super::AppRuntime;
+    use crate::providers::sync::ProviderReadiness;
+
+    /// A room whose media is the provider browser, with a provider id set
+    /// and the given readiness.
+    fn provider_room(readiness: ProviderReadiness) -> AppRuntime {
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            state.provider.mode = "PROVIDER_SYNC".to_string();
+            state.provider.provider_id = Some("youtube".to_string());
+            state.provider.url = Some("https://www.youtube.com/watch?v=abc".to_string());
+            state.provider.readiness = readiness;
+        }
+        runtime
+    }
+
+    /// Batch 14 readiness gate: host_play must refuse to start the play
+    /// protocol until the provider's own page reports playback-ready
+    /// media. Honest MP-PROVIDER error, never a silent local fallback.
+    #[test]
+    fn host_play_gates_on_playback_ready_in_provider_mode() {
+        let runtime = provider_room(ProviderReadiness::Ready);
+        let snapshot = runtime.host_play();
+        assert!(
+            snapshot
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("MP-PROVIDER-003"),
+            "gate error: {:?}",
+            snapshot.error
+        );
+        // No play protocol was started.
+        assert!(snapshot.call_signals.is_empty());
+    }
+
+    #[test]
+    fn host_play_login_required_maps_to_the_login_gate_code() {
+        let runtime = provider_room(ProviderReadiness::LoginRequired);
+        let snapshot = runtime.host_play();
+        assert!(
+            snapshot
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("MP-PROVIDER-004"),
+            "login gate error: {:?}",
+            snapshot.error
+        );
+    }
+
+    #[test]
+    fn playback_ready_provider_room_passes_the_gate() {
+        let runtime = provider_room(ProviderReadiness::PlaybackReady);
+        let snapshot = runtime.host_play();
+        // Past the gate: the error is not a provider gate error (the play
+        // protocol may fail later for sync reasons, but the readiness
+        // gate itself did not block).
+        assert!(
+            !snapshot
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("MP-PROVIDER-"),
+            "unexpected provider gate error: {:?}",
+            snapshot.error
+        );
+    }
+
+    /// No silent fallback (AGENTS §29): a failed provider command must
+    /// surface MP-PROVIDER-003 and strict-pause a Playing room, never
+    /// pretend local playback continued.
+    #[test]
+    fn provider_command_failure_strict_pauses_and_surfaces_the_error() {
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            state.provider.mode = "PROVIDER_SYNC".to_string();
+            state.provider.provider_id = Some("youtube".to_string());
+            state.room_state = crate::sync::state_machine::RoomState::Playing;
+        }
+        super::AppRuntime::record_provider_command_failure(
+            &runtime.inner,
+            crate::providers::sync::ProviderRuntimeError::ProviderPageClosed,
+        );
+        let state = runtime.lock();
+        assert_eq!(state.provider.readiness, ProviderReadiness::Error);
+        assert!(
+            state
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("MP-PROVIDER-003"),
+            "error: {:?}",
+            state.error
+        );
+        // Strict sync (AGENTS §14): the room cannot stay Playing when
+        // the movie source died.
+        assert_eq!(
+            state.room_state,
+            crate::sync::state_machine::RoomState::Buffering
+        );
+        assert!(state.sync.strict_sync_paused);
     }
 }

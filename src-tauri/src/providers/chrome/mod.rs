@@ -358,7 +358,7 @@ impl CdpPageSession {
         }
     }
 
-    fn next_command_id(&mut self) -> u64 {
+    pub(crate) fn next_command_id(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         id
