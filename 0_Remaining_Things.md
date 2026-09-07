@@ -97,10 +97,15 @@ same day. Highest-impact findings:
    opt-in self-test flag. Gates green (326 Rust tests, lint/vitest/tsc
    clean). ⚠ REAL two-device call (camera/mic permissions, Tailscale
    direct path, Windows guest): EXTERNAL VERIFICATION PENDING.
-3. 🔴 **P3 — Provider Sync never dispatches canonical playback ops**:
-   coordinator commits do not reach provider adapters (play/pause/seek
-   commands exist with no runtime callers); provider position/buffer never
-   feed the sync engine — Batch 14.
+3. ✅ **P3 — Provider Sync never dispatches canonical playback ops** —
+   CLOSED in Batch 14: canonical commits dispatch to provider adapters at
+   all six commit points (CDP on spawn_blocking, session moved out of the
+   state lock); a provider watch worker polls position/buffer (1 s) and
+   feeds the coordinator (strict pause < 3 s ahead); host_play gates on
+   PlaybackReady; failures map to MP-PROVIDER-003/004 with no silent
+   fallback; §44 lobby badge added. ⚠ REAL provider-browser verification
+   (YouTube commands over CDP on the physical device): EXTERNAL
+   VERIFICATION PENDING.
 4. 🟡 **P4/P5/P7 — Spec-vs-implementation drift in the social UI**:
    Ready Check countdown is a frontend timer (spec: sync-engine-driven);
    chat layout contradicts UI_UX_SPEC §34–36 (see the note in §16 below —
@@ -132,7 +137,11 @@ same day. Highest-impact findings:
 10. 🟡 **P12/P13 — Release/watcher gaps**: no CSP, no release cargo
     profile, no dependency audits in CI, macOS signing/notarization
     absent; Chrome-crash + player-failure watchers still unwired
-    (recovery plans exist) — Batches 18, 22.
+    (recovery plans exist) — Batches 18, 22. NOTE: the Chrome LIFECYCLE
+    half of P13 is fixed (Batches 13/14 round): graceful Browser.close +
+    bounded wait everywhere (Drop, leave_party, return_home, app exit),
+    fail-fast launch when the child dies pre-CDP — the crash WATCHERS
+    (in-session failure overlay) are still Batch 18.
 11. 🔴 **P14 — Preload units bug (verify-then-fix)**: two duplicate
     preload-start implementations disagree — `scheduling/mod.rs` is
     bits-correct, but `storage/sqlite.rs::calculate_preload_start`
@@ -140,6 +149,12 @@ same day. Highest-impact findings:
     off at the call site) — Batch 16.
 12. 🧪 **P18 — the entire §31 manual verification matrix remains
     pending** (by design; agents must never fake it).
+
+13. ✅ **P16 hygiene (exFAT-era AppleDouble files)** — RESOLVED this
+    round: the disk is now APFS; 246 `._*` junk files were purged from
+    `.git` (git fsck now clean — the old badRefName/bad-sha1 errors are
+    gone), working-tree `._*` removed, and `.gitignore` already covers
+    them going forward.
 
 Verified-correct highlights from the same audit (do NOT redo): sync math
 is spec-exact (drift bands / p95 RTT / lead-time formula), drift
@@ -1786,11 +1801,17 @@ D1–D4 live in `docs/core_docs/V1_COMPLETION_PLAN.md`.
    self-view. Loopback demo behind localhost opt-in flag only.
    ⚠ REAL two-device call verification pending (camera/mic permissions,
    Tailscale direct path, Windows guest).
-3. **Batch 13 — Adaptive camera ladder** (P17): 480p20 → 240p10 → frozen,
-   once-per-event degradation notice, movie-first priority policy.
-4. **Batch 14 — Provider Sync runtime completion** (P3): canonical commits
-   dispatch to provider adapters; provider position/buffer feed the
-   coordinator; YouTube first.
+3. ✅ **Batch 13 — Adaptive camera ladder** (P17) — COMPLETE: runtime
+   evaluation at every observation point (goodput/RTT/buffer feedback,
+   movie-gated), 1 s anti-flap dwell, once-per-event notice, sender
+   setParameters + applyConstraints application (no renegotiation),
+   camelCase serde contract fix. ⚠ Real congestion shift verification
+   pending.
+4. ✅ **Batch 14 — Provider Sync runtime completion** (P3) — COMPLETE:
+   canonical commits dispatch to adapters at all six commit points,
+   provider watch worker feeds the coordinator, PlaybackReady gate,
+   MP-PROVIDER-003/004 mapping, §44 badge. ⚠ Real provider browser
+   verification pending.
 5. **Batch 15 — Missing screens I** (P6): Settings, First Run,
    Error screen, Debug HUD, window-close-during-party prompt.
 6. **Batch 16 — Scheduling frontend + protocol** (P8/P14): Schedule form,

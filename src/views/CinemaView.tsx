@@ -515,15 +515,20 @@ export function CinemaView({
   // (encoder caps + track constraints — no SDP renegotiation). Keyed on
   // the full tier parameter set so re-renders with an unchanged tier
   // never re-apply constraints.
-  const cameraTierParams = `${snapshot.call.camera.tier}:${snapshot.call.camera.width}x${snapshot.call.camera.height}@${snapshot.call.camera.fps}:${snapshot.call.camera.targetBitrateBps}`;
+  const cameraTierParams = [
+    snapshot.call.camera.tier,
+    snapshot.call.camera.width,
+    snapshot.call.camera.height,
+    snapshot.call.camera.fps,
+    snapshot.call.camera.targetBitrateBps,
+  ].join(":");
   useEffect(() => {
     if (!callSessionLive) {
       return;
     }
-    void callSessionRef.current
-      ?.applyCameraTier(snapshot.call.camera)
-      .then(() => undefined)
-      .catch(() => undefined);
+    void (async () => {
+      await callSessionRef.current?.applyCameraTier(snapshot.call.camera);
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraTierParams, callSessionLive]);
 
@@ -535,8 +540,12 @@ export function CinemaView({
   useEffect(() => {
     if (snapshot.call.cameraNotice) {
       setPrivacyNotice(snapshot.call.cameraNotice);
-      const timer = window.setTimeout(() => setPrivacyNotice(""), cameraNoticeMs);
-      return () => window.clearTimeout(timer);
+      const timer = window.setTimeout(() => {
+        setPrivacyNotice("");
+      }, cameraNoticeMs);
+      return () => {
+        window.clearTimeout(timer);
+      };
     }
     return undefined;
   }, [snapshot.call.cameraNotice]);

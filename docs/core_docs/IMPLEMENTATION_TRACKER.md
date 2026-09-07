@@ -14,6 +14,59 @@ It must be updated continuously.
 
 ```text
 Project State:
+🟨 BATCHES 13 + 14 (CAMERA LADDER RUNTIME + PROVIDER SYNC DISPATCH) AND
+    CHROME LIFECYCLE FIX COMPLETE (code-level). Batch 13 closed audit
+    P17: the adaptive camera ladder now actually RUNS —
+    evaluate_camera_ladder feeds live feedback (measured goodput,
+    clock-calibrated RTT, guest buffer ahead, movie bitrate estimated
+    from manifest file_size/duration with a conservative 5 Mbps
+    fallback) into the existing pure recommend_camera_state policy at
+    every observation point (guest buffer-status worker tick, host
+    BufferLow/BufferRecovered arms, guest chunk-goodput updates).
+    Movie-first guard: the ladder runs ONLY while a movie is actually
+    in flight (manifest present) — unmeasured inputs can never disable
+    the camera when there is nothing to protect (AGENTS §37). Anti-
+    flap: 1 s minimum dwell between tier changes. Once-per-event
+    degradation notice (call.cameraNotice) with upgrade-resets-episode
+    semantics; frontend maps the tier onto the LIVE sender with
+    setParameters encoder caps + applyConstraints downscale (NO SDP
+    renegotiation — the Batch-12 non-trickle session keeps flowing) and
+    freezes the track for tier D (PRD §41). Also fixed a latent serde
+    bug: CameraState serialized snake_case (target_bitrate_bps) while
+    the TS contract declared targetBitrateBps — the field was
+    undefined at runtime until now. Batch 14 closed audit P3: canonical
+    commits now REACH the provider — provider_sync_action_for_commit
+    maps PLAY/PAUSE/SEEK commits to adapter actions (ms→seconds);
+    dispatch_provider_commit runs at all six canonical commit points
+    (host play/pause/seek ready paths + peer-event commit arms) with
+    the CDP round-trip on spawn_blocking, session moved OUT of the
+    state lock (a slow browser never freezes the runtime); guest
+    CONTROL_REQUESTs flow through the same canonical operations
+    (AGENTS §15 single authority). A provider watch worker (1 s, one
+    instance, replace-spawned) polls the provider's own HTML5 player —
+    position feeds sync.position_ms (the provider IS the host media
+    clock in PROVIDER_SYNC), buffered-ahead < 3 s triggers a strict-
+    sync pause through the coordinator (AGENTS §14), and a dead player
+    surfaces MP-PROVIDER-003 + strict pause (no silent fallback, §29).
+    host_play now GATES on PlaybackReady (MP-PROVIDER-003/004 honest
+    codes — the protocol never commits both sides to a black window).
+    Lobby shows the §44 provider-mode badge (Sync Mode / Shared Mode ·
+    Experimental). Chrome lifecycle fixed (user-reported "exits
+    unexpectedly"): close_gracefully (Browser.close + ≤3 s wait, kill
+    only as fallback) is now used by Drop, leave_party, return_home,
+    close_provider_session AND app exit (RunEvent::Exit); launch fails
+    fast when the child dies before CDP comes up (macOS Chrome
+    redirect / locked profile) instead of a misleading CdpTimeout 10 s
+    later — SIGKILL'd profiles were the dirty-profile root cause.
+    Gates ALL green: cargo fmt --check, clippy -D warnings, 343 Rust
+    tests (0 fail), pnpm lint, tsc --noEmit, vitest 114 (0 fail), pnpm
+    build. NOT verifiable here: a REAL two-device session with a live
+    provider browser (YouTube playback commands over CDP, camera tier
+    shifts under real congestion, Chrome restart behavior on the
+    physical device) → ⚠ EXTERNAL VERIFICATION PENDING.
+    Next permitted: Batch 15.
+
+Previous:
 🟨 BATCH 12 (REAL CROSS-DEVICE CALL SESSION) COMPLETE (code-level).
     Audit finding P2 closed: the video call is now a real per-device
     RTCPeerConnection session signalled through the host relay instead
