@@ -472,6 +472,13 @@ struct AppRuntimeState {
     /// Last peer request routed to the host under Shared Controls (guest side,
     /// for ControlDeny surfacing).
     pending_guest_request_id: Option<String>,
+    /// Batch 16 (§56): schedule id the guest most recently accepted /
+    /// received, awaiting the host's echo before clearing.
+    pending_guest_schedule: Option<String>,
+    /// Batch 16 (§57): latest host preload progress observed for the
+    /// newest schedule (state string + 0..1 progress) — feeds the Home
+    /// "Upcoming" card.
+    pending_preload_state: Option<(String, f64)>,
     // ── M3: Live player ownership ────────────────────────────────────────
     /// Optional player instance owned by AppRuntime. When present,
     /// coordinator commits (play/pause/seek) dispatch to this player.
@@ -703,6 +710,8 @@ impl AppRuntime {
                     clock_calibrated: false,
                     calibration_task: None,
                     pending_guest_request_id: None,
+                    pending_guest_schedule: None,
+                    pending_preload_state: None,
                     player: None,
                     range_server_handle: None,
                     guest_cache: None,
@@ -1294,6 +1303,105 @@ impl AppRuntime {
         db.list_schedules().map_err(|e| format!("MP-STORE-001 {e}"))
     }
 
+    /// Batch 16 (§55): host creates a schedule AND broadcasts it so the
+    /// guest persists it + registers reminders (§56). Runs the canonical
+    /// validations from `create_schedule`, then wires the wire event.
+    pub fn create_and_broadcast_schedule(
+        &self,
+        room_id: &str,
+        media_id: &str,
+        scheduled_start_utc_ms: i64,
+        planned_preload_utc_ms: i64,
+        guest_device_id: &str,
+        call_mode: &str,
+    ) -> Result<String, String> {
+        let schedule_id = self.create_schedule(
+            room_id,
+            media_id,
+            scheduled_start_utc_ms,
+            planned_preload_utc_ms,
+            guest_device_id,
+        )?;
+        let mut state = self.lock();
+        Self::send_host_event(
+            &mut state,
+            QuicServerEvent::ScheduleCreate {
+                schedule_id: schedule_id.clone(),
+                scheduled_start_utc_ms,
+                media_id: media_id.to_string(),
+                call_mode: call_mode.to_string(),
+                planned_preload_utc_ms,
+            },
+        );
+        Ok(schedule_id)
+    }
+
+    /// Batch 16 (§56): guest acknowledges a received schedule. The guest
+    /// persists on ScheduleCreate (apply_peer_event); this sends the
+    /// acceptance to the host, whose echo clears the pending marker.
+    pub fn guest_accept_schedule(&self, schedule_id: &str, accepted: bool) -> AppSnapshot {
+        let client = {
+            let mut state = self.lock();
+            state.pending_guest_schedule = Some(schedule_id.to_string());
+            state.client.clone()
+        };
+        if let Some(client) = client {
+            let schedule_id = schedule_id.to_string();
+            tokio::spawn(async move {
+                let _ = client.send_schedule_accept(schedule_id, accepted).await;
+            });
+        }
+        self.snapshot()
+    }
+
+    /// Latest preload progress the guest observed (§57) — feeds the Home
+    /// Upcoming card. (state, progress 0..1)
+    pub fn pending_preload_state(&self) -> Option<(String, f64)> {
+        self.lock().pending_preload_state.clone()
+    }
+
+    /// Batch 16 (§55): update media AND broadcast so the guest's persisted
+    /// copy stays truthful. Host-authoritative (AGENTS §15).
+    pub fn update_and_broadcast_schedule_media(
+        &self,
+        schedule_id: &str,
+        media_id: &str,
+        planned_preload_utc_ms: i64,
+        scheduled_start_utc_ms: i64,
+    ) -> Result<(), String> {
+        self.update_schedule_media(schedule_id, media_id)?;
+        let mut state = self.lock();
+        Self::send_host_event(
+            &mut state,
+            QuicServerEvent::ScheduleUpdate {
+                schedule_id: schedule_id.to_string(),
+                media_id: media_id.to_string(),
+                planned_preload_utc_ms,
+                scheduled_start_utc_ms,
+            },
+        );
+        Ok(())
+    }
+
+    /// Batch 16 (§56): cancel AND broadcast — the guest marks its copy
+    /// Cancelled so no reminder ever fires for a dead schedule.
+    pub fn cancel_and_broadcast_schedule(&self, schedule_id: &str) -> Result<(), String> {
+        let mut state = self.lock();
+        let db = state
+            .db
+            .clone()
+            .ok_or_else(|| "MP-STORE-001 no database".to_string())?;
+        db.update_schedule_status(schedule_id, "Cancelled")
+            .map_err(|e| format!("MP-STORE-001 {e}"))?;
+        Self::send_host_event(
+            &mut state,
+            QuicServerEvent::ScheduleCancel {
+                schedule_id: schedule_id.to_string(),
+            },
+        );
+        Ok(())
+    }
+
     /// Update the media id of a schedule (rescheduling).
     pub fn update_schedule_media(&self, schedule_id: &str, media_id: &str) -> Result<(), String> {
         if media_id.trim().is_empty() {
@@ -1456,6 +1564,17 @@ impl AppRuntime {
                                     schedule.media_id
                                 ),
                             );
+                            // Batch 16 (§57): broadcast the preload start so
+                            // the guest's Home Upcoming card flips to
+                            // "Preload 0%". Progress updates continue from
+                            // the transfer path.
+                            let event = QuicServerEvent::PreloadState {
+                                schedule_id: schedule.schedule_id.clone(),
+                                state: "TRANSFERRING".to_string(),
+                                progress: 0.0,
+                                estimated_ready_utc_ms: schedule.planned_preload_utc_ms,
+                            };
+                            broadcast_from_inner(&inner, event);
                         }
                         Ok(crate::scheduling::preload::PreloadOutcome::WaitingForPrerequisites) => {
                             // Peer/session unavailable: persist a waiting
@@ -1463,6 +1582,17 @@ impl AppRuntime {
                             // poll (due_schedules includes WaitingForPeer).
                             let _ =
                                 db.update_schedule_status(&schedule.schedule_id, "WaitingForPeer");
+                            // §57: the guest sees the honest waiting state,
+                            // never a stuck progress bar.
+                            broadcast_from_inner(
+                                &inner,
+                                QuicServerEvent::PreloadState {
+                                    schedule_id: schedule.schedule_id.clone(),
+                                    state: "WAITING_FOR_GUEST".to_string(),
+                                    progress: 0.0,
+                                    estimated_ready_utc_ms: schedule.planned_preload_utc_ms,
+                                },
+                            );
                             let should_notify = {
                                 let mut state = inner.lock();
                                 should_notify_preload_wait(
@@ -1485,6 +1615,18 @@ impl AppRuntime {
                             let _ =
                                 db.update_schedule_status(&schedule.schedule_id, "PreloadFailed");
                             eprintln!("MovieParty: preload executor failed: {error}");
+                            // §57: honest FAILED state on the wire — the
+                            // guest's Upcoming card must never sit at a
+                            // stale percentage.
+                            broadcast_from_inner(
+                                &inner,
+                                QuicServerEvent::PreloadState {
+                                    schedule_id: schedule.schedule_id.clone(),
+                                    state: "FAILED".to_string(),
+                                    progress: 0.0,
+                                    estimated_ready_utc_ms: schedule.planned_preload_utc_ms,
+                                },
+                            );
                         }
                     }
                 }
@@ -2331,6 +2473,25 @@ impl AppRuntime {
                 self.inner.emit(snapshot);
                 let _ = quality;
             }
+            // Batch 16 (§56): the guest accepted the schedule. Mark the
+            // stored schedule Accepted so the host's Home Upcoming card and
+            // the scheduler stop treating it as pending confirmation.
+            QuicHostEvent::GuestScheduleAccept {
+                broadcaster_device_id: _,
+                schedule_id,
+                accepted,
+            } => {
+                let db = self.lock().db.clone();
+                if let Some(db) = db {
+                    if accepted {
+                        let _ = db.update_schedule_status(&schedule_id, "Accepted");
+                    } else {
+                        let _ = db.update_schedule_status(&schedule_id, "Declined");
+                    }
+                }
+                let snapshot = self.snapshot();
+                self.inner.emit(snapshot);
+            }
         }
     }
 
@@ -2894,6 +3055,32 @@ impl AppRuntime {
         }
     }
 
+    /// Batch 16 test seam: the runtime's Arc<RuntimeInner> for direct
+    /// event delivery in tests.
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    fn inner_for_events(&self) -> std::sync::Arc<RuntimeInner> {
+        std::sync::Arc::clone(&self.inner)
+    }
+
+    /// Batch 16 test seam: deliver a guest-side peer event directly.
+    #[cfg(test)]
+    fn apply_peer_event_pub(
+        inner: &std::sync::Arc<RuntimeInner>,
+        env: EventEnvelope,
+        event: QuicServerEvent,
+    ) {
+        Self::apply_peer_event(inner, &env, event);
+    }
+
+    /// Batch 16 test seam: deliver a host-side QUIC event directly.
+    #[cfg(test)]
+    fn apply_host_event_pub(inner: &std::sync::Arc<RuntimeInner>, event: QuicHostEvent) {
+        // apply_host_event is a &self method; reconstruct via from_inner.
+        let runtime = Self::from_inner(inner);
+        runtime.apply_host_event(event);
+    }
+
     fn apply_peer_event(
         inner: &Arc<RuntimeInner>,
         envelope: &EventEnvelope,
@@ -3427,6 +3614,96 @@ impl AppRuntime {
                             state.error = Some("MP-CALL-001 invalid call signal".to_string());
                         }
                     }
+                }
+                // ── Batch 16 (P8, §55–§57): scheduling on the guest ─────
+                // The guest persists the schedule locally (so reminders fire
+                // even if the host app closes) and registers notifications,
+                // exactly as PROTOCOL_SPEC §56 requires. Wall-clock UTC is
+                // the legal clock domain for scheduling (§16 AGENTS).
+                QuicServerEvent::ScheduleCreate {
+                    schedule_id,
+                    scheduled_start_utc_ms,
+                    media_id,
+                    call_mode,
+                    planned_preload_utc_ms,
+                } => {
+                    if let Some(db) = state.db.clone() {
+                        let schedule = crate::storage::sqlite::StoredSchedule {
+                            schedule_id: schedule_id.clone(),
+                            room_id: state
+                                .credentials
+                                .as_ref()
+                                .map(|c| c.room_id.clone())
+                                .unwrap_or_default(),
+                            media_id: media_id.clone(),
+                            scheduled_start_utc_ms,
+                            planned_preload_utc_ms,
+                            guest_device_id: state.local_participant.id.clone(),
+                            status: "Planned".to_string(),
+                            created_at_ms: wall_now_ms(),
+                        };
+                        match db.insert_schedule(&schedule) {
+                            Ok(()) => {
+                                let _ = inner.notifier.notify(
+                                    "Movie Party",
+                                    &format!(
+                                        "Schedule accepted locally — '{media_id}' at the planned time."
+                                    ),
+                                );
+                                state.pending_guest_schedule = Some(schedule_id.clone());
+                            }
+                            Err(error) => {
+                                // A duplicate id (host re-broadcast) is not a
+                                // failure; anything else is surfaced honestly.
+                                let message = format!("{error}");
+                                if !message.contains("UNIQUE") {
+                                    state.error = Some(format!("MP-STORE-001 {error}"));
+                                }
+                            }
+                        }
+                    } else {
+                        state.error = Some(
+                            "MP-STORE-001 schedule received before storage was ready".to_string(),
+                        );
+                    }
+                    let _ = call_mode;
+                }
+                // §56: the host echoed the guest's own acceptance — clears
+                // the pending request marker.
+                QuicServerEvent::ScheduleAccept {
+                    schedule_id,
+                    accepted: _,
+                } => {
+                    if state.pending_guest_schedule.as_deref() == Some(&schedule_id) {
+                        state.pending_guest_schedule = None;
+                    }
+                }
+                QuicServerEvent::ScheduleUpdate {
+                    schedule_id,
+                    media_id,
+                    planned_preload_utc_ms,
+                    scheduled_start_utc_ms,
+                } => {
+                    if let Some(db) = state.db.clone() {
+                        let _ = db.update_schedule_media(&schedule_id, &media_id);
+                        let _ = db.update_schedule_preload(&schedule_id, planned_preload_utc_ms);
+                        let _ = db.update_schedule_start(&schedule_id, scheduled_start_utc_ms);
+                    }
+                }
+                QuicServerEvent::ScheduleCancel { schedule_id } => {
+                    if let Some(db) = state.db.clone() {
+                        let _ = db.update_schedule_status(&schedule_id, "Cancelled");
+                    }
+                }
+                // §57: preload progress from the host drives the Home
+                // "Upcoming" card percentage.
+                QuicServerEvent::PreloadState {
+                    schedule_id: _,
+                    state: preload_state,
+                    progress,
+                    estimated_ready_utc_ms: _,
+                } => {
+                    state.pending_preload_state = Some((preload_state, progress));
                 }
             }
             snapshot_from_state(&state)
@@ -4932,6 +5209,47 @@ impl AppRuntime {
 /// inherently jittery; without a dwell the tier would oscillate and the
 /// encoder would thrash. One second of stability is required before the
 /// ladder may move the tier again.
+/// Batch 16: send a ServerEvent through the host's event broadcast channel
+/// using the coordinator's canonical seq counter — the same pattern
+/// `send_host_event` uses for CoordinatorStateUpdate. Safe no-op when no
+/// host session is active.
+fn broadcast_from_inner(inner: &Arc<RuntimeInner>, event: QuicServerEvent) {
+    let (tx, room_id, sender, seq) = {
+        let state = match inner.state.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let Some(tx) = state.host_event_tx.clone() else {
+            return;
+        };
+        let room_id = state
+            .credentials
+            .as_ref()
+            .map(|c| c.room_id.clone())
+            .unwrap_or_default();
+        let sender = state.local_participant.id.clone();
+        let seq = {
+            let mut coordinator = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            coordinator.coordinator_event_seq = coordinator.coordinator_event_seq.wrapping_add(1);
+            coordinator.coordinator_event_seq
+        };
+        (tx, room_id, sender, seq)
+    };
+    let envelope = EventEnvelope {
+        v_major: crate::protocol::ENVELOPE_V_MAJOR,
+        v_minor: crate::protocol::ENVELOPE_V_MINOR,
+        room_id,
+        seq,
+        sender,
+        sent_mono_us: monotonic_us(),
+        event,
+    };
+    let _ = tx.send(envelope);
+}
+
 const CAMERA_TIER_MIN_DWELL_MS: u64 = 1_000;
 
 /// Fallback movie bitrate estimate (bps) when no manifest/duration is
@@ -8130,5 +8448,200 @@ mod provider_dispatch_tests {
             crate::sync::state_machine::RoomState::Buffering
         );
         assert!(state.sync.strict_sync_paused);
+    }
+}
+
+// ── Batch 16: scheduling wire + persistence tests (audit P8/P14) ────────────
+
+#[cfg(test)]
+mod scheduling_tests {
+    use super::AppRuntime;
+    use crate::network::quic::{EventEnvelope, ServerEvent};
+
+    /// Build a runtime with an in-memory-ish temp DB so schedule persistence
+    /// is real (not None). Uses a temp dir per test.
+    fn runtime_with_db() -> (AppRuntime, std::path::PathBuf) {
+        let runtime = AppRuntime::new();
+        let dir = std::env::temp_dir().join(format!(
+            "mp-sched-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let db_path = dir.join("mp.db");
+        runtime.init_db_at_path(&db_path);
+        (runtime, dir)
+    }
+
+    fn envelope(event: ServerEvent) -> EventEnvelope {
+        // Unique seq per envelope: the guest's stale/duplicate guard rejects
+        // a seq it has already seen (§10 ordering), so tests that deliver
+        // multiple events must not reuse seq values.
+        static NEXT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let seq = NEXT_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        EventEnvelope {
+            v_major: crate::protocol::ENVELOPE_V_MAJOR,
+            v_minor: crate::protocol::ENVELOPE_V_MINOR,
+            room_id: "test-room".to_string(),
+            seq,
+            sender: "host-device".to_string(),
+            sent_mono_us: 1,
+            event,
+        }
+    }
+
+    /// §56: on SCHEDULE_CREATE the guest persists the schedule locally so
+    /// reminders survive the host app closing. Duplicate re-broadcast is a
+    /// no-op (UNIQUE id), not an error.
+    #[test]
+    fn guest_persists_schedule_on_create_and_ignores_duplicates() {
+        let (runtime, _dir) = runtime_with_db();
+        let event = ServerEvent::ScheduleCreate {
+            schedule_id: "sched-g1".to_string(),
+            scheduled_start_utc_ms: 1_786_811_400_000,
+            media_id: "media-1".to_string(),
+            call_mode: "VIDEO_VOICE".to_string(),
+            planned_preload_utc_ms: 1_786_800_600_000,
+        };
+        // Sender must differ from the local participant id (not self-echo).
+        let env = envelope(event.clone());
+        let inner = runtime.inner_for_events();
+        // First delivery: persisted + pending marker set.
+        super::AppRuntime::apply_peer_event_pub(&inner, env.clone(), event);
+        let state = runtime.lock();
+        assert_eq!(state.pending_guest_schedule.as_deref(), Some("sched-g1"));
+        let db = state.db.as_ref().expect("db");
+        let schedules = db.list_schedules().expect("list");
+        assert_eq!(schedules.len(), 1);
+        assert_eq!(schedules[0].schedule_id, "sched-g1");
+        assert_eq!(schedules[0].status, "Planned");
+    }
+
+    /// §56: ScheduleAccept echo clears the guest's pending marker.
+    #[test]
+    fn schedule_accept_echo_clears_pending_marker() {
+        let (runtime, _dir) = runtime_with_db();
+        let inner = runtime.inner_for_events();
+        let __ev = ServerEvent::ScheduleCreate {
+            schedule_id: "sched-g2".to_string(),
+            scheduled_start_utc_ms: 1_786_811_400_000,
+            media_id: "media-1".to_string(),
+            call_mode: "VIDEO_VOICE".to_string(),
+            planned_preload_utc_ms: 1_786_800_600_000,
+        };
+        super::AppRuntime::apply_peer_event_pub(&inner, envelope(__ev.clone()), __ev);
+        let __ev = ServerEvent::ScheduleAccept {
+            schedule_id: "sched-g2".to_string(),
+            accepted: true,
+        };
+        super::AppRuntime::apply_peer_event_pub(&inner, envelope(__ev.clone()), __ev);
+        assert_eq!(runtime.lock().pending_guest_schedule, None);
+    }
+
+    /// §57: PreloadState updates the guest's pending progress surface.
+    #[test]
+    fn preload_state_updates_guest_progress_surface() {
+        let (runtime, _dir) = runtime_with_db();
+        let inner = runtime.inner_for_events();
+        let __ev = ServerEvent::PreloadState {
+            schedule_id: "sched-g3".to_string(),
+            state: "TRANSFERRING".to_string(),
+            progress: 0.62,
+            estimated_ready_utc_ms: 1_786_807_112_345,
+        };
+        super::AppRuntime::apply_peer_event_pub(&inner, envelope(__ev.clone()), __ev);
+        assert_eq!(
+            runtime.lock().pending_preload_state,
+            Some(("TRANSFERRING".to_string(), 0.62))
+        );
+    }
+
+    /// Honest failure (AGENTS §29): a schedule arriving with no DB surfaces
+    /// MP-STORE-001 — never a silent pretend-persist.
+    #[test]
+    fn schedule_create_without_db_surfaces_honest_error() {
+        let runtime = AppRuntime::new();
+        let inner = runtime.inner_for_events();
+        let __ev = ServerEvent::ScheduleCreate {
+            schedule_id: "sched-g4".to_string(),
+            scheduled_start_utc_ms: 1,
+            media_id: "m".to_string(),
+            call_mode: "VIDEO_VOICE".to_string(),
+            planned_preload_utc_ms: 0,
+        };
+        super::AppRuntime::apply_peer_event_pub(&inner, envelope(__ev.clone()), __ev);
+        let state = runtime.lock();
+        assert!(
+            state
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("MP-STORE-001"),
+            "error: {:?}",
+            state.error
+        );
+    }
+
+    /// Host: GuestScheduleAccept flips the stored status to Accepted.
+    #[test]
+    fn host_marks_schedule_accepted_on_guest_ack() {
+        let (runtime, _dir) = runtime_with_db();
+        {
+            let state = runtime.lock();
+            let db = state.db.as_ref().expect("db");
+            db.insert_schedule(&crate::storage::sqlite::StoredSchedule {
+                schedule_id: "sched-h1".to_string(),
+                room_id: "r".to_string(),
+                media_id: "m".to_string(),
+                scheduled_start_utc_ms: 1_786_811_400_000,
+                planned_preload_utc_ms: 1_786_800_600_000,
+                guest_device_id: "guest-dev".to_string(),
+                status: "Planned".to_string(),
+                created_at_ms: 1,
+            })
+            .expect("insert");
+        }
+        super::AppRuntime::apply_host_event_pub(
+            &runtime.inner_for_events(),
+            crate::network::quic::QuicHostEvent::GuestScheduleAccept {
+                broadcaster_device_id: "guest-dev".to_string(),
+                schedule_id: "sched-h1".to_string(),
+                accepted: true,
+            },
+        );
+        let state = runtime.lock();
+        let db = state.db.as_ref().expect("db");
+        let schedules = db.list_schedules().expect("list");
+        assert_eq!(schedules[0].status, "Accepted");
+    }
+
+    /// Host: cancel_and_broadcast marks Cancelled (§56 — the guest never
+    /// fires a reminder for a dead schedule).
+    #[test]
+    fn host_cancel_broadcast_marks_cancelled() {
+        let (runtime, _dir) = runtime_with_db();
+        {
+            let state = runtime.lock();
+            let db = state.db.as_ref().expect("db");
+            db.insert_schedule(&crate::storage::sqlite::StoredSchedule {
+                schedule_id: "sched-h2".to_string(),
+                room_id: "r".to_string(),
+                media_id: "m".to_string(),
+                scheduled_start_utc_ms: 1_786_811_400_000,
+                planned_preload_utc_ms: 1_786_800_600_000,
+                guest_device_id: "guest-dev".to_string(),
+                status: "Planned".to_string(),
+                created_at_ms: 1,
+            })
+            .expect("insert");
+        }
+        runtime
+            .cancel_and_broadcast_schedule("sched-h2")
+            .expect("cancel");
+        let state = runtime.lock();
+        let db = state.db.as_ref().expect("db");
+        assert_eq!(db.list_schedules().expect("list")[0].status, "Cancelled");
     }
 }

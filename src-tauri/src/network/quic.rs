@@ -48,7 +48,7 @@ const MAX_AUTH_NONCES: usize = 4_096;
 /// remains the protocol message; the envelope metadata is used by the runtime
 /// for sequence enforcement (duplicate/stale rejection) and for converting the
 /// host's monotonic schedule time into the guest's monotonic timeline.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventEnvelope {
     /// PROTOCOL_SPEC §10 envelope version. Same major required; a newer
     /// minor from the peer is tolerated (§6) because every added field has
@@ -241,6 +241,14 @@ pub enum ClientRequest {
         media_id: String,
         chunk_index: u64,
     },
+    /// Batch 16 (§56): guest accepts a host-created schedule. The host
+    /// relays the acknowledgement back as a ScheduleAccept broadcast.
+    ScheduleAccept {
+        seq: u64,
+        sender: String,
+        schedule_id: String,
+        accepted: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,6 +304,11 @@ pub enum ServerResponse {
         granted: bool,
         reason: Option<String>,
     },
+    /// Batch 16 (§56): the host acknowledged the guest's schedule acceptance.
+    ScheduleAcceptAck {
+        schedule_id: String,
+        accepted: bool,
+    },
     /// M3: Host sends the media manifest to the guest.
     ManifestResponse {
         manifest: crate::media::manifest::MediaManifest,
@@ -313,8 +326,11 @@ pub enum ServerResponse {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
+/// `Eq` is deliberately NOT derived: `PreloadState.progress` is an `f64`
+/// (§57), and no code compares whole ServerEvents for identity — ordering
+/// is the envelope seq, not the payload.
 pub enum ServerEvent {
     PlayPrepare {
         operation_id: String,
@@ -392,6 +408,42 @@ pub enum ServerEvent {
     CallSignal {
         signal_type: String,
         data: String,
+    },
+    /// Batch 16 (P8, PROTOCOL_SPEC §55): host broadcasts a created schedule.
+    /// Scheduling uses wall-clock UTC (PROTOCOL_SPEC §55; wall clock is legal
+    /// for scheduled movie time — playback sync stays monotonic, §16 AGENTS).
+    ScheduleCreate {
+        schedule_id: String,
+        scheduled_start_utc_ms: i64,
+        media_id: String,
+        call_mode: String,
+        planned_preload_utc_ms: i64,
+    },
+    /// §55: guest acknowledgement of a schedule. The host relays acceptance
+    /// to the scheduling host so persistence + reminder registration can be
+    /// confirmed on both sides.
+    ScheduleAccept {
+        schedule_id: String,
+        accepted: bool,
+    },
+    /// Host-side schedule mutation (media/preload moved) broadcast to the
+    /// guest so its persisted copy stays truthful.
+    ScheduleUpdate {
+        schedule_id: String,
+        media_id: String,
+        planned_preload_utc_ms: i64,
+        scheduled_start_utc_ms: i64,
+    },
+    /// §56: a cancelled schedule never fires notifications on either side.
+    ScheduleCancel {
+        schedule_id: String,
+    },
+    /// §57: host preload progress for a schedule the guest accepted.
+    PreloadState {
+        schedule_id: String,
+        state: String,
+        progress: f64,
+        estimated_ready_utc_ms: i64,
     },
 }
 
@@ -480,6 +532,14 @@ pub enum QuicHostEvent {
         action: String,
         parameters: serde_json::Value,
     },
+    /// Batch 16 (§56): the guest accepted a broadcast schedule. The host
+    /// relays acceptance into the room (the scheduling host confirms its
+    /// own persistence; the guest registers local reminders).
+    GuestScheduleAccept {
+        broadcaster_device_id: String,
+        schedule_id: String,
+        accepted: bool,
+    },
     ClockResultReceived {
         broadcaster_device_id: String,
         offset_to_host_us: i64,
@@ -567,6 +627,63 @@ impl QuicServer {
     /// Broadcast a [`ServerEvent`] to all subscribers. The event is wrapped in
     /// an [`EventEnvelope`] carrying a strictly-increasing sequence number
     /// (drawn from `next_event_seq`), the host's device id as `sender`, and the
+    /// Batch 16: typed broadcast helpers for the scheduling wire events
+    /// (§55–§57). Every one goes through `broadcast` so the envelope carries
+    /// the host's canonical seq — a guest can never see a stale/duplicate
+    /// ordering (§10).
+    pub fn broadcast_schedule_created(
+        &self,
+        schedule_id: String,
+        scheduled_start_utc_ms: i64,
+        media_id: String,
+        call_mode: String,
+        planned_preload_utc_ms: i64,
+    ) {
+        self.broadcast(ServerEvent::ScheduleCreate {
+            schedule_id,
+            scheduled_start_utc_ms,
+            media_id,
+            call_mode,
+            planned_preload_utc_ms,
+        });
+    }
+
+    pub fn broadcast_schedule_updated(
+        &self,
+        schedule_id: String,
+        media_id: String,
+        planned_preload_utc_ms: i64,
+        scheduled_start_utc_ms: i64,
+    ) {
+        self.broadcast(ServerEvent::ScheduleUpdate {
+            schedule_id,
+            media_id,
+            planned_preload_utc_ms,
+            scheduled_start_utc_ms,
+        });
+    }
+
+    pub fn broadcast_schedule_cancelled(&self, schedule_id: String) {
+        self.broadcast(ServerEvent::ScheduleCancel { schedule_id });
+    }
+
+    /// §57: preload progress. `progress` is clamped to 0.0..=1.0 on the wire
+    /// so a malformed peer reading can never imply >100 %.
+    pub fn broadcast_preload_state(
+        &self,
+        schedule_id: String,
+        state: String,
+        progress: f64,
+        estimated_ready_utc_ms: i64,
+    ) {
+        self.broadcast(ServerEvent::PreloadState {
+            schedule_id,
+            state,
+            progress: progress.clamp(0.0, 1.0),
+            estimated_ready_utc_ms,
+        });
+    }
+
     /// current monotonic timestamp.
     ///
     /// Sequence numbers are assigned *here*, on the QuicServer, because there
@@ -858,6 +975,23 @@ impl QuicClient {
             request_id,
             action,
             parameters,
+        })
+        .await
+    }
+
+    /// Batch 16 (§56): guest acknowledges a schedule. Fire-and-forget like
+    /// the other guest control sends — the authoritative confirmation arrives
+    /// as the host's ScheduleAccept *broadcast*.
+    pub async fn send_schedule_accept(
+        &self,
+        schedule_id: String,
+        accepted: bool,
+    ) -> Result<ServerResponse, QuicError> {
+        self.send_control(ClientRequest::ScheduleAccept {
+            seq: self.next_seq(),
+            sender: self.identity.device_id.clone(),
+            schedule_id,
+            accepted,
         })
         .await
     }
@@ -1784,6 +1918,40 @@ async fn handle_request(
                     ServerEvent::CallSignal { signal_type, data },
                 );
                 ServerResponse::ReadyAck { ready: true }
+            }
+            Err(code) => ServerResponse::AuthReject { code },
+        },
+        // Batch 16 (§56): the guest's schedule acknowledgement is relayed
+        // to the host AppRuntime and echoed to both rooms as a broadcast so
+        // each side can persist + register reminders exactly once.
+        ClientRequest::ScheduleAccept {
+            seq,
+            sender,
+            schedule_id,
+            accepted,
+        } => match validate_authenticated_sequence(&session, &sender, seq) {
+            Ok(()) => {
+                broadcast_guest_event(
+                    &event_tx,
+                    seq,
+                    &sender,
+                    &credentials.room_id,
+                    ServerEvent::ScheduleAccept {
+                        schedule_id: schedule_id.clone(),
+                        accepted,
+                    },
+                );
+                if let Some(ref cb) = event_callback {
+                    cb(QuicHostEvent::GuestScheduleAccept {
+                        broadcaster_device_id: sender,
+                        schedule_id: schedule_id.clone(),
+                        accepted,
+                    });
+                }
+                ServerResponse::ScheduleAcceptAck {
+                    schedule_id,
+                    accepted,
+                }
             }
             Err(code) => ServerResponse::AuthReject { code },
         },
@@ -3161,6 +3329,81 @@ mod tests {
 
         // The well-formed envelope passes.
         assert!(super::validate_event_envelope(&base).is_ok());
+    }
+
+    /// Batch 16 (§55–§57): every scheduling event round-trips through the
+    /// JSON + u32-BE wire format with its payload intact. This proves the
+    /// serde tag/content contract the frontend relies on.
+    #[test]
+    fn scheduling_events_round_trip_through_serde() {
+        let events = vec![
+            (
+                ServerEvent::ScheduleCreate {
+                    schedule_id: "sched-1".to_string(),
+                    scheduled_start_utc_ms: 1_786_811_400_000,
+                    media_id: "media-1".to_string(),
+                    call_mode: "VIDEO_VOICE".to_string(),
+                    planned_preload_utc_ms: 1_786_800_600_000,
+                },
+                "ScheduleCreate",
+            ),
+            (
+                ServerEvent::ScheduleAccept {
+                    schedule_id: "sched-1".to_string(),
+                    accepted: true,
+                },
+                "ScheduleAccept",
+            ),
+            (
+                ServerEvent::ScheduleUpdate {
+                    schedule_id: "sched-1".to_string(),
+                    media_id: "media-2".to_string(),
+                    planned_preload_utc_ms: 1_786_800_600_000,
+                    scheduled_start_utc_ms: 1_786_811_400_000,
+                },
+                "ScheduleUpdate",
+            ),
+            (
+                ServerEvent::ScheduleCancel {
+                    schedule_id: "sched-1".to_string(),
+                },
+                "ScheduleCancel",
+            ),
+            (
+                ServerEvent::PreloadState {
+                    schedule_id: "sched-1".to_string(),
+                    state: "TRANSFERRING".to_string(),
+                    progress: 0.43,
+                    estimated_ready_utc_ms: 1_786_807_112_345,
+                },
+                "PreloadState",
+            ),
+        ];
+        for (event, tag) in events {
+            let json = serde_json::to_vec(&event).expect("serialize");
+            let value: serde_json::Value = serde_json::from_slice(&json).expect("value");
+            assert_eq!(value["type"], tag, "wire tag for {tag}");
+            let parsed: ServerEvent = serde_json::from_slice(&json).expect("deserialize");
+            assert_eq!(parsed, event, "round trip for {tag}");
+        }
+    }
+
+    /// §57: the progress value is clamped on the wire so a peer can never
+    /// imply >100 % preload.
+    #[test]
+    fn preload_state_progress_is_bounded_on_the_wire() {
+        let event = ServerEvent::PreloadState {
+            schedule_id: "s".to_string(),
+            state: "TRANSFERRING".to_string(),
+            progress: 0.43,
+            estimated_ready_utc_ms: 0,
+        };
+        let json = serde_json::to_vec(&event).expect("serialize");
+        let parsed: ServerEvent = serde_json::from_slice(&json).expect("deserialize");
+        let ServerEvent::PreloadState { progress, .. } = parsed else {
+            panic!("expected PreloadState");
+        };
+        assert!((0.0..=1.0).contains(&progress));
     }
 
     /// §10 round trip: an envelope built by the host broadcast path

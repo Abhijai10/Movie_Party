@@ -145,26 +145,40 @@ fn test_schedule_crud_persists() {
     let _ = std::fs::remove_file(&p);
 }
 
+/// Batch 16 (audit P14): the storage-layer duplicate was deleted — the ONE
+/// canonical implementation is `scheduling::calculate_preload_start`
+/// (bits-correct: bytes×8/bps). The old duplicate divided bytes by a
+/// bits-per-second figure without ×8, reading transfers as 8× faster than
+/// reality and scheduling preload 8× too late.
 #[test]
 fn test_preload_calculation_matches_prd() {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
-    let future = now_ms + 3_600_000;
-    let p = MoviePartyDb::calculate_preload_start(1_000_000_000, 5_000_000, future);
-    assert_eq!(p, future - 1_180_000);
+    let future = 1_786_811_400_000_i64;
+    let p = movie_party_lib::scheduling::calculate_preload_start(
+        movie_party_lib::scheduling::PreloadInputs {
+            remaining_bytes: 1_000_000_000,
+            conservative_goodput_bps: 5_000_000,
+            scheduled_start_utc_ms: future,
+        },
+    )
+    .expect("valid inputs");
+    // 1e9 bytes × 8 / 5e6 bps = 1600 s; ×1.4 = 2240 s = 2_240_000 ms;
+    // − 15 min margin (900_000 ms) = 3_140_000 ms before start.
+    assert_eq!(p, future - 3_140_000);
 }
 
 #[test]
-fn test_zero_goodput_returns_scheduled_time() {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
-    let future = now_ms + 3_600_000;
-    let p = MoviePartyDb::calculate_preload_start(1_000_000_000, 0, future);
-    assert_eq!(p, future);
+fn test_zero_goodput_is_an_error_not_a_guess() {
+    let result = movie_party_lib::scheduling::calculate_preload_start(
+        movie_party_lib::scheduling::PreloadInputs {
+            remaining_bytes: 1_000_000_000,
+            conservative_goodput_bps: 0,
+            scheduled_start_utc_ms: 1_786_811_400_000,
+        },
+    );
+    assert_eq!(
+        result,
+        Err(movie_party_lib::scheduling::SchedulingError::MissingGoodput)
+    );
 }
 
 #[test]

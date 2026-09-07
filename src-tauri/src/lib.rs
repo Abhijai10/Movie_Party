@@ -142,6 +142,10 @@ pub fn run() {
             check_provider_status,
             navigate_provider_title,
             create_schedule,
+            create_and_broadcast_schedule,
+            update_and_broadcast_schedule,
+            cancel_and_broadcast_schedule,
+            guest_accept_schedule,
             list_schedules,
             update_schedule_media,
             update_schedule_preload,
@@ -633,6 +637,59 @@ fn create_schedule(
         planned_preload_utc_ms,
         &guest_device_id,
     )
+}
+
+#[tauri::command]
+fn create_and_broadcast_schedule(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    room_id: String,
+    media_id: String,
+    scheduled_start_utc_ms: i64,
+    planned_preload_utc_ms: i64,
+    guest_device_id: String,
+    call_mode: String,
+) -> Result<String, String> {
+    runtime.create_and_broadcast_schedule(
+        &room_id,
+        &media_id,
+        scheduled_start_utc_ms,
+        planned_preload_utc_ms,
+        &guest_device_id,
+        &call_mode,
+    )
+}
+
+#[tauri::command]
+fn update_and_broadcast_schedule(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    schedule_id: String,
+    media_id: String,
+    planned_preload_utc_ms: i64,
+    scheduled_start_utc_ms: i64,
+) -> Result<(), String> {
+    runtime.update_and_broadcast_schedule_media(
+        &schedule_id,
+        &media_id,
+        planned_preload_utc_ms,
+        scheduled_start_utc_ms,
+    )
+}
+
+#[tauri::command]
+fn cancel_and_broadcast_schedule(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    schedule_id: String,
+) -> Result<(), String> {
+    runtime.cancel_and_broadcast_schedule(&schedule_id)
+}
+
+#[tauri::command]
+fn guest_accept_schedule(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    schedule_id: String,
+    accepted: bool,
+) -> app_runtime::AppSnapshot {
+    runtime.guest_accept_schedule(&schedule_id, accepted)
 }
 
 #[tauri::command]

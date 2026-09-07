@@ -273,6 +273,22 @@ impl MoviePartyDb {
     }
 
     /// Update schedule status.
+    /// Batch 16 (§55): update a schedule's wall-clock start time. Wall-clock
+    /// is the legal domain for scheduled movie time (AGENTS §16).
+    pub fn update_schedule_start(
+        &self,
+        schedule_id: &str,
+        scheduled_start_utc_ms: i64,
+    ) -> Result<(), StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        conn.execute(
+            "UPDATE schedules SET scheduled_start_utc_ms = ?1 WHERE schedule_id = ?2",
+            rusqlite::params![scheduled_start_utc_ms, schedule_id],
+        )
+        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(())
+    }
+
     pub fn update_schedule_status(
         &self,
         schedule_id: &str,
@@ -470,38 +486,14 @@ impl MoviePartyDb {
 
     // ── Scheduling helpers ────────────────────────────────────────────────
 
-    /// Calculate the preload start time (UTC milliseconds) for a scheduled
-    /// session using the locked formula:
-    ///
-    ///   remaining_bytes / conservative_goodput × safety_factor (~1.4)
-    ///   + safety_margin (~15 min)
-    ///
-    /// Returns the UTC epoch millisecond at which preloading should begin.
-    pub fn calculate_preload_start(
-        remaining_bytes: u64,
-        conservative_goodput_bps: u64,
-        scheduled_start_utc_ms: i64,
-    ) -> i64 {
-        const SAFETY_FACTOR: f64 = 1.4;
-        const SAFETY_MARGIN_MS: i64 = 15 * 60 * 1000; // 15 minutes
-
-        if conservative_goodput_bps == 0 {
-            // Unknown throughput — start preloading immediately
-            return scheduled_start_utc_ms;
-        }
-
-        let transfer_secs =
-            (remaining_bytes as f64) / (conservative_goodput_bps as f64) * SAFETY_FACTOR;
-        let transfer_ms = (transfer_secs * 1000.0) as i64;
-        let preload_utc = scheduled_start_utc_ms - transfer_ms - SAFETY_MARGIN_MS;
-
-        // Don't schedule in the past
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
-        preload_utc.max(now_ms)
-    }
+    // NOTE (audit P14, fixed in Batch 16): the preload-deadline formula
+    // previously lived here as a DUPLICATE that divided bytes by a
+    // bits-per-second goodput without ×8 (reading the transfer as 8×
+    // faster than reality and scheduling preload 8× too late). There is
+    // exactly ONE canonical implementation now:
+    // `scheduling::calculate_preload_start` (bits-correct). Callers and
+    // tests route through it; this storage layer never recomputes the
+    // formula.
 
     /// Return all schedules whose planned preload time has passed but which
     /// have not yet started (status = "Planned") — these are overdue for
@@ -929,30 +921,37 @@ mod tests {
         );
     }
 
+    /// Audit P14 regression: the storage-layer duplicate divided BYTES by
+    /// a BITS-per-second goodput (8× optimistic). The canonical
+    /// scheduling::calculate_preload_start is bits-correct: 1 GB at
+    /// 10 Mbps takes 800 s, ×1.4 = 1120 s ≈ 1_120_000 ms before the
+    /// 15-min preparation margin.
     #[test]
-    fn preload_calculation_basic() {
-        // 1 GB remaining, 10 Mbps goodput, scheduled 3 hours from now
-        let remaining: u64 = 1_000_000_000;
-        let goodput: u64 = 10_000_000; // 10 Mbps
-        let now_ms: i64 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
-        let scheduled_ms: i64 = now_ms + 3 * 3600 * 1000; // +3h
-
-        let preload = MoviePartyDb::calculate_preload_start(remaining, goodput, scheduled_ms);
-        // Transfer time: 1e9 / 1e7 = 100s, × 1.4 = 140s = 140000ms
-        // Plus 15 min margin = 900000ms
-        // Expected: scheduled_ms - 140000 - 900000 = scheduled_ms - 1_040_000
-        assert_eq!(preload, scheduled_ms - 1_040_000);
+    fn preload_deadline_uses_the_canonical_bits_correct_formula() {
+        let start = crate::scheduling::calculate_preload_start(crate::scheduling::PreloadInputs {
+            remaining_bytes: 1_000_000_000,
+            conservative_goodput_bps: 10_000_000,
+            scheduled_start_utc_ms: 1_000_000_000,
+        })
+        .expect("valid inputs");
+        // 1e9 bytes × 8 / 1e7 bps = 800 s; ×1.4 = 1120 s = 1_120_000 ms;
+        // − 15 min margin (900_000 ms).
+        assert_eq!(start, 1_000_000_000 - 1_120_000 - 900_000);
     }
 
     #[test]
-    fn preload_calculation_zero_goodput_returns_scheduled_time() {
-        let preload = MoviePartyDb::calculate_preload_start(1_000_000_000, 0, 7_200_000);
-        // Zero goodput = unknown → start immediately, but capped at now
-        // Since now_ms >> scheduled_ms in test, result >= now_ms
-        assert!(preload >= 0);
+    fn preload_deadline_zero_goodput_is_an_error_not_a_guess() {
+        // The canonical function refuses to guess on unknown throughput;
+        // the caller (adaptive_preload_deadline) supplies the fallback.
+        let result = crate::scheduling::calculate_preload_start(crate::scheduling::PreloadInputs {
+            remaining_bytes: 1_000,
+            conservative_goodput_bps: 0,
+            scheduled_start_utc_ms: 1_000,
+        });
+        assert_eq!(
+            result,
+            Err(crate::scheduling::SchedulingError::MissingGoodput)
+        );
     }
 
     #[test]
