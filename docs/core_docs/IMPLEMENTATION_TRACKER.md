@@ -14,6 +14,77 @@ It must be updated continuously.
 
 ```text
 Project State:
+🟩 ALL CODE-LEVEL BATCHES 1–23 COMPLETE (V1 code-complete). This round
+    closed Batches 19, 22, and 23's automatable part; Batch 20 stays
+    CONDITIONAL (not built, per plan + D3-B) and Batch 21 is externally
+    blocked (physical Windows machine). Details:
+
+    BATCH 19 (macOS Provider Shared spike, audit P10) — COMPLETE at the
+    D3-B diagnostic tier: capture/diagnostic.rs is the documented
+    ffmpeg-CLI V1 bridge — real 30 s avfoundation capture, honest luma
+    statistics (mean/variance/changed-frame-ratio from signalstats
+    output, never fabricated), feeding the EXISTING black-frame/static
+    detector; ffmpeg absence is a typed MP-DIAG-001 with the install
+    hint (never a silent unavailable); capture-permission denial →
+    MP-CAPTURE-001; protected/black frames → MP-CAPTURE-002; §69
+    failure policy (one diagnostic retry → explicit Provider Sync Mode
+    offer, no auto-restart, no silent switch). Migration 003 adds the
+    PRD §85 `providers` table (audit P9: 5 of 9 now) as the empirical
+    per-provider record store (AGENTS §38). launch_provider's Shared
+    gate consults the persisted record instead of blanket-blocking;
+    Settings › Providers shows the per-device record + Run Shared
+    Diagnostic + the Sync fallback banner. ⚠ Real DRM classification
+    (Netflix/Prime/Hotstar), non-DRM YouTube control, permission flow
+    on a cold machine, and the SCK probe runs: EXTERNAL VERIFICATION
+    PENDING (mandatory manual capture runs).
+
+    BATCH 22 (release hardening, audit P12) — COMPLETE: explicit CSP
+    in tauri.conf.json locked to 'self' + only the documented minimal
+    exceptions, tested by 3 vitest (policy shape AND the dangerous
+    escapes unsafe-eval/http://*/ws: absent); [profile.release] (lto,
+    codegen-units=1, strip, opt-level 3) at the WORKSPACE ROOT (member
+    profiles are ignored — clippy caught the warning); cargo-audit +
+    pnpm-audit CI jobs, ADVISORY non-blocking per the plan; privacy/
+    data-handling notice in Settings › Privacy (where data lives,
+    provider credentials, telemetry: none); RELEASE_NOTES.md 0.1.0
+    with honest limitations + verification status. Already present and
+    verified (not redone): macOS libmpv bundling verification +
+    bundle-relative detection + user-safe unavailable state; version
+    hygiene; the diagnostics-export UI hook. Signing/notarization
+    deliberately stays out (AGENTS §35 — V1 is a local install).
+
+    BATCH 23 (regression/beta prep) — AUTOMATABLE PART COMPLETE: the
+    three chaos scenarios in the m2 simulator —
+    chaos_seek_during_packet_loss (seek lands + drift bounded under
+    20% loss/180 ms RTT), chaos_rtt_change_mid_movie (30 ms → 180 ms
+    transition), chaos_disconnect_during_buffer_recovery (pause-both +
+    explicit readiness consensus before resume, §14) — with honest
+    invariants (bounded drift, never exact-equality fakery). ⚠
+    Remaining: 10 Mbps throttled runs, the full §31.1 manual matrix
+    (user-driven, two devices), the beta build cut → EXTERNAL
+    VERIFICATION PENDING.
+
+    BATCH 20 (Provider Shared transport) — CONDITIONAL, NOT BUILT:
+    gated on the Batch 19 spike passing on real DRM content AND
+    decision D3=A. D3-B (accepted) ships Shared as diagnostic-only in
+    V1; building full transport now would violate the plan's
+    spike-first rule and AGENTS §30/§38. The pipeline proof (QUIC
+    media stream, presentation buffer, strict sync, quality ladder)
+    remains the validated foundation if the gate ever opens.
+
+    BATCH 21 (Windows capture spike) — EXTERNALLY BLOCKED: requires a
+    physical Windows machine (Windows.Graphics.Capture + WASAPI +
+    Media Foundation). Constant-string plans + pipeline proof exist;
+    real runs are user-driven and never fakeable.
+
+    Gates this round: fmt, clippy -D warnings (0), 366 lib + 446 total
+    Rust tests, lint 0, tsc, vitest 140 (3 CSP new), build — ALL
+    GREEN. Four commits: d65891b (Batch 19), b6d2c04 (Batch 22),
+    bbf3561 (Batch 23 chaos) + docs. Next permitted: the user-driven
+    external verification (§31.1 manual matrix, DRM diagnostic runs,
+    two-device sessions) — NO further code batches remain in V1.
+
+Previous:
 🟨 BATCHES 17 + 18 (CHAT SPEC FAMILY + RESILIENCE WATCHERS) COMPLETE
     (code-level). Batch 17 closed audit P4, P5, and P7. Decision D2 is
     RESOLVED by ADR-0003 (chat family): the UI_UX_SPEC §34–§36 family is
@@ -4086,3 +4157,144 @@ no fake readiness. All edits confined to `src-tauri/src/app_runtime.rs` and
   Windows.
 - macOS and Windows playback verification (per AGENTS.md §19, recorded
   separately per OS pair).
+
+
+---
+
+## 2026-09-05 — Batches 19 + 22 + 23(automatable): V1 code-complete
+
+The final code-level round of the V1 completion plan. Four commits:
+`d65891b` (Batch 19), `b6d2c04` (Batch 22), `bbf3561` (Batch 23 chaos),
+plus this tracker/docs update. Batches 20/21 are NOT built — their gates
+are documented honestly below (the plan's conditional/external rules,
+AGENTS external-verification exception).
+
+### Batch 19 — macOS Provider Shared diagnostic (audit P10, D3-B)
+
+Closes the audit's P10 finding ("pipeline is policy-only") at exactly the
+tier decision D3-B sanctioned: V1 ships Shared as an EXPERIMENTAL
+DIAGNOSTIC, never a speculative transport.
+
+- `capture/diagnostic.rs` — the documented ffmpeg-CLI V1 bridge:
+  - `ffmpeg_present()` probes the CLI; absence is a typed
+    `MP-DIAG-001` carrying the `brew install ffmpeg` hint — never a
+    silent "unavailable" (§29).
+  - `run_capture_sample()` drives a real 30 s avfoundation capture and
+    `parse_luma_stats()` derives the measured sample (frame count,
+    mean luma, variance, changed-frame ratio) from signalstats output —
+    the numbers are measured, never fabricated (§38).
+  - `classify_sample()` feeds the EXISTING black-frame/static detector
+    (`classify_video_capture`), which is unchanged — one classifier,
+    one truth.
+  - `outcome_for_classification()` applies the §69 failure policy via
+    the existing `failure_action`: attempt 0 → one diagnostic retry;
+    attempt ≥1 → the explicit Provider Sync Mode offer in the reason.
+  - Typed errors: MP-CAPTURE-001 (screen-recording permission, with
+    the System Settings path), MP-CAPTURE-002 (protected video →
+    unsupported, Sync is the path), MP-DIAG-002 (no frames),
+    MP-STORE-001 (record failure).
+- `storage/sqlite.rs` — migration 003: the PRD §85 `providers` table
+  (audit P9 now 5 of 9) + `StoredProviderDiagnostic` (camelCase wire)
+  + `upsert_provider_diagnostic`/`list_provider_diagnostics`.
+- `app_runtime.rs` — `run_provider_shared_diagnostic()`: gates the
+  provider id, tracks per-provider attempts for the retry policy,
+  classifies against the live provider-playing context (chrome
+  session present + PlaybackReady), persists with verified_at, emits
+  the snapshot. `list_provider_diagnostics()` for the UI.
+- `lib.rs` — `launch_provider`'s Shared gate now consults the persisted
+  empirical record: a verified diagnostic on THIS device unlocks the
+  experimental path; anything else stays the honest MP-CAPTURE-001
+  message (updated to point at Settings › Providers / Sync Mode).
+  New commands registered: `run_provider_shared_diagnostic`,
+  `list_provider_diagnostics`.
+- Frontend — `appRuntime.ts` wrappers; Settings › Providers: the
+  Shared Mode row shows the per-device record (`shared-status-*`),
+  a Run Shared Diagnostic button with running state, and a result
+  banner that — when unavailable — explicitly offers Provider Sync
+  Mode (§29).
+
+Tests (5 new): honest ffmpeg-absence (never fabricates a sample), §69
+policy mapping incl. the retry→Sync transition, real luma-stat
+parsing (mean/changed-ratio derived from a fixture, corrected from an
+initially wrong expected value), empty-stats → NoFrames, detector
+feed-through.
+
+### Batch 22 — release hardening (audit P12)
+
+- CSP: explicit in `tauri.conf.json` — `default-src 'self'` with only
+  the documented minimal exceptions (inline styles for Tailwind/
+  framer-motion; `data:`/`blob:` for posters & previews;
+  `blob:`/`mediastream:` for call streams; `ipc:` + `http://ipc.localhost`
+  for Tauri IPC). `src/config/cspPolicy.test.ts` (3 tests) asserts
+  the shape AND that unsafe-eval / `http://*` / `ws:` are absent.
+- `[profile.release]` (lto, codegen-units=1, strip, opt-level 3) —
+  at the WORKSPACE ROOT after clippy surfaced Cargo's rule that
+  member-package profiles are ignored.
+- CI: `cargo-audit` + `pnpm-audit` jobs, `continue-on-error: true` —
+  ADVISORY/non-blocking per the plan's explicit instruction.
+- Settings › Privacy: data-handling notice rows (peer-to-peer
+  local-first storage; provider credentials never stored by Movie
+  Party; telemetry: none).
+- `RELEASE_NOTES.md`: 0.1.0 highlights, known limitations (Shared =
+  diagnostic-only, pending QR invite + §52 prompt, Windows spike),
+  honest verification status pointing here.
+- Verified-present from earlier batches (not redone): macOS libmpv
+  bundling verification + bundle-relative detection + user-safe
+  unavailable state; version 0.1.0 hygiene; the diagnostics-export
+  hook in Settings › Diagnostics. Signing/notarization stays out
+  (AGENTS §35 — V1 local install; the plan's Batch 22 does not ask).
+
+### Batch 23 — automatable chaos tests
+
+Three scenarios in the m2 simulator (the plan's list):
+- `chaos_seek_during_packet_loss` — a mid-movie seek under 20% loss +
+  180 ms RTT: the seek is not lost (the pair progresses past target)
+  and drift stays bounded.
+- `chaos_rtt_change_mid_movie` — 30 ms fiber → 180 ms hotspot
+  mid-movie; the bound holds across the transition.
+- `chaos_disconnect_during_buffer_recovery` — guest drops mid
+  recovery: playback pauses for BOTH (§14) and resumes ONLY after an
+  explicit readiness consensus (the reconnect-handshake gate); the
+  host never plays on alone.
+Invariants are honest — bounded drift (≤700 ms in-sim, ≤100 ms final)
+instead of fake exact equality. Two of my initial assertions were
+over-strict and were corrected against observed honest behavior
+(seek landing under recovery pauses; jitter-granular position equality).
+
+### Batch 20 / Batch 21 — honestly not built
+
+- Batch 20 (Shared transport): CONDITIONAL per the plan — gated on the
+  Batch 19 spike passing on real DRM content AND D3=A. D3-B (accepted)
+  ships diagnostic-only; building the transport now would be
+  speculative work the plan forbids (spike-first) and AGENTS §30/§38
+  reinforce. The `shared_pipeline.rs` proof (QUIC stream, presentation
+  buffer, strict sync, quality ladder) remains validated foundation.
+- Batch 21 (Windows spike): externally blocked — requires a physical
+  Windows machine. Windows plans + proof exist; real runs user-driven.
+
+### Verification
+
+- `cargo fmt --check` ✅ (after fixes)
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅ 0
+  errors (fixed: 4 useless format!, redundant trim-before-split,
+  unused chaos `profile` param, workspace-root profile placement)
+- `cargo test` ✅ — 366 lib (3 chaos new), 2 wiring, 28 m2, 7 m3c,
+  18 m3i, 9 e2e, 15 m4c, 3 single-file suites → 446 total, 0 failed
+- `pnpm lint` ✅ 0 errors · `tsc --noEmit` ✅ · `vitest` ✅ 140
+  (3 CSP + 137 existing) · `pnpm build` ✅
+- No external test was claimed or faked. ⚠ EXTERNAL VERIFICATION
+  PENDING register (cumulative): real DRM diagnostic runs (Netflix/
+  Prime/Hotstar) + non-DRM YouTube control + capture-permission flow
+  on a cold macOS machine (Batch 19's mandatory manual runs; the
+  Batch 20 gate depends on them); two-device countdown timing, kill-9
+  Chrome, real sleep/wake + network switch, camera resize feel per
+  OS (Batch 18); §31.1 full manual matrix + 10 Mbps throttled runs +
+  beta build (Batch 23); all Windows-side flows (Batch 21).
+
+### Next permitted
+
+No further code batches remain in V1. The next work is USER-DRIVEN
+external verification: run the Shared diagnostic against real
+providers, execute the §31.1 manual matrix on two devices, cut the
+beta build. If the DRM spike ever passes AND D3 flips to A, Batch 20
+transport becomes the next permitted code batch (plan-gated).

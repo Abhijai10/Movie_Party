@@ -139,15 +139,23 @@ same day. Highest-impact findings:
    at save time; Home Upcoming cards (§53). ⚠ REAL two-device schedule
    flow (guest persistence + reminder delivery on Windows): EXTERNAL
    VERIFICATION PENDING.
-7. 🟡 **P9 — SQLite has 4 of 9 PRD §85 tables** (device_identity,
-   schedules, cache_entries, chat_messages; missing trusted_peers, rooms,
-   media_items, providers, network_history) — tracked with Batch 16.
-8. 🟡 **P10 — Provider Shared pipeline is policy-only**:
-   capture/macos + capture/windows are constant-string plans,
-   encode/macos + encode/windows are 1-line files, and the pipeline
-   "proof" is an #[ignore] test that shells out to ffmpeg. Phases 20–26
-   have no production code — Batches 19–21 (diagnostic-first, honest DRM
-   reality per PRD §109).
+7. 🟡 **P9 — SQLite has 5 of 9 PRD §85 tables** (device_identity,
+   schedules, cache_entries, chat_messages, providers; missing
+   trusted_peers, rooms, media_items, network_history) — the `providers`
+   table (migration 003) landed in Batch 19 as the empirical
+   Shared-diagnostic record store.
+8. ✅ **P10 — Provider Shared pipeline is policy-only** — CLOSED at
+   the D3-B diagnostic tier (Batch 19): the documented ffmpeg-CLI V1
+   bridge (capture/diagnostic.rs) runs a REAL 30 s avfoundation capture,
+   derives honest luma statistics, feeds the existing black-frame
+   detector, and persists the per-provider empirical classification
+   (migration 003 `providers` table). The Shared-mode gate consults the
+   record instead of blanket-blocking; §69 failure policy (1 retry →
+   explicit Sync offer) + MP-CAPTURE-001/002 typed errors; Settings
+   shows the record + Run Shared Diagnostic + the Sync fallback offer.
+   ⚠ Real DRM classification runs (Netflix/Prime/Hotstar) + capture
+   permission on a cold machine: EXTERNAL VERIFICATION PENDING —
+   Batch 20 (full transport) stays CONDITIONAL on that spike + D3=A.
 9. ✅ **P11 — Zero ADRs exist** — FIXED in Batch 11: ADR-0001 (wire format)
    and ADR-0002 (message-ID registry) are Accepted with full evidence,
    options, rollback, and test plans; both follow
@@ -163,9 +171,16 @@ same day. Highest-impact findings:
     sleep/wake + network-change revalidation hooks; moved-file gate
     (MP-MEDIA-002 + AskHostToLocateFile with a Locate-the-file action).
     ⚠ Real kill-9 Chrome / sleep-wake / network-switch during play:
-    EXTERNAL VERIFICATION PENDING. STILL OPEN (P12, Batch 22): no CSP,
-    no release cargo profile, no dependency audits in CI, macOS
-    signing/notarization absent. Chrome LIFECYCLE was already fixed
+    EXTERNAL VERIFICATION PENDING. CLOSED (P12, Batch 22): explicit
+    CSP (locked to 'self' + documented minimal exceptions, tested — 3
+    vitest assert shape AND absence of unsafe-eval/http://*/ws:),
+    [profile.release] at the workspace root (lto/codegen-units=1/
+    strip/opt-level 3), cargo-audit + pnpm-audit CI jobs (advisory,
+    non-blocking), privacy/data-handling notice in Settings › Privacy,
+    RELEASE_NOTES.md 0.1.0 with honest limitations. macOS
+    signing/notarization stays OUT per AGENTS §35 (V1 = local install;
+    release-hardening-phase work beyond the plan's Batch 22 scope).
+    Chrome LIFECYCLE was already fixed
     (Batches 13/14): graceful Browser.close + bounded wait everywhere.
 11. ✅ **P14 — Preload units bug** — FIXED in Batch 16 (verified then
     fixed, exactly as the audit described): the storage/sqlite.rs
@@ -1867,18 +1882,42 @@ D1–D4 live in `docs/core_docs/V1_COMPLETION_PLAN.md`.
    teardown; §40 disconnect decision UI (grace, Keep Waiting,
    host-only Continue Without Guest); sleep/wake + network-change
    revalidation hooks; moved-file gate with Locate-the-file prompt.
-9. **Batch 19 — macOS Provider Shared capture spike** (P10):
-   diagnostic-only capture/encode/30 s sample with honest DRM
-   classification (black-frame detection exists; no circumvention).
-10. **Batch 20 — Provider Shared transport** (conditional on Batch 19 +
-    decision D3): QUIC media stream, 5 s presentation buffer, host
-    loopback, strict sync, automatic quality ladder.
-11. **Batch 21 — Windows Provider Shared spike** (needs a physical
-    Windows machine).
-12. **Batch 22 — Release hardening** (P12): CSP, release profile,
-    dependency audits, macOS libmpv bundling verification.
-13. **Batch 23 — Regression + beta prep**: chaos tests where feasible,
-    the full §31 manual matrix, beta build cut.
+9. ✅ **Batch 19 — macOS Provider Shared capture spike** (P10) —
+   COMPLETE (code level): the documented ffmpeg-CLI V1 bridge
+   (capture/diagnostic.rs) — real 30 s avfoundation capture, honest
+   luma statistics (never fabricated), the existing black-frame/static
+   detector, per-provider empirical classification persisted via
+   migration 003; Shared gate consults the record; §69 failure policy
+   (1 retry → explicit Sync offer); MP-CAPTURE-001/002 + MP-DIAG-001/002
+   typed errors; Settings › Providers shows the record + Run Shared
+   Diagnostic + Sync fallback. ⚠ Real DRM + permission-flow runs:
+   EXTERNAL VERIFICATION PENDING (the spike's mandatory manual runs).
+10. ⏸ **Batch 20 — Provider Shared transport** — CONDITIONAL, NOT BUILT
+    (per plan + D3-B): gated on the Batch 19 spike passing on real DRM
+    content AND D3=A. D3-B (accepted) ships Shared as diagnostic-only
+    in V1 — building full transport speculatively would violate the
+    plan's spike-first rule (§ Phase 20/21) and AGENTS §30/§38.
+11. ⏸ **Batch 21 — Windows Provider Shared spike** — DEFERRED (external
+    blocker): requires a physical Windows machine (Windows.Graphics
+    .Capture + WASAPI + Media Foundation cannot be verified from here).
+    The windows diagnostic-plan constants + pipeline proof exist; real
+    runs are user-driven. Not fakeable (AGENTS external-verification
+    exception).
+12. ✅ **Batch 22 — Release hardening** (P12) — COMPLETE: explicit CSP
+    (tested: shape + dangerous-escape absence), [profile.release] at
+    the workspace root, cargo-audit + pnpm-audit CI jobs (advisory
+    non-blocking per the plan), privacy/data-handling notice, RELEASE
+    _NOTES.md, version 0.1.0 hygiene. Already present + verified: macOS
+    libmpv bundling verification + bundle-relative detection +
+    user-safe unavailable state; diagnostics-export UI hook.
+    Signing/notarization deliberately stays out (AGENTS §35; local
+    install in V1).
+13. 🟡 **Batch 23 — Regression + beta prep** — AUTOMATABLE PART DONE:
+    the three chaos scenarios in the m2 simulator (seek-under-packet-
+    loss, RTT change mid-movie, disconnect-during-buffer-recovery) with
+    honest strict-sync invariants; ⚠ remaining: 10 Mbps throttled runs
+    + the full §31 manual matrix (user-driven, two devices) + the beta
+    build cut — EXTERNAL VERIFICATION PENDING.
 
 Out-of-V1 items are enumerated in MASTER_PRD §111/§112 and must not be
 built (music, mobile, Linux, >2 users, cloud accounts, manual quality
