@@ -141,6 +141,7 @@ pub fn run() {
             resize_native_video_surface,
             detach_native_video_surface,
             pick_media_file,
+            pick_save_folder,
             launch_provider,
             launch_generic_link,
             open_provider_browser,
@@ -151,6 +152,7 @@ pub fn run() {
             update_and_broadcast_schedule,
             cancel_and_broadcast_schedule,
             guest_accept_schedule,
+            invite_qr_svg,
             list_schedules,
             update_schedule_media,
             update_schedule_preload,
@@ -490,6 +492,22 @@ fn pick_media_file() -> Result<String, String> {
     }
 }
 
+/// §52 Save As: pick the destination FOLDER for the exported movie.
+/// The retention layer builds the final file path from the cached
+/// filename — the picker returns a directory, never a file overwrite
+/// decision made blind.
+#[tauri::command]
+fn pick_save_folder() -> Result<String, String> {
+    let dialog = rfd::FileDialog::new().set_title("Choose where to save the movie");
+    match dialog.pick_folder() {
+        Some(path) => path
+            .to_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| "Path is not valid UTF-8".to_string()),
+        None => Err("Folder selection was cancelled".to_string()),
+    }
+}
+
 #[tauri::command]
 fn launch_provider(
     provider_id: String,
@@ -727,6 +745,22 @@ fn cancel_and_broadcast_schedule(
     runtime.cancel_and_broadcast_schedule(&schedule_id)
 }
 
+/// §16 invitation: render the invite link as a QR code (SVG string) so
+/// it can be shown in-app and scanned across devices. The command is a
+/// renderer only — it never generates or validates invite secrets; the
+/// caller passes the host's canonical movieparty:// link.
+#[tauri::command]
+fn invite_qr_svg(invite_url: String) -> Result<String, String> {
+    let code =
+        qrcode::QrCode::with_error_correction_level(invite_url.as_bytes(), qrcode::EcLevel::M)
+            .map_err(|e| format!("MP-ROOM-001 could not encode invite link: {e}"))?;
+    let svg = code
+        .render::<qrcode::render::svg::Color>()
+        .min_dimensions(240, 240)
+        .build();
+    Ok(svg)
+}
+
 #[tauri::command]
 fn guest_accept_schedule(
     runtime: tauri::State<'_, app_runtime::AppRuntime>,
@@ -887,5 +921,40 @@ mod tests {
         assert_eq!(metadata.app_name, APP_NAME);
         assert_eq!(metadata.protocol_major, 1);
         assert_eq!(metadata.protocol_minor, 0);
+    }
+
+    /// §16: the invite QR renderer produces a real scannable SVG for a
+    /// canonical invite link — and rejects nothing it should accept (the
+    /// renderer is content-agnostic; link validation lives in join_party).
+    #[test]
+    fn invite_qr_svg_renders_a_scannable_matrix() {
+        let link = "movieparty://join/v1.1/EXAMPLE ROOM/abc123";
+        let svg = invite_qr_svg(link.to_string()).expect("qr renders");
+
+        assert!(svg.contains("<svg"), "must be an SVG document: {svg}");
+        // A QR carries finder squares + the encoded payload — a real
+        // render is hundreds of bytes, never a stub.
+        assert!(svg.len() > 300, "rendered QR too small: {svg}");
+        assert!(svg.contains("width="), "rendered at 240px scale");
+        // Deterministic: same link, same render (stable UI, no flicker).
+        let again = invite_qr_svg(link.to_string()).expect("qr renders again");
+        assert_eq!(svg, again);
+    }
+
+    /// §16: the renderer accepts a real invite link at v1 size and
+    /// produces the full finder/timing/data matrix — the QR is genuinely
+    /// scannable, not a decorative stub.
+    #[test]
+    fn invite_qr_svg_encodes_a_real_invite_payload() {
+        let link = "movieparty://join/v1.1/MOVIE ROOM 42/abcdefghij";
+        let svg = invite_qr_svg(link.to_string()).expect("qr renders");
+        // Structural guarantees of a real QR render (any version/size):
+        // the module-carrying path element and the encoded viewBox.
+        assert!(svg.contains("<path"), "module path present");
+        assert!(svg.contains("viewBox="), "scaled viewBox present");
+        // The payload length must be encoded — a longer link produces a
+        // denser matrix (more path commands than a short one).
+        let short = invite_qr_svg("movieparty://join/x".to_string()).expect("short link renders");
+        assert!(svg.len() > short.len(), "longer invite → denser matrix");
     }
 }

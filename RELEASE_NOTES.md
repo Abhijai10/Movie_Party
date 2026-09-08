@@ -23,10 +23,14 @@ alongside the movie, strict synchronization, and scheduled parties.
 
 ### Known limitations
 - Provider Shared Mode is diagnostic-only in 0.1.0 (D3-B)
-- Guest explicit accept-schedule UI button pending (persistence works)
-- QR invite (§16) + guest media retention prompt (§52) pending
 - macOS ScreenCaptureKit diagnostic requires ffmpeg (`brew install ffmpeg`)
 - Windows capture spike requires a physical Windows machine (Batch 21)
+
+The invite flow is complete: the lobby copies the full movieparty://
+link (browser-openable — the OS hands it to Movie Party's registered
+deep link), a short human code, or a scannable QR (§16); guests get an
+explicit schedule accept/decline (§56) and the post-party keep/remove/
+save-as retention question (§52).
 
 ### Verification status
 All automated gates green (Rust fmt/clippy/363+ tests; frontend

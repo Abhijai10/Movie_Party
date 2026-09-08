@@ -39,3 +39,4 @@ libloading = { version = "0.8", optional = true }
 rfd = "0.15"
 rusqlite = { version = "0.31", features = ["bundled"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "ansi", "env-filter"] }
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }

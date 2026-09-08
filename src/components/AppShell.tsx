@@ -29,6 +29,8 @@ import {
 } from "../backend/appRuntime";
 import { useAppSnapshot } from "../hooks/useAppSnapshot";
 import { parseMoviePartyInvite } from "../invites/deepLinks";
+import { GuestScheduleAccept } from "./mp/GuestScheduleAccept";
+import { RetentionPrompt } from "./mp/RetentionPrompt";
 import { CinemaView } from "../views/CinemaView";
 import { DebugHud } from "./DebugHud";
 import { FirstRunView } from "../views/FirstRunView";
@@ -96,6 +98,9 @@ export function AppShell() {
   });
   /** Media filenames seen in snapshots, by media id — for Upcoming cards. */
   const mediaNameCache = useRef<Record<string, string>>({});
+  /** §56: schedule ids the guest already answered (accepted or declined)
+   *  — the banner never re-prompts for the same schedule. */
+  const [answeredSchedules, setAnsweredSchedules] = useState<Set<string>>(new Set());
   const debugHudEnabled =
     developmentPreviewEnabled &&
     typeof window !== "undefined" &&
@@ -412,6 +417,16 @@ export function AppShell() {
 
   // Media naming for Upcoming cards — the snapshot's live media when it
   // matches, else a stored cache entry name, else the honest raw id.
+  // §56: the guest's pending schedule accept — shown until answered.
+  const pendingGuestSchedule =
+    snapshot?.pendingGuestSchedule != null &&
+    !answeredSchedules.has(snapshot.pendingGuestSchedule.scheduleId)
+      ? snapshot.pendingGuestSchedule
+      : null;
+
+  // §52: the post-party retention question (guest with transferred media).
+  const retentionPrompt = snapshot?.retentionPrompt ?? null;
+
   const mediaNameFor = (mediaId: string): string => {
     if (snapshot?.media?.mediaId === mediaId) {
       return snapshot.media.filename;
@@ -746,16 +761,31 @@ export function AppShell() {
 
   if (snapshot.screen === "LOBBY" || devScreen === "LOBBY") {
     return (
-      <LobbyView
-        snapshot={snapshot}
-        onBack={goHome}
-        onReady={goReadyCheck}
-        onCinema={goCinema}
-        onToggleSharedControls={handleToggleSharedControls}
-        onSnapshot={applySnapshot}
-        callTileSession={callTileSession}
-        onCallTileSessionChange={setCallTileSession}
-      />
+      <>
+        <LobbyView
+          snapshot={snapshot}
+          onBack={goHome}
+          onReady={goReadyCheck}
+          onCinema={goCinema}
+          onToggleSharedControls={handleToggleSharedControls}
+          onSnapshot={applySnapshot}
+          callTileSession={callTileSession}
+          onCallTileSessionChange={setCallTileSession}
+        />
+        {pendingGuestSchedule != null ? (
+          <GuestScheduleAccept
+            scheduleId={pendingGuestSchedule.scheduleId}
+            scheduledStartUtcMs={pendingGuestSchedule.scheduledStartUtcMs}
+            onAnswered={() => {
+              setAnsweredSchedules((current) => {
+                const next = new Set(current);
+                next.add(pendingGuestSchedule.scheduleId);
+                return next;
+              });
+            }}
+          />
+        ) : null}
+      </>
     );
   }
 
@@ -789,6 +819,9 @@ export function AppShell() {
     return <EndPartyConfirmView onCancel={goCinema} onConfirm={confirmEndParty} />;
   }
 
+  // §52: the retention question renders over the post-party HOME screen —
+  // it is the one modal that legitimately interrupts because the party is
+  // over and the cache decision is owed. (devScreen HOME is handled above.)
   return (
     <>
       <HomeView
@@ -801,6 +834,15 @@ export function AppShell() {
         onOpenSchedule={goSchedule}
       />
       {debugHudEnabled ? <DebugHud snapshot={snapshot} /> : null}
+      {retentionPrompt != null ? (
+        <RetentionPrompt
+          mediaId={retentionPrompt.mediaId}
+          filename={retentionPrompt.filename}
+          onDecided={() => {
+            void showHome().then(applySnapshot);
+          }}
+        />
+      ) : null}
     </>
   );
 }

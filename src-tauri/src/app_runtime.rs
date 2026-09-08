@@ -105,6 +105,31 @@ pub struct AppSnapshot {
     pub last_recovery: Option<RuntimeRecoverySnapshot>,
     pub error: Option<String>,
     pub player: PlayerSnapshot,
+    /// §56: schedule id the guest has an un-answered accept request for
+    /// (host-created schedule pending the guest's explicit decision).
+    pub pending_guest_schedule: Option<PendingGuestScheduleSnapshot>,
+    /// §52: post-party local-media retention question for the guest —
+    /// offered once the party with a transferred movie ends. None = no
+    /// prompt owed.
+    pub retention_prompt: Option<RetentionPromptSnapshot>,
+}
+
+/// A schedule awaiting the guest's explicit accept/decline (§56).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingGuestScheduleSnapshot {
+    pub schedule_id: String,
+    pub media_id: String,
+    pub scheduled_start_utc_ms: i64,
+}
+
+/// The §52 retention question: keep, remove, or save-as the transferred
+/// movie cache on THIS device.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RetentionPromptSnapshot {
+    pub media_id: String,
+    pub filename: String,
 }
 
 impl Default for AppSnapshot {
@@ -164,6 +189,8 @@ impl Default for AppSnapshot {
             last_recovery: None,
             error: None,
             player: PlayerSnapshot::default(),
+            pending_guest_schedule: None,
+            retention_prompt: None,
         }
     }
 }
@@ -508,6 +535,8 @@ struct AppRuntimeState {
     /// Batch 16 (§56): schedule id the guest most recently accepted /
     /// received, awaiting the host's echo before clearing.
     pending_guest_schedule: Option<String>,
+    /// §52: the media awaiting a retention decision once the party ends.
+    retention_prompt: Option<crate::storage::sqlite::StoredCacheEntry>,
     /// Batch 16 (§57): latest host preload progress observed for the
     /// newest schedule (state string + 0..1 progress) — feeds the Home
     /// "Upcoming" card.
@@ -769,6 +798,7 @@ impl AppRuntime {
                     calibration_task: None,
                     pending_guest_request_id: None,
                     pending_guest_schedule: None,
+                    retention_prompt: None,
                     pending_preload_state: None,
                     player: None,
                     range_server_handle: None,
@@ -2010,7 +2040,23 @@ impl AppRuntime {
             .clone()
             .ok_or_else(|| "MP-STORE-001 no database".to_string())?;
         db.retention_keep(media_id)
-            .map_err(|e| format!("MP-STORE-001 {e}"))
+            .map_err(|e| format!("MP-STORE-001 {e}"))?;
+        // §52: the decision is made — the prompt is answered for good.
+        self.clear_retention_prompt(media_id);
+        Ok(())
+    }
+
+    /// §52: clear the pending retention prompt once answered (or when the
+    /// media is no longer cached on this device).
+    pub fn clear_retention_prompt(&self, media_id: &str) {
+        let mut state = self.lock();
+        if state
+            .retention_prompt
+            .as_ref()
+            .is_some_and(|entry| entry.media_id == media_id)
+        {
+            state.retention_prompt = None;
+        }
     }
 
     /// Retention "Remove": delete only Movie Party's cache directory and the
@@ -2033,7 +2079,9 @@ impl AppRuntime {
         )
         .map_err(|e| format!("MP-MEDIA-002 {e}"))?;
         db.delete_cache_entry(media_id)
-            .map_err(|e| format!("MP-STORE-001 {e}"))
+            .map_err(|e| format!("MP-STORE-001 {e}"))?;
+        self.clear_retention_prompt(media_id);
+        Ok(())
     }
 
     /// Retention "Save As": export the completed cached media to a chosen
@@ -2042,7 +2090,7 @@ impl AppRuntime {
         let root = self.cache_root()?;
         let dir = self.cache_dir_for(media_id)?;
         let data_file = dir.join(crate::media::cache::CACHE_DATA_FILE);
-        crate::storage::apply_retention_decision(
+        let saved = crate::storage::apply_retention_decision(
             &root,
             &dir,
             &data_file,
@@ -2050,7 +2098,9 @@ impl AppRuntime {
             Some(destination),
         )
         .map(|saved| saved.unwrap_or_else(|| destination.to_path_buf()))
-        .map_err(|e| format!("MP-MEDIA-002 {e}"))
+        .map_err(|e| format!("MP-MEDIA-002 {e}"))?;
+        self.clear_retention_prompt(media_id);
+        Ok(saved)
     }
 
     pub fn snapshot(&self) -> AppSnapshot {
@@ -5473,6 +5523,32 @@ impl AppRuntime {
             session.close_gracefully();
         }
         state.player = None;
+        // §52: a GUEST who received the movie over Local Perfect gets the
+        // retention question (keep / remove / save-as) — never silent
+        // deletion, never silent keeping. The HOST keeps its own source
+        // file and owes no prompt.
+        // state.media (the manifest) still holds the party's identity at
+        // this point; the cache_entries row was registered at guest join.
+        if state.guest_cache.is_some() {
+            if let Some(manifest) = state.media.clone() {
+                let role = state.local_participant.role.clone();
+                if role == "Guest" {
+                    if let Some(entry) = state
+                        .db
+                        .as_ref()
+                        .and_then(|db| db.list_cache_entries().ok())
+                        .and_then(|entries| {
+                            entries
+                                .iter()
+                                .find(|cached| cached.media_id == manifest.media_id)
+                                .cloned()
+                        })
+                    {
+                        state.retention_prompt = Some(entry);
+                    }
+                }
+            }
+        }
         state.guest_cache = None;
         state.media = None;
         state.transfer = None;
@@ -6550,6 +6626,29 @@ fn snapshot_from_state(state: &AppRuntimeState) -> AppSnapshot {
         last_recovery: state.last_recovery.clone(),
         error: state.error.clone(),
         player: state.player_snapshot.clone(),
+        pending_guest_schedule: state.pending_guest_schedule.as_deref().and_then(|id| {
+            state
+                .db
+                .as_ref()
+                .and_then(|db| db.list_schedules().ok())
+                .and_then(|schedules| {
+                    schedules
+                        .iter()
+                        .find(|schedule| schedule.schedule_id == id)
+                        .map(|schedule| PendingGuestScheduleSnapshot {
+                            schedule_id: schedule.schedule_id.clone(),
+                            media_id: schedule.media_id.clone(),
+                            scheduled_start_utc_ms: schedule.scheduled_start_utc_ms,
+                        })
+                })
+        }),
+        retention_prompt: state
+            .retention_prompt
+            .as_ref()
+            .map(|entry| RetentionPromptSnapshot {
+                media_id: entry.media_id.clone(),
+                filename: entry.filename.clone(),
+            }),
     }
 }
 

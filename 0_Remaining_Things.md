@@ -125,9 +125,12 @@ same day. Highest-impact findings:
    locked), First Run + truthful prerequisite checks (§10–11, no
    premature prompts), Schedule form (§18–19), Home Upcoming (§53),
    Error screen (§64, stable codes + Technical Details), Debug HUD
-   (§63, dev-gated), window-close-during-party prompt (§69). Still open
-   within P6: QR invite (§16) and guest media retention prompt (§52)
-   — Batch 15 scope notes them for the next UI pass. ⚠ Real first-run
+   (§63, dev-gated), window-close-during-party prompt (§69). CLOSED in
+   the final UI pass: QR invite (§16 — invite_qr_svg renders the
+   movieparty:// link as a scannable QR, InviteCard offers code/link/QR)
+   and guest media retention prompt (§52 — RetentionPrompt with
+   Remove/Keep/Save As wired to the retention commands, set on guest
+   party end, cleared on decision). ⚠ Real first-run
    detection on a cold machine: EXTERNAL VERIFICATION PENDING.
 6. ✅ **P8 — Scheduling has no frontend and no protocol messages** —
    CLOSED in Batch 16: SCHEDULE_CREATE/ACCEPT/UPDATE/CANCEL +
@@ -1863,8 +1866,8 @@ D1–D4 live in `docs/core_docs/V1_COMPLETION_PLAN.md`.
 5. ✅ **Batch 15 — Missing screens I** (P6) — COMPLETE: Settings
    (8 sections), First Run (truthful checks), Error screen (MP codes +
    Technical Details), Debug HUD (dev-gated), §69 close prompt. QR
-   invite (§16) + guest retention prompt (§52) deferred to the next UI
-   pass (tracked under P6 remainder).
+   invite (§16) + guest retention prompt (§52) landed in the final UI
+   pass (see P6 remainder above).
 6. ✅ **Batch 16 — Scheduling frontend + protocol** (P8/P14) —
    COMPLETE: wire messages live + guest persistence + scheduler
    PreloadState broadcasts; Schedule form with earlier-only preload;

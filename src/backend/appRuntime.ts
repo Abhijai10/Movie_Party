@@ -199,6 +199,17 @@ export type AppSnapshot = {
       message: string;
     };
   };
+  /** §56: schedule awaiting the guest's explicit accept/decline. */
+  pendingGuestSchedule: {
+    scheduleId: string;
+    mediaId: string;
+    scheduledStartUtcMs: number;
+  } | null;
+  /** §52: post-party retention question for a guest's transferred movie. */
+  retentionPrompt: {
+    mediaId: string;
+    filename: string;
+  } | null;
 };
 
 export type RuntimeFailureEvent =
@@ -335,6 +346,52 @@ export async function launchGenericLink(url: string): Promise<AppSnapshot | null
 
 export async function joinParty(inviteCode: string): Promise<AppSnapshot | null> {
   return invokeSnapshotOrThrow("join_party", { inviteCode });
+}
+
+/** §16 invitation: render the invite link as a scannable QR (SVG). */
+export async function inviteQrSvg(inviteUrl: string): Promise<string | null> {
+  try {
+    return await invoke<string>("invite_qr_svg", { inviteUrl });
+  } catch (error) {
+    console.error("invite_qr_svg failed", error);
+    return null;
+  }
+}
+
+/** §52 retention decision: keep the cached movie on this device. */
+export async function retentionKeep(mediaId: string): Promise<boolean> {
+  try {
+    await invoke("retention_keep", { mediaId });
+    return true;
+  } catch (error) {
+    console.error("retention_keep failed", error);
+    return false;
+  }
+}
+
+/** §52 retention decision: remove Movie Party's cache (never the host
+ *  source file). */
+export async function retentionRemove(mediaId: string): Promise<boolean> {
+  try {
+    await invoke("retention_remove", { mediaId });
+    return true;
+  } catch (error) {
+    console.error("retention_remove failed", error);
+    return false;
+  }
+}
+
+/** §52 retention decision: save the cached movie to a chosen folder. */
+export async function retentionSaveAs(
+  mediaId: string,
+  destination: string,
+): Promise<string | null> {
+  try {
+    return await invoke<string>("retention_save_as", { mediaId, destination });
+  } catch (error) {
+    console.error("retention_save_as failed", error);
+    return null;
+  }
 }
 
 export async function takePendingDeepLinks(): Promise<string[]> {

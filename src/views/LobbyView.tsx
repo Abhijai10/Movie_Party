@@ -1,8 +1,9 @@
 import { motion } from "framer-motion";
-import { ArrowLeft, ArrowRight, Check, Copy, Film, MessageCircle, Users, Video } from "lucide-react";
+import { ArrowLeft, ArrowRight, Film, MessageCircle, Users, Video } from "lucide-react";
 import { useMemo, useState, type SyntheticEvent } from "react";
 import type { AppSnapshot } from "../backend/appRuntime";
 import { sendChatMessage } from "../backend/appRuntime";
+import { InviteCard } from "../components/mp/InviteCard";
 import { ChatCompose } from "../components/mp/ChatOverlay";
 import { CinemaButton } from "../components/mp/CinemaButton";
 import { ParticipantCard } from "../components/mp/ParticipantCard";
@@ -38,7 +39,6 @@ export function LobbyView({
   callTileSession,
   onCallTileSessionChange,
 }: LobbyViewProps) {
-  const [copied, setCopied] = useState(false);
   const [draft, setDraft] = useState("");
   const [isChatOpen, setIsChatOpen] = useState(false);
   const encodedDraftLength = useMemo(() => new TextEncoder().encode(draft).length, [draft]);
@@ -72,18 +72,6 @@ export function LobbyView({
     snapshot.participants.every((participant) => participant.mediaReady) &&
     (snapshot.media != null || snapshot.provider.url != null) &&
     snapshot.network.connected;
-
-  const copyInvite = async () => {
-    try {
-      await navigator.clipboard.writeText(inviteCode);
-      setCopied(true);
-      setTimeout(() => {
-        setCopied(false);
-      }, 1600);
-    } catch {
-      /* clipboard unavailable */
-    }
-  };
 
   const sendLobbyMessage = (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -230,38 +218,7 @@ export function LobbyView({
             </div>
           </div>
 
-          <div
-            className="rounded-2xl p-5"
-            style={{
-              background: "rgba(13, 11, 20, 0.7)",
-              border: "1px solid rgba(159,122,234,0.18)",
-              backdropFilter: "blur(14px)",
-            }}
-          >
-            <span className="text-[11px] tracking-[0.28em] uppercase text-white/50">Room code</span>
-            <div className="mt-3 flex items-center justify-between gap-3 min-w-0">
-              <span
-                className="min-w-0 flex-1 truncate font-mono-mp text-white text-sm tracking-[0.12em]"
-                data-testid="lobby-room-code"
-                title={inviteCode}
-              >
-                {inviteCode}
-              </span>
-              <button
-                type="button"
-                onClick={() => void copyInvite()}
-                className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 transition text-xs tracking-widest uppercase text-white/80"
-                data-testid="lobby-copy-invite-btn"
-              >
-                {copied ? (
-                  <Check className="w-3.5 h-3.5 text-[#34D399]" />
-                ) : (
-                  <Copy className="w-3.5 h-3.5" />
-                )}
-                {copied ? "Copied" : "Copy invite"}
-              </button>
-            </div>
-          </div>
+          <InviteCard inviteCode={inviteCode} />
 
           {isHost ? (
             <div className="flex items-center justify-between rounded-2xl p-4 bg-white/[0.02] border border-white/10">

@@ -77,12 +77,27 @@ Project State:
     Media Foundation). Constant-string plans + pipeline proof exist;
     real runs are user-driven and never fakeable.
 
-    Gates this round: fmt, clippy -D warnings (0), 366 lib + 446 total
-    Rust tests, lint 0, tsc, vitest 140 (3 CSP new), build — ALL
-    GREEN. Four commits: d65891b (Batch 19), b6d2c04 (Batch 22),
-    bbf3561 (Batch 23 chaos) + docs. Next permitted: the user-driven
-    external verification (§31.1 manual matrix, DRM diagnostic runs,
-    two-device sessions) — NO further code batches remain in V1.
+    FINAL UI PASS (invite completion, audit recommendations): the §16
+    invitation is fully shipped — InviteCard in the lobby offers the
+    human code, the full movieparty:// LINK (browser-openable: any
+    browser/OS hands it to Movie Party's registered deep-link scheme,
+    which opens the join screen with the invite pre-filled), and a
+    real scannable QR (invite_qr_svg command, qrcode crate, SVG
+    render). §56 guest schedule accept/decline banner wired to the
+    existing guest_accept_schedule loop (pending_guest_schedule now
+    rides the snapshot; the host echo + status flip already existed
+    with tests). §52 retention prompt: RetentionPrompt dialog
+    (Remove / Keep / Save As… with a native folder picker) wired to
+    the three existing retention commands; the prompt is set when a
+    GUEST's Local Perfect party ends (host owns its source — no
+    prompt) and cleared on decision. Audit P9 also moved: providers
+    table was migration 003.
+
+    Gates after the final pass: 368 lib + 450 total Rust tests, lint
+    0, tsc, vitest 140, build — ALL GREEN. Next permitted: the
+    user-driven external verification (§31.1 manual matrix, DRM
+    diagnostic runs, two-device sessions) — NO further code batches
+    remain in V1.
 
 Previous:
 🟨 BATCHES 17 + 18 (CHAT SPEC FAMILY + RESILIENCE WATCHERS) COMPLETE
@@ -4298,3 +4313,78 @@ external verification: run the Shared diagnostic against real
 providers, execute the §31.1 manual matrix on two devices, cut the
 beta build. If the DRM spike ever passes AND D3 flips to A, Batch 20
 transport becomes the next permitted code batch (plan-gated).
+
+
+---
+
+## 2026-09-06 — Final UI pass: §16 invite completion (QR + link), §56 guest accept, §52 retention prompt
+
+The user's direct asks: verify nothing is left, implement the earlier
+recommendations, and complete the invite flow ("a link openable in any
+browser that redirects into the app"). Findings on inspection: the
+deep-link PIPELINE already existed (movieparty:// scheme registered in
+tauri.conf.json, tauri_plugin_deep_link with on_open_url + startup args +
+take_pending_deep_links, AppShell consuming both, join_party accepting
+the full URL, invite.rs encode/parse with room credentials + cert
+fingerprint + TTL) — what was missing were the last three UI surfaces.
+
+### §16 INVITATION — complete
+
+- `invite_qr_svg` command (qrcode 0.14.1, svg feature only): renders
+  the invite link as a scannable QR SVG. 2 Rust tests: structural
+  guarantees (path + viewBox + deterministic render + longer link →
+  denser matrix). The renderer is content-agnostic; invite validation
+  stays in join_party.
+- `src/components/mp/InviteCard.tsx`: the lobby card now offers all
+  three §16 methods — the human code, Copy movieparty:// link, and
+  Show QR (toggle, rendered locally via the command, white-on-dark
+  scannable surface, copy affordance). The old copy-only card is
+  retired. The BROWSER-OPENABLE question: yes — pasting the link into
+  any browser on a machine with Movie Party installed hands it to the
+  OS's registered scheme handler, which opens the app straight to the
+  join screen with the invite filled (the startup-args path covers the
+  cold-start case too).
+- LobbyView: InviteCard swap; dead copied/copyInvite state removed.
+
+### §56 GUEST SCHEDULE ACCEPT — complete
+
+- AppSnapshot gains `pending_guest_schedule` (id + media + start UTC),
+  filled from the stored schedule; AppShell derives the visible banner
+  and never re-prompts for an answered schedule id (local Set).
+- `src/components/mp/GuestScheduleAccept.tsx`: alertdialog banner,
+  Accept (autofocus) / Decline → `guest_accept_schedule`. The full
+  loop already existed host-side (status flip + ScheduleAccept echo,
+  with its own test) — this closes the missing guest-side surface.
+
+### §52 LOCAL MEDIA RETENTION PROMPT — complete
+
+- AppSnapshot gains `retention_prompt` (media_id + filename);
+  leave_party sets it when a GUEST with a transferred movie leaves
+  (the cache_entries row is registered at guest join; the HOST keeps
+  its own source file and owes no prompt). The three retention
+  commands now clear the prompt on success (answered for good).
+- `src/components/mp/RetentionPrompt.tsx`: the §52 dialog in spec
+  order — Remove (autofocus, conservative default) / Keep in Movie
+  Party / Save As… (new `pick_save_folder` native dialog → export).
+  Nothing is deleted or kept silently; the notice line explains only
+  Movie Party's cache is touched.
+- TS wrappers: inviteQrSvg, retentionKeep/Remove/SaveAs.
+
+### Verification
+
+- `cargo fmt --check` ✅ · `cargo clippy --all-targets --all-features
+  -D warnings` ✅ 0 · `cargo test` ✅ 450 total (368 lib: +2 QR) ·
+  `pnpm lint` ✅ 0 · `tsc` ✅ · `vitest` ✅ 140 · `build` ✅
+- Two honest test corrections during the pass: my first QR asserts
+  assumed exact path coordinates (input-dependent) and an empty-link
+  rejection (the renderer is content-agnostic) — both replaced with
+  structural truths.
+- ⚠ EXTERNAL VERIFICATION PENDING (new items): a real browser
+  movieparty:// handoff on macOS + Windows, scanning the QR from a
+  second device, the §56 banner over a real two-device session, and
+  the §52 prompt after a real transferred-movie party end.
+
+### Next permitted
+
+User-driven external verification (unchanged). No V1 code batches
+remain.
