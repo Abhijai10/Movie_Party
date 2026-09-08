@@ -496,6 +496,24 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
               <Row label="Diagnostic log retention" hint="Technical details stay on this device">
                 Local only
               </Row>
+              <Row
+                label="Where your data lives"
+                hint="Media, chats, schedules, and diagnostics never leave your devices"
+              >
+                Peer-to-peer, local-first
+              </Row>
+              <Row
+                label="Provider credentials"
+                hint="Sign-ins stay inside each device's dedicated Chrome profile"
+              >
+                Never stored by Movie Party
+              </Row>
+              <Row
+                label="Telemetry"
+                hint="No usage data is collected, transmitted, or sold"
+              >
+                None
+              </Row>
             </div>
           ) : null}
 

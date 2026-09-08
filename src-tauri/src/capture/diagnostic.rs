@@ -213,8 +213,7 @@ pub fn parse_luma_stats(path: &std::path::Path) -> Result<MeasuredSample, Diagno
         .lines()
         .filter_map(|line| {
             line.split("YAVG=").nth(1).and_then(|rest| {
-                rest
-                    .split_whitespace()
+                rest.split_whitespace()
                     .next()
                     .and_then(|value| value.parse::<f32>().ok())
             })
