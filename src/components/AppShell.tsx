@@ -45,6 +45,7 @@ import { TailscaleSetupView } from "../views/TailscaleSetupView";
 import { createCallTileSessionState, type CallTileSessionState } from "../overlays/callTileState";
 import { LoadingState } from "./LoadingState";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { handleFailureEvent } from "../backend/appRuntime";
 import {
   createSingleFlight,
   isTailscaleReady,
@@ -263,6 +264,64 @@ export function AppShell() {
     }
     return undefined;
   }, [snapshot?.screen, closePrompt.visible]);
+
+  // ── Batch 18 (P13): sleep/wake + network-change revalidation hooks ────
+  // SLEEP_WAKE: the OS hiding the window (lid close, sleep) followed by a
+  // visible return after a real gap means clocks/buffers/devices must be
+  // revalidated — the modeled plan pauses playback for both and rechecks
+  // (§14: never risk desync on stale state).
+  const lastHiddenAtRef = useRef<number | null>(null);
+  useEffect(() => {
+    const inParty =
+      snapshot?.screen === "CINEMA" ||
+      snapshot?.screen === "LOBBY" ||
+      snapshot?.screen === "READY_CHECK";
+    if (!inParty) {
+      return undefined;
+    }
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        lastHiddenAtRef.current = Date.now();
+        return;
+      }
+      const hiddenAt = lastHiddenAtRef.current;
+      lastHiddenAtRef.current = null;
+      // Only a real gap (≥ 5 s) is a sleep/wake — quick app switches are
+      // not; firing SLEEP_WAKE for those would pointlessly pause both.
+      if (hiddenAt != null && Date.now() - hiddenAt >= 5_000) {
+        void handleFailureEvent("SLEEP_WAKE").then(applySnapshot);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [applySnapshot, snapshot?.screen]);
+
+  // NETWORK_CHANGE / WIFI_DISCONNECT: browser online/offline events map to
+  // the modeled network revalidation plans (revalidate + rebuild buffers
+  // on recovery; pause both on loss).
+  useEffect(() => {
+    const inParty =
+      snapshot?.screen === "CINEMA" ||
+      snapshot?.screen === "LOBBY" ||
+      snapshot?.screen === "READY_CHECK";
+    if (!inParty) {
+      return undefined;
+    }
+    const onOnline = () => {
+      void handleFailureEvent("NETWORK_CHANGE").then(applySnapshot);
+    };
+    const onOffline = () => {
+      void handleFailureEvent("WIFI_DISCONNECT").then(applySnapshot);
+    };
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, [applySnapshot, snapshot?.screen]);
 
   const requestLeaveOrEnd = useCallback(() => {
     const isHost = snapshot?.room.role === "HOST";

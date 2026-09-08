@@ -119,6 +119,7 @@ pub fn run() {
             mark_ready,
             enter_cinema,
             request_play_countdown,
+            continue_without_guest,
             pause_playback,
             resume_playback,
             seek_relative,
@@ -293,6 +294,13 @@ fn request_play_countdown(
     runtime: tauri::State<'_, app_runtime::AppRuntime>,
 ) -> app_runtime::AppSnapshot {
     runtime.request_play_countdown()
+}
+
+#[tauri::command]
+fn continue_without_guest(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> app_runtime::AppSnapshot {
+    runtime.continue_without_guest()
 }
 
 #[tauri::command]

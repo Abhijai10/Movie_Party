@@ -367,6 +367,12 @@ export async function requestPlayCountdown(): Promise<AppSnapshot | null> {
   return invoke<AppSnapshot>("request_play_countdown");
 }
 
+/** §40: host-only Continue Without Guest — the explicit user override of
+ *  the strict-sync guest gate. */
+export async function continueWithoutGuest(): Promise<AppSnapshot | null> {
+  return invoke<AppSnapshot>("continue_without_guest");
+}
+
 export type NativeVideoBounds = {
   x: number;
   y: number;

@@ -35,6 +35,7 @@ pub enum RecoveryAction {
     ReopenPlayerAndRequireReadiness,
     RemoveCorruptCacheAndReRequestChunks,
     AskHostToLocateFile,
+    ContinueWithoutGuest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

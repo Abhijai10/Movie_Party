@@ -433,6 +433,10 @@ struct AppRuntimeState {
     #[allow(dead_code)]
     peer_readiness: Option<ParticipantReadiness>,
     media: Option<MediaManifest>,
+    /// Batch 18 (P13): the host's local media path. The play gate
+    /// re-checks existence — a moved/renamed file fires the modeled
+    /// MissingLocalFile plan (AskHostToLocateFile, §29 honest error).
+    local_media_path: Option<String>,
     transfer: Option<TransferProgress>,
     buffer: BufferSnapshot,
     sync: SyncSnapshot,
@@ -533,6 +537,12 @@ struct AppRuntimeState {
     // ── M8: Automatic failure watchers ──────────────────────────────────
     /// Background task monitoring transfer progress for stalls.
     transfer_stall_watcher_task: Option<tokio::task::JoinHandle<()>>,
+    /// Batch 18 (P13): session-liveness watcher for the managed Chrome
+    /// (crash → ChromeCrash failure event → relaunch + readiness plan).
+    chrome_crash_watcher_task: Option<tokio::task::JoinHandle<()>>,
+    /// Batch 18 (P13): player-failure watcher (sticky MP-MEDIA-001 →
+    /// PlayerFailure failure event → reopen + readiness plan).
+    player_failure_watcher_task: Option<tokio::task::JoinHandle<()>>,
     /// Guest-only authenticated reconnect loop. Exactly one may own a party.
     reconnect_task: Option<tokio::task::JoinHandle<()>>,
     /// Guest heartbeat monitor; replaced whenever the QUIC transport changes.
@@ -688,6 +698,7 @@ impl AppRuntime {
                     local_readiness: ParticipantReadiness::ready(0),
                     peer_readiness: None,
                     media: None,
+                    local_media_path: None,
                     transfer: None,
                     buffer: BufferSnapshot {
                         guest_buffer_ahead_ms: 0,
@@ -764,6 +775,8 @@ impl AppRuntime {
                     transfer_task: None,
                     old_transfer_task: None,
                     transfer_stall_watcher_task: None,
+                    chrome_crash_watcher_task: None,
+                    player_failure_watcher_task: None,
                     reconnect_task: None,
                     heartbeat_task: None,
                     buffer_status_task: None,
@@ -972,6 +985,93 @@ impl AppRuntime {
     /// The old session is dropped (killing the Chrome process) if present.
     pub fn store_chrome_session(&self, session: crate::providers::chrome::ManagedChromeSession) {
         self.lock().chrome_session = Some(session);
+        self.spawn_chrome_crash_watcher();
+    }
+
+    /// Batch 18 (P13): poll managed-Chrome session liveness. When the child
+    /// dies mid-session (a real crash, not our graceful close — that takes
+    /// the session out of state first), fire ChromeCrash so the modeled
+    /// recovery plan runs: relaunch + readiness requirement, playback
+    /// paused for both (strict sync, §14).
+    fn spawn_chrome_crash_watcher(&self) {
+        let inner = Arc::clone(&self.inner);
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let (exists, alive) = {
+                    let mut state = inner.lock();
+                    match state.chrome_session.as_mut() {
+                        None => (false, false),
+                        Some(session) => (true, session.is_alive()),
+                    }
+                };
+                if !exists {
+                    // Session closed gracefully / torn down — stop watching.
+                    break;
+                }
+                if !alive {
+                    let mut state = inner.lock();
+                    // Take the dead session out so Drop's graceful close
+                    // path does not operate on a corpse (it would only
+                    // wait on an already-exited child).
+                    state.chrome_session = None;
+                    let plan = recovery_plan(FailureEvent::ChromeCrash);
+                    apply_recovery_to_state(&mut state, FailureEvent::ChromeCrash, plan);
+                    let out = snapshot_from_state(&state);
+                    drop(state);
+                    inner.emit(out);
+                    break;
+                }
+            }
+        });
+        let mut state = self.lock();
+        if let Some(old) = state.chrome_crash_watcher_task.replace(task) {
+            old.abort();
+        }
+    }
+
+    /// Batch 18 (P13): poll the player snapshot for a sticky failure. The
+    /// player module already surfaces honest MP-MEDIA-001 diagnostics; the
+    /// watcher promotes a sticky error to the PlayerFailure recovery plan
+    /// (reopen player + require readiness) so both sides pause (§14)
+    /// instead of the room sitting in a half-broken play state.
+    fn spawn_player_failure_watcher(&self) {
+        let inner = Arc::clone(&self.inner);
+        let task = tokio::spawn(async move {
+            let mut consecutive_failures: u32 = 0;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let should_fire = {
+                    let state = inner.lock();
+                    if state.player_snapshot.state != "PLAYER_ERROR" {
+                        consecutive_failures = 0;
+                        continue;
+                    }
+                    let media_error = state
+                        .player_snapshot
+                        .error_message
+                        .as_deref()
+                        .is_some_and(|error| error.starts_with("MP-MEDIA-001"));
+                    media_error && state.last_recovery.is_none()
+                };
+                if should_fire {
+                    consecutive_failures += 1;
+                    if consecutive_failures >= 2 {
+                        let mut state = inner.lock();
+                        let plan = recovery_plan(FailureEvent::PlayerFailure);
+                        apply_recovery_to_state(&mut state, FailureEvent::PlayerFailure, plan);
+                        let out = snapshot_from_state(&state);
+                        drop(state);
+                        inner.emit(out);
+                        break;
+                    }
+                }
+            }
+        });
+        let mut state = self.lock();
+        if let Some(old) = state.player_failure_watcher_task.replace(task) {
+            old.abort();
+        }
     }
 
     pub fn close_provider_session(&self) {
@@ -1926,6 +2026,12 @@ impl AppRuntime {
             if let Some(task) = state.transfer_stall_watcher_task.take() {
                 task.abort();
             }
+            if let Some(task) = state.chrome_crash_watcher_task.take() {
+                task.abort();
+            }
+            if let Some(task) = state.player_failure_watcher_task.take() {
+                task.abort();
+            }
             if let Some(task) = state.heartbeat_task.take() {
                 task.abort();
             }
@@ -1977,6 +2083,11 @@ impl AppRuntime {
         let identity = self.inner.identity();
         let credentials = RoomCredentials::generate();
 
+        // Batch 18 (P13): remember the local path for the file-moved gate.
+        self.lock().local_media_path = media_path
+            .as_ref()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty());
         let manifest = if let Some(path) = media_path.as_ref().filter(|p| !p.trim().is_empty()) {
             Some(build_manifest(&PathBuf::from(path.trim())).map_err(|e| e.to_string())?)
         } else {
@@ -2166,6 +2277,10 @@ impl AppRuntime {
         // no bytes are received for 30 seconds and fires TransferInterrupted.
         self.spawn_transfer_stall_watcher();
 
+        // Batch 18 (P13): the player-failure watcher promotes a sticky
+        // MP-MEDIA-001 to the PlayerFailure recovery plan.
+        self.spawn_player_failure_watcher();
+
         // Host-side event subscriber: the coordinator's canonical broadcasts
         // (CoordinatorStateUpdate, Play/Pause/SeekCommit, guest chat/reaction)
         // flow through event_tx. The host must apply them to its own
@@ -2228,6 +2343,12 @@ impl AppRuntime {
                 state.old_transfer_task = Some(task);
             }
             if let Some(task) = state.transfer_stall_watcher_task.take() {
+                task.abort();
+            }
+            if let Some(task) = state.chrome_crash_watcher_task.take() {
+                task.abort();
+            }
+            if let Some(task) = state.player_failure_watcher_task.take() {
                 task.abort();
             }
             if let Some(task) = state.reconnect_task.take() {
@@ -3876,6 +3997,21 @@ impl AppRuntime {
             if state.pending_operation_id.is_some() {
                 return snapshot_from_state(&state);
             }
+            // Batch 18 (P13): the local media file may have been moved or
+            // renamed since the party started. An honest check before the
+            // play protocol — never start a play that is doomed (§29).
+            if let Some(path) = state.local_media_path.clone() {
+                if !std::path::Path::new(&path).exists() {
+                    let plan = recovery_plan(FailureEvent::MissingLocalFile);
+                    apply_recovery_to_state(&mut state, FailureEvent::MissingLocalFile, plan);
+                    state.error = Some(
+                        "MP-MEDIA-002 the movie file moved or was renamed — locate it to continue"
+                            .to_string(),
+                    );
+                    sync_room_snapshot(&mut state);
+                    return snapshot_from_state(&state);
+                }
+            }
             // Never start the play protocol — and therefore never report
             // PLAYING — while the local player is genuinely unavailable
             // (e.g. the native surface attach failed because libmpv could
@@ -5082,6 +5218,48 @@ impl AppRuntime {
         self.guest_control_request("PLAY", serde_json::json!({}))
     }
 
+    /// UI_UX_SPEC §40: host-only "Continue Without <peer>". The host
+    /// acknowledges the guest's disconnect and continues solo — the one
+    /// user-initiated override of the strict-sync guest gate (the
+    /// coordinator's guest_abandoned flag; a returning guest re-clears it
+    /// through reconnection bookkeeping). Playback resumes through the
+    /// canonical play protocol, not a fabricated PLAYING (§28).
+    pub fn continue_without_guest(&self) -> AppSnapshot {
+        {
+            let mut state = self.lock();
+            if !Self::is_host_role(&state) {
+                state.error =
+                    Some("MP-CTRL-002 only the host can continue without the guest".to_string());
+                sync_room_snapshot(&mut state);
+                let snapshot = snapshot_from_state(&state);
+                drop(state);
+                self.inner.emit(snapshot.clone());
+                return snapshot;
+            }
+            state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .abandon_guest();
+            // §29 no silent mode change: record the explicit user override.
+            let plan = RecoveryPlan {
+                action: RecoveryAction::ContinueWithoutGuest,
+                pauses_playback_for_both: false,
+                requires_user_action: true,
+            };
+            state.last_recovery = Some(RuntimeRecoverySnapshot {
+                event: FailureEvent::GuestCrash,
+                action: plan.action,
+                pauses_playback_for_both: plan.pauses_playback_for_both,
+                requires_user_action: plan.requires_user_action,
+            });
+            sync_room_snapshot(&mut state);
+        }
+        // Resume through the canonical host play path (now unblocked by
+        // the abandoned-guest readiness override).
+        self.host_play()
+    }
+
     /// Guest → Host CONTROL_REQUEST transport for Shared Controls. The host
     /// decides; denied requests surface MP-CTRL-001, granted requests are
     /// answered by the canonical PREPARE/READY/COMMIT cycle.
@@ -5154,6 +5332,12 @@ impl AppRuntime {
             state.old_transfer_task = Some(task);
         }
         if let Some(task) = state.transfer_stall_watcher_task.take() {
+            task.abort();
+        }
+        if let Some(task) = state.chrome_crash_watcher_task.take() {
+            task.abort();
+        }
+        if let Some(task) = state.player_failure_watcher_task.take() {
             task.abort();
         }
         if let Some(task) = state.reconnect_task.take() {
@@ -8303,6 +8487,137 @@ mod tests {
                 "a different schedule is an independent notification"
             );
         }
+    }
+
+    /// §40 (Batch 18): Continue Without Guest is host-only — the guest
+    /// gets MP-CTRL-002 and no abandonment flag is set.
+    #[test]
+    fn continue_without_guest_is_host_only() {
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            state.local_participant.role = "Guest".to_string();
+            sync_room_snapshot(&mut state);
+        }
+        let snapshot = runtime.continue_without_guest();
+        assert_eq!(
+            snapshot.error.as_deref(),
+            Some("MP-CTRL-002 only the host can continue without the guest")
+        );
+        let abandoned = {
+            let state = runtime.lock();
+            let coord = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            coord.guest_is_abandoned()
+        };
+        assert!(
+            !abandoned,
+            "a guest attempt must never set the abandonment override"
+        );
+    }
+
+    /// §40 (Batch 18): the host's Continue Without Guest sets the
+    /// coordinator override and records the explicit user decision in
+    /// last_recovery (§29 — no silent mode change).
+    #[test]
+    fn continue_without_guest_sets_abandonment_and_records_it() {
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            state.local_participant.role = "Host".to_string();
+            sync_room_snapshot(&mut state);
+        }
+        let snapshot = runtime.continue_without_guest();
+        let abandoned = {
+            let state = runtime.lock();
+            let coord = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            coord.guest_is_abandoned()
+        };
+        assert!(abandoned, "the host override must set guest_abandoned");
+        let recovery = snapshot
+            .last_recovery
+            .as_ref()
+            .expect("the override must be recorded, not silent");
+        assert!(recovery.requires_user_action);
+        assert_eq!(
+            format!("{:?}", recovery.action),
+            "ContinueWithoutGuest".to_string()
+        );
+    }
+
+    /// §40 (Batch 18): an abandoned guest satisfies all_ready only through
+    /// the explicit override — host readiness still matters.
+    #[test]
+    fn abandoned_guest_overrides_readiness_but_not_host() {
+        let runtime = AppRuntime::new();
+        {
+            let state = runtime.lock();
+            let mut coord = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            coord.abandon_guest();
+        }
+        let (all_ready_with_override, all_ready_without) = {
+            let state = runtime.lock();
+            let mut coord = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let with_override = coord.all_ready(5_000);
+            coord.guest_abandoned = false;
+            let without = coord.all_ready(5_000);
+            (with_override, without)
+        };
+        // With neither side actually ready, even the override path needs
+        // the HOST ready — both stay false until the host is ready.
+        assert!(!all_ready_with_override);
+        assert!(!all_ready_without);
+    }
+
+    /// Batch 18 (P13): a moved/renamed local media file fails host_play
+    /// with the honest MP-MEDIA-002 + the AskHostToLocateFile plan — the
+    /// play protocol never starts against a missing file.
+    #[test]
+    fn host_play_detects_a_moved_media_file() {
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            state.local_participant.role = "Host".to_string();
+            state.local_media_path = Some("/definitely/not/a/real/movie/file.mkv".to_string());
+            use crate::sync::consensus::ParticipantReadiness;
+            let coord_room_state = {
+                let mut coord = state
+                    .sync_coordinator
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                coord.host_ready(ParticipantReadiness::ready(5_000));
+                coord.guest_ready(ParticipantReadiness::ready(5_000));
+                coord.update_readiness_consensus(5_000);
+                coord.room_state
+            };
+            state.room_state = coord_room_state;
+            sync_room_snapshot(&mut state);
+        }
+        let snapshot = runtime.host_play();
+        assert_eq!(
+            snapshot.error.as_deref(),
+            Some("MP-MEDIA-002 the movie file moved or was renamed — locate it to continue")
+        );
+        let recovery = snapshot
+            .last_recovery
+            .as_ref()
+            .expect("the moved-file recovery plan must be recorded");
+        assert!(recovery.requires_user_action);
+        assert!(
+            snapshot.sync.pending_operation.is_none(),
+            "no play operation may start against a missing file"
+        );
     }
 
     #[test]

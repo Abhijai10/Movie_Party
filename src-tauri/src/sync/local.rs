@@ -43,6 +43,8 @@ pub struct LocalSyncCoordinator {
     pub host_ready: ParticipantReadiness,
     pub guest_ready: ParticipantReadiness,
     pub paused_by_strict_sync: bool,
+    /// §40 Continue Without Guest (host-only, user-initiated).
+    pub guest_abandoned: bool,
     pub pending_scheduled: Option<ScheduledPlayback>,
     pub last_peer_seq_received: u64,
     /// Monotonic sequence counter for host-issued EventEnvelopes. Every
@@ -74,6 +76,7 @@ impl LocalSyncCoordinator {
             host_ready: ParticipantReadiness::ready(0),
             guest_ready: ParticipantReadiness::ready(0),
             paused_by_strict_sync: false,
+            guest_abandoned: false,
             pending_scheduled: None,
             last_peer_seq_received: 0,
             coordinator_event_seq: 0,
@@ -184,7 +187,29 @@ impl LocalSyncCoordinator {
     }
 
     pub fn all_ready(&self, minimum_buffer_ms: u64) -> bool {
+        if self.guest_abandoned {
+            // §40 Continue Without Guest: the host explicitly chose to
+            // continue solo; the guest's readiness is vacuously satisfied
+            // for the rest of this session. This is the ONLY override of
+            // the strict-sync guest gate and it is always user-initiated.
+            return all_participants_ready(
+                self.host_ready,
+                ParticipantReadiness::ready(u64::MAX / 2),
+                minimum_buffer_ms,
+            );
+        }
         all_participants_ready(self.host_ready, self.guest_ready, minimum_buffer_ms)
+    }
+
+    /// §40: the host acknowledged the guest's disconnect and chose to
+    /// continue without them. Sticky for the session (a returning guest
+    /// re-clears it via reconnection bookkeeping).
+    pub fn abandon_guest(&mut self) {
+        self.guest_abandoned = true;
+    }
+
+    pub fn guest_is_abandoned(&self) -> bool {
+        self.guest_abandoned
     }
 
     pub fn prepare_play(

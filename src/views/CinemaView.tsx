@@ -27,6 +27,12 @@ import { BufferingOverlay } from "../overlays/BufferingOverlay";
 import { ProviderStatusOverlay } from "../overlays/ProviderStatusOverlay";
 import { FloatingReactions, ReactionTray } from "../overlays/ReactionTray";
 import { ReconnectOverlay } from "../overlays/ReconnectOverlay";
+import {
+  continueWithoutGuest,
+  createLocalParty,
+  pickMediaFile,
+} from "../backend/appRuntime";
+import { ErrorScreenView, extractMpCode } from "./ErrorScreenView";
 import { ChatCompose, ChatHistoryCard } from "../components/mp/ChatOverlay";
 import {
   emptyBubbleQueue,
@@ -114,6 +120,8 @@ export function CinemaView({
   const [bubbleQueue, setBubbleQueue] = useState<ChatBubbleQueue>(emptyBubbleQueue);
   // §66: measured movie height drives the subtitle-zone bubble offset.
   const [movieHeightPx, setMovieHeightPx] = useState(0);
+  // §40: Keep Waiting dismissal for the disconnect decision buttons.
+  const [reconnectDismissed, setReconnectDismissed] = useState(false);
   const [cameraManuallyEnabled, setCameraManuallyEnabled] = useState(false);
   const [microphoneManuallyEnabled, setMicrophoneManuallyEnabled] = useState(false);
   const [callLocalStream, setCallLocalStream] = useState<MediaStream | null>(null);
@@ -764,9 +772,51 @@ export function CinemaView({
           percent={snapshot.buffer.percent}
           strictSyncPaused={snapshot.sync.strictSyncPaused}
         />
+        {snapshot.error != null &&
+        snapshot.error.startsWith("MP-MEDIA-002") ? (
+          <ErrorScreenView
+            code={extractMpCode(snapshot.error)}
+            message="The movie file moved or was renamed on this device."
+            actions={[
+              {
+                label: "Locate the file",
+                onClick: () => {
+                  void pickMediaFile().then((path) => {
+                    if (path == null) {
+                      return;
+                    }
+                    void createLocalParty(path).then((next) => {
+                      if (next) {
+                        onSnapshot(next);
+                      }
+                    });
+                  });
+                },
+              },
+            ]}
+            technicalDetails={snapshot.error}
+            onDismiss={() => {
+              onLeave();
+            }}
+          />
+        ) : null}
         <ReconnectOverlay
           peerName={peerName}
-          isReconnecting={snapshot.sync.roomState === "RECONNECTING"}
+          isReconnecting={
+            snapshot.sync.roomState === "RECONNECTING" && !reconnectDismissed
+          }
+          isHost={snapshot.room.role === "HOST"}
+          onKeepWaiting={() => {
+            setReconnectDismissed(true);
+          }}
+          onContinueWithoutGuest={() => {
+            void continueWithoutGuest().then((next) => {
+              if (next) {
+                setReconnectDismissed(false);
+                onSnapshot(next);
+              }
+            });
+          }}
         />
         <ProviderStatusOverlay snapshot={snapshot} />
         {privacyNotice ? (
