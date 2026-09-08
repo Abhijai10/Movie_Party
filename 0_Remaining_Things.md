@@ -106,12 +106,20 @@ same day. Highest-impact findings:
    fallback; §44 lobby badge added. ⚠ REAL provider-browser verification
    (YouTube commands over CDP on the physical device): EXTERNAL
    VERIFICATION PENDING.
-4. 🟡 **P4/P5/P7 — Spec-vs-implementation drift in the social UI**:
-   Ready Check countdown is a frontend timer (spec: sync-engine-driven);
-   chat layout contradicts UI_UX_SPEC §34–36 (see the note in §16 below —
-   the two core docs disagree, decision D2 required); camera card is
-   24vw/260px vs spec 220px default, 120–360 clamp, locally persisted
-   position, 48px minimized circle — Batch 17.
+4. ✅ **P4/P5/P7 — Spec-vs-implementation drift in the social UI** —
+   CLOSED in Batch 17: P4 the Ready-Check countdown is backend-driven
+   (request_play_countdown schedules the canonical commit with a 3 s lead;
+   SyncSnapshot.pendingOperation exposes the deadline; the frontend only
+   animates from it, §25). P5 decision D2 resolved by ADR-0003: the
+   UI_UX_SPEC §34–36 chat family is canonical (lower-third 5 s ephemeral
+   bubbles, max 3, queue, fade-sooner displacement, §66 subtitle-zone
+   offset, reduced-motion fade; §34 bottom-center compose; §36 centered
+   history card); §16.1's right-anchored family is retired from Cinema
+   Mode (this doc amended — loser doc). P7 camera card at spec values:
+   220 px default, 16:9, 120–360 clamp with a resize handle, position
+   persisted to localStorage, minimized is the ~48 px click-to-restore
+   circle. ⚠ Two-device countdown timing + bubble visuals on real
+   content: EXTERNAL VERIFICATION PENDING.
 5. ✅ **P6 — Missing spec'd screens** — CLOSED code-level in Batches
    15/16: Settings (§55–62, all 8 sections, Strict Sync visible-but-
    locked), First Run + truthful prerequisite checks (§10–11, no
@@ -145,14 +153,20 @@ same day. Highest-impact findings:
    options, rollback, and test plans; both follow
    docs/architecture/adr/ADR_TEMPLATE.md. Chat-size and other deviations
    are queued for ADRs as their batches land (Batch 17 per the plan).
-10. 🟡 **P12/P13 — Release/watcher gaps**: no CSP, no release cargo
-    profile, no dependency audits in CI, macOS signing/notarization
-    absent; Chrome-crash + player-failure watchers still unwired
-    (recovery plans exist) — Batches 18, 22. NOTE: the Chrome LIFECYCLE
-    half of P13 is fixed (Batches 13/14 round): graceful Browser.close +
-    bounded wait everywhere (Drop, leave_party, return_home, app exit),
-    fail-fast launch when the child dies pre-CDP — the crash WATCHERS
-    (in-session failure overlay) are still Batch 18.
+10. 🟡 **P12/P13 — Release/watcher gaps**: the WATCHER half of P13 is
+    CLOSED in Batch 18 — Chrome-crash watcher (session-liveness poll →
+    ChromeCrash → relaunch+readiness, pause both) and player-failure
+    watcher (sticky MP-MEDIA-001 → PlayerFailure → reopen+readiness),
+    both aborted at every teardown site; §40 disconnect decision UI
+    (grace + Keep Waiting + host-only Continue Without <peer> via the
+    coordinator's guest_abandoned override, recorded in last_recovery);
+    sleep/wake + network-change revalidation hooks; moved-file gate
+    (MP-MEDIA-002 + AskHostToLocateFile with a Locate-the-file action).
+    ⚠ Real kill-9 Chrome / sleep-wake / network-switch during play:
+    EXTERNAL VERIFICATION PENDING. STILL OPEN (P12, Batch 22): no CSP,
+    no release cargo profile, no dependency audits in CI, macOS
+    signing/notarization absent. Chrome LIFECYCLE was already fixed
+    (Batches 13/14): graceful Browser.close + bounded wait everywhere.
 11. ✅ **P14 — Preload units bug** — FIXED in Batch 16 (verified then
     fixed, exactly as the audit described): the storage/sqlite.rs
     duplicate divided bytes by a bits-per-second goodput without ×8
@@ -1241,11 +1255,16 @@ gaps around it.
 - Lobby and Cinema use the same visual family.
 
 > **2026-09-05 audit note (finding P5 / decision D2):** the sizes above
-> match the implementation and this document, but UI_UX_SPEC §34–36
-> specifies a different family — compose `min(560px, 70vw)` bottom-center;
-> history `min(620px, 75vw) × min(560px, 70vh)` centered; lower-third
-> ephemeral 5 s bubbles, max 3 visible. The two core docs disagree; one
-> must be amended via ADR before the Batch 17 chat work.
+> matched the implementation and this document, but UI_UX_SPEC §34–36
+> specified a different family. **RESOLVED (Batch 17) by
+> ADR-0003 (`docs/architecture/adr/ADR-0003-chat-presentation-family.md`):**
+> the UI_UX_SPEC §34–36 family is canonical — compose `min(560px, 70vw)`
+> bottom-center; history `min(620px, 75vw) × min(560px, 70vh)` centered;
+> lower-third ephemeral 5 s bubbles, max 3 visible. This document's
+> §16.1 size family (the 360–420 px right-anchored overlay) is the LOSER
+> and is retired from Cinema Mode; the behavioral rules below (Ghost/
+> Privacy suppression, unread badge, typing preservation, manual
+> open/close) were never in conflict and remain in force.
 
 ---
 
@@ -1836,11 +1855,18 @@ D1–D4 live in `docs/core_docs/V1_COMPLETION_PLAN.md`.
    PreloadState broadcasts; Schedule form with earlier-only preload;
    Home Upcoming cards; offline warning; notification-permission at
    save; P14 duplicate deleted (one canonical bits-correct formula).
-7. **Batch 17 — Chat & cinema spec alignment** (P4/P5/P7): lower-third
-   ephemeral bubbles, backend-driven countdown, camera card spec values.
-8. **Batch 18 — Resilience watchers + recovery UX** (P13): Chrome-crash
-   and player-failure watchers, disconnect overlay with host-only
-   Continue Without Guest.
+7. ✅ **Batch 17 — Chat & cinema spec alignment** (P4/P5/P7) —
+   COMPLETE: ADR-0003 resolves D2; §35 lower-third ephemeral bubbles
+   (5 s, max 3, queue, fade-sooner displacement, §66 offset,
+   reduced-motion), §34 bottom-center compose, §36 centered history;
+   §25 backend-driven countdown (deadline on the snapshot, frontend
+   animates from it); §28–29 camera card at spec values with
+   localStorage persistence.
+8. ✅ **Batch 18 — Resilience watchers + recovery UX** (P13) — COMPLETE:
+   Chrome-crash + player-failure watchers wired with full lifecycle
+   teardown; §40 disconnect decision UI (grace, Keep Waiting,
+   host-only Continue Without Guest); sleep/wake + network-change
+   revalidation hooks; moved-file gate with Locate-the-file prompt.
 9. **Batch 19 — macOS Provider Shared capture spike** (P10):
    diagnostic-only capture/encode/30 s sample with honest DRM
    classification (black-frame detection exists; no circumvention).

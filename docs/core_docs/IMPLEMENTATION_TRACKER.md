@@ -14,6 +14,49 @@ It must be updated continuously.
 
 ```text
 Project State:
+🟨 BATCHES 17 + 18 (CHAT SPEC FAMILY + RESILIENCE WATCHERS) COMPLETE
+    (code-level). Batch 17 closed audit P4, P5, and P7. Decision D2 is
+    RESOLVED by ADR-0003 (chat family): the UI_UX_SPEC §34–§36 family is
+    canonical — lower-third ephemeral chat bubbles (5 s lifetime, queue,
+    max 3 visible, oldest displaced with a fade-sooner retirement pass,
+    §66 subtitle-zone offset model, reduced-motion plain fade), a §34
+    bottom-center composer min(560px,70vw), and a §36 centered history
+    card min(620px,75vw) × min(560px,70vh); the old right-anchored
+    .cinema-chat-overlay family is retired from Cinema Mode with its
+    behavioral rules (Ghost/Privacy suppression, unread badge, typing
+    preservation) carried over; 0_Remaining_Things §16 amended (loser
+    doc). P4: the Ready-Check countdown is now BACKEND-DRIVEN (§25) —
+    request_play_countdown (host-only) schedules the canonical play
+    commit with a 3 s lead and exposes the deadline on the snapshot
+    (SyncSnapshot.pendingOperation with a wall-clock projection anchored
+    at construction; AGENTS §16 — execution stays monotonic); the
+    frontend derives 3-2-1 from that deadline (rAF display-only) and
+    never owns an unsynchronized timer. P7: camera card at spec values —
+    220 px default (16:9), 120–360 resize clamp with a corner handle,
+    position persisted to localStorage on drag end, minimized is the
+    ~48 px avatar circle with click-to-restore. Batch 18 closed audit
+    P13's watcher half: a Chrome-crash watcher (session-liveness poll →
+    ChromeCrash → relaunch+readiness plan, pauses both) and a
+    player-failure watcher (sticky MP-MEDIA-001 → PlayerFailure →
+    reopen+readiness), both spawned with real lifecycle and ABORTED at
+    every teardown site (graceful teardown everywhere); §40 disconnect
+    decision UI (grace, [Keep Waiting], host-only [Continue Without
+    <peer>] wired to continue_without_guest — the coordinator's
+    guest_abandoned flag, the one user-initiated strict-sync override,
+    recorded in last_recovery, §29); sleep/wake (visibilitychange ≥5 s
+    gap → SLEEP_WAKE) and network-change (online/offline →
+    NETWORK_CHANGE/WIFI_DISCONNECT) revalidation hooks; and the moved-
+    file gate (host_play re-checks local_media_path → honest
+    MP-MEDIA-002 + AskHostToLocateFile, surfaced via the §64 error
+    screen with a Locate-the-file action — no silent path guessing).
+    Gates ALL green: fmt, clippy -D warnings, 440 Rust tests, lint,
+    tsc, vitest 137, build. NOT verifiable here: real two-device
+    countdown timing, kill-9 Chrome mid-session, real sleep/wake and
+    network-switch during play, camera resize feel per OS → ⚠ EXTERNAL
+    VERIFICATION PENDING. Next permitted: Batch 19 (macOS Provider
+    Shared spike — needs manual capture runs).
+
+Previous:
 🟨 BATCHES 15 + 16 (SETTINGS/FIRST-RUN/ERROR SCREENS + SCHEDULING
     FRONTEND & PROTOCOL) COMPLETE (code-level), incl. the audit P14
     preload-units fix. Batch 15 closed audit P6: FirstRunView shows the
