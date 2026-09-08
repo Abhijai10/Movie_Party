@@ -437,6 +437,9 @@ struct AppRuntimeState {
     /// re-checks existence — a moved/renamed file fires the modeled
     /// MissingLocalFile plan (AskHostToLocateFile, §29 honest error).
     local_media_path: Option<String>,
+    /// Batch 19 (P10/D3-B): per-provider Provider Shared diagnostic
+    /// attempt counts — the §69 failure policy needs the retry state.
+    provider_shared_attempts: std::collections::HashMap<String, u8>,
     transfer: Option<TransferProgress>,
     buffer: BufferSnapshot,
     sync: SyncSnapshot,
@@ -699,6 +702,7 @@ impl AppRuntime {
                     peer_readiness: None,
                     media: None,
                     local_media_path: None,
+                    provider_shared_attempts: std::collections::HashMap::new(),
                     transfer: None,
                     buffer: BufferSnapshot {
                         guest_buffer_ahead_ms: 0,
@@ -979,6 +983,108 @@ impl AppRuntime {
         self.inner.replace_identity(identity.clone());
         self.lock().local_participant.id = identity.device_id.clone();
         self.lock().local_participant.display_name = display_name.to_string();
+    }
+
+    /// Batch 19 (P10 / D3-B): run the Provider Shared diagnostic for one
+    /// provider on THIS device. The ffmpeg-CLI bridge (V1 mechanism per
+    /// the plan) captures a 30 s sample and classifies it with the
+    /// existing black-frame/static detector; the outcome is persisted
+    /// (AGENTS §38 — empirical, per-device) and the attempt count drives
+    /// the §69 failure policy: ONE retry, then the explicit Sync Mode
+    /// offer. Never a silent switch (§29).
+    pub fn run_provider_shared_diagnostic(
+        &self,
+        provider_id: String,
+    ) -> Result<crate::storage::sqlite::StoredProviderDiagnostic, String> {
+        use crate::capture::diagnostic as diag;
+
+        let display_name = crate::providers::sync::provider_capabilities()
+            .into_iter()
+            .find(|capability| capability.id == provider_id)
+            .map(|capability| capability.display_name)
+            .ok_or_else(|| "MP-PROVIDER-002 unsupported provider".to_string())?;
+
+        let attempt = {
+            let mut state = self.lock();
+            let entry = state
+                .provider_shared_attempts
+                .entry(provider_id.clone())
+                .or_insert(0);
+            let current = *entry;
+            *entry = current.saturating_add(1);
+            current
+        };
+
+        let outcome = match diag::run_capture_sample(
+            diag::DIAGNOSTIC_SAMPLE_SECONDS,
+            1,
+            &std::env::temp_dir().join("movie-party-shared-diagnostic"),
+        ) {
+            Ok(sample) => {
+                // The provider's own page reports playing during a real
+                // diagnostic; a diagnostic on this device IS the playing
+                // context (the user runs it against the open provider).
+                let provider_playing = {
+                    let state = self.lock();
+                    state.chrome_session.is_some()
+                        && state.provider.readiness
+                            == crate::providers::sync::ProviderReadiness::PlaybackReady
+                };
+                let availability = diag::classify_sample(sample, provider_playing);
+                diag::outcome_for_classification(&provider_id, availability, attempt)
+            }
+            Err(diag::DiagnosticError::FfmpegMissing) => {
+                return Err(diag::DiagnosticError::FfmpegMissing.to_string());
+            }
+            Err(diag::DiagnosticError::PermissionDenied) => {
+                return Err(diag::DiagnosticError::PermissionDenied.to_string());
+            }
+            Err(diag::DiagnosticError::NoFrames) => diag::outcome_for_classification(
+                &provider_id,
+                crate::capture::CaptureAvailability::NoFrames,
+                attempt,
+            ),
+            Err(other) => {
+                // Honest typed error — command/store failures surface as-is.
+                return Err(other.to_string());
+            }
+        };
+
+        let stored = crate::storage::sqlite::StoredProviderDiagnostic {
+            provider_id: outcome.provider_id.clone(),
+            display_name,
+            shared_available: outcome.shared_available,
+            shared_reason: outcome.reason.clone(),
+            verified_at_ms: Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_millis() as i64)
+                    .unwrap_or(0),
+            ),
+            sample_seconds: outcome.sample_seconds,
+        };
+        {
+            let state = self.lock();
+            if let Some(db) = state.db.clone() {
+                db.upsert_provider_diagnostic(&stored)
+                    .map_err(|e| format!("MP-STORE-001 failed to record diagnostic: {e}"))?;
+            }
+        }
+        self.inner.emit(self.snapshot());
+        Ok(stored)
+    }
+
+    /// Batch 19: the persisted per-provider diagnostics (empirical
+    /// classification records for the Settings surface).
+    pub fn list_provider_diagnostics(
+        &self,
+    ) -> Vec<crate::storage::sqlite::StoredProviderDiagnostic> {
+        let state = self.lock();
+        state
+            .db
+            .as_ref()
+            .and_then(|db| db.list_provider_diagnostics().ok())
+            .unwrap_or_default()
     }
 
     /// M6: Store an owned Chrome session in AppRuntime, replacing any previous one.

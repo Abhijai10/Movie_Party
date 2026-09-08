@@ -12,7 +12,7 @@ use rusqlite::{params, Connection};
 
 use super::StorageError;
 
-const CURRENT_SCHEMA_VERSION: i32 = 2;
+const CURRENT_SCHEMA_VERSION: i32 = 3;
 
 /// Helper to lock a Mutex, converting PoisonError to StorageError.
 fn lock_mutex<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, StorageError> {
@@ -82,6 +82,21 @@ pub struct StoredChatMessage {
     pub created_host_time_us: i64,
 }
 
+/// A persisted Provider Shared capture diagnostic (Batch 19, P10).
+/// camelCase on the wire — the TS contract declares camelCase fields.
+/// AGENTS §38: `shared_available` reflects a REAL diagnostic on THIS
+/// device, never a guess.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredProviderDiagnostic {
+    pub provider_id: String,
+    pub display_name: String,
+    pub shared_available: bool,
+    pub shared_reason: String,
+    pub verified_at_ms: Option<i64>,
+    pub sample_seconds: u16,
+}
+
 impl MoviePartyDb {
     /// Open or create the database at the given path.
     /// Runs migrations automatically and idempotently.
@@ -146,6 +161,11 @@ impl MoviePartyDb {
 
         if current < 2 && !device_identity_has_key_label(&conn)? {
             conn.execute_batch(MIGRATION_002)
+                .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        }
+
+        if current < 3 {
+            conn.execute_batch(MIGRATION_003)
                 .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         }
 
@@ -263,6 +283,65 @@ impl MoviePartyDb {
             schedules.push(row.map_err(|e| StorageError::Sqlite(e.to_string()))?);
         }
         Ok(schedules)
+    }
+
+    /// Upsert a Provider Shared capture diagnostic (Batch 19). The row is
+    /// the empirical record for AGENTS §38 — `shared_available` is true
+    /// ONLY when a real diagnostic verified capture on this device.
+    pub fn upsert_provider_diagnostic(
+        &self,
+        diagnostic: &StoredProviderDiagnostic,
+    ) -> Result<(), StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        conn.execute(
+            "INSERT INTO providers (provider_id, display_name, shared_available, shared_reason, verified_at_ms, sample_seconds)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(provider_id) DO UPDATE SET
+                display_name = excluded.display_name,
+                shared_available = excluded.shared_available,
+                shared_reason = excluded.shared_reason,
+                verified_at_ms = excluded.verified_at_ms,
+                sample_seconds = excluded.sample_seconds",
+            rusqlite::params![
+                diagnostic.provider_id,
+                diagnostic.display_name,
+                i64::from(diagnostic.shared_available),
+                diagnostic.shared_reason,
+                diagnostic.verified_at_ms,
+                i64::from(diagnostic.sample_seconds),
+            ],
+        )
+        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(())
+    }
+
+    /// All persisted diagnostics keyed by provider ID.
+    pub fn list_provider_diagnostics(&self) -> Result<Vec<StoredProviderDiagnostic>, StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT provider_id, display_name, shared_available, shared_reason,
+                        verified_at_ms, sample_seconds
+                 FROM providers ORDER BY provider_id",
+            )
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(StoredProviderDiagnostic {
+                    provider_id: row.get(0)?,
+                    display_name: row.get(1)?,
+                    shared_available: row.get::<_, i64>(2)? != 0,
+                    shared_reason: row.get(3)?,
+                    verified_at_ms: row.get(4)?,
+                    sample_seconds: row.get::<_, i64>(5)?.clamp(0, u16::MAX as i64) as u16,
+                })
+            })
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        let mut diagnostics = Vec::new();
+        for row in rows {
+            diagnostics.push(row.map_err(|e| StorageError::Sqlite(e.to_string()))?);
+        }
+        Ok(diagnostics)
     }
 
     /// Delete a schedule by ID.
@@ -650,6 +729,22 @@ CREATE INDEX IF NOT EXISTS idx_chat_room ON chat_messages(room_id, created_host_
 /// schema declaration, which recorded `user_version = 1` without this column.
 const MIGRATION_002: &str = "
 ALTER TABLE device_identity ADD COLUMN key_label TEXT NOT NULL DEFAULT '';
+";
+
+/// v3 (Batch 19): persistent per-provider Provider Shared capture
+/// diagnostics — the empirical classification record (AGENTS §38:
+/// provider support is empirical, never guessed). `shared_available`
+/// flips only when a real diagnostic on this device verified capture.
+const MIGRATION_003: &str = "
+CREATE TABLE IF NOT EXISTS providers (
+    provider_id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    shared_available INTEGER NOT NULL DEFAULT 0,
+    shared_reason TEXT NOT NULL DEFAULT '',
+    verified_at_ms INTEGER,
+    sample_seconds INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_providers_recent ON providers(provider_id, verified_at_ms);
 ";
 
 // ── Tests ───────────────────────────────────────────────────────────────────

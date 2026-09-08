@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { ArrowLeft, Download, RotateCcw, Trash2 } from "lucide-react";
 import { CinemaButton } from "../components/mp/CinemaButton";
@@ -6,6 +6,9 @@ import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
 import {
   checkProviderStatus,
+  listProviderDiagnostics,
+  runProviderSharedDiagnostic,
+  type StoredProviderDiagnostic,
   getAppMetadataInfo,
   getProviderCapabilities,
   getTailscaleReadiness,
@@ -83,7 +86,50 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
   });
   const [confirmResetProvider, setConfirmResetProvider] = useState<string | null>(null);
   const [exportedBundle, setExportedBundle] = useState<string | null>(null);
+  // Batch 19 (D3-B): Provider Shared diagnostic records + run state.
+  const [diagnostics, setDiagnostics] = useState<Record<string, StoredProviderDiagnostic>>({});
+  const [diagnosticRunning, setDiagnosticRunning] = useState<string | null>(null);
+  const [diagnosticMessage, setDiagnosticMessage] = useState<string | null>(null);
   const exportTimer = useRef<number | undefined>(undefined);
+
+  const refreshDiagnostics = useCallback(() => {
+    void listProviderDiagnostics().then((records) => {
+      const map: Record<string, StoredProviderDiagnostic> = {};
+      for (const record of records) {
+        map[record.providerId] = record;
+      }
+      setDiagnostics(map);
+    });
+  }, []);
+
+  useEffect(() => {
+    refreshDiagnostics();
+  }, [refreshDiagnostics]);
+
+  const runDiagnostic = (providerId: string) => {
+    if (diagnosticRunning != null) {
+      return;
+    }
+    setDiagnosticRunning(providerId);
+    setDiagnosticMessage(null);
+    void runProviderSharedDiagnostic(providerId).then((record) => {
+      setDiagnosticRunning(null);
+      if (record == null) {
+        // The wrapper logs the raw error; surface the honest reason the
+        // run could not classify (§29 — never a silent failure).
+        setDiagnosticMessage(
+          "The diagnostic could not run — see the reason in the app log (ffmpeg missing or capture permission denied are the common causes).",
+        );
+        return;
+      }
+      setDiagnostics((current) => ({ ...current, [record.providerId]: record }));
+      setDiagnosticMessage(
+        record.sharedAvailable
+          ? `Shared Mode verified for ${record.displayName} on this device.`
+          : record.sharedReason,
+      );
+    });
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -360,13 +406,35 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
                       </div>
                       <div className="flex gap-3">
                         <dt className="w-24 shrink-0 text-white/40">Shared Mode</dt>
-                        <dd>
-                          {capability.sharedAvailable
-                            ? "Available"
-                            : capability.sharedReason || "Experimental / Unsupported"}
+                        <dd data-testid={`shared-status-${capability.id}`}>
+                          {(() => {
+                            const record = diagnostics[capability.id];
+                            if (record == null) {
+                              return capability.sharedReason || "Experimental / Unsupported";
+                            }
+                            if (record.sharedAvailable) {
+                              return "Verified on this device (experimental)";
+                            }
+                            return record.sharedReason || "Unavailable on this device";
+                          })()}
                         </dd>
                       </div>
                     </dl>
+                    {diagnosticMessage != null && (diagnosticRunning == null) ? (
+                      <div
+                        className="mt-3 rounded-lg border border-white/10 bg-white/[0.03] px-3.5 py-2.5 text-xs text-white/70"
+                        role="status"
+                        data-testid="shared-diagnostic-message"
+                      >
+                        {diagnosticMessage}
+                        {diagnosticMessage.includes("Sync Mode") ? (
+                          <span className="block mt-1.5 text-white/45">
+                            Provider Sync Mode is the supported path for this provider —
+                            both of you sign in on your own devices.
+                          </span>
+                        ) : null}
+                      </div>
+                    ) : null}
                     <div className="mt-4 flex flex-wrap gap-3">
                       <CinemaButton
                         variant="neutral"
@@ -377,6 +445,17 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
                         }}
                       >
                         Open Provider
+                      </CinemaButton>
+                      <CinemaButton
+                        variant="neutral"
+                        disabled={diagnosticRunning != null}
+                        onClick={() => {
+                          runDiagnostic(capability.id);
+                        }}
+                      >
+                        {diagnosticRunning === capability.id
+                          ? "Running diagnostic…"
+                          : "Run Shared Diagnostic"}
                       </CinemaButton>
                       <CinemaButton
                         variant="neutral"

@@ -373,6 +373,37 @@ export async function continueWithoutGuest(): Promise<AppSnapshot | null> {
   return invoke<AppSnapshot>("continue_without_guest");
 }
 
+/** Batch 19 (D3-B): the persisted per-provider Shared diagnostic record. */
+export type StoredProviderDiagnostic = {
+  providerId: string;
+  displayName: string;
+  sharedAvailable: boolean;
+  sharedReason: string;
+  verifiedAtMs: number | null;
+  sampleSeconds: number;
+};
+
+export async function listProviderDiagnostics(): Promise<
+  StoredProviderDiagnostic[]
+> {
+  return invoke<StoredProviderDiagnostic[]>("list_provider_diagnostics");
+}
+
+/** Batch 19: run the 30 s Provider Shared capture diagnostic (ffmpeg-CLI
+ *  bridge) and persist the empirical classification. */
+export async function runProviderSharedDiagnostic(
+  providerId: string,
+): Promise<StoredProviderDiagnostic | null> {
+  try {
+    return await invoke<StoredProviderDiagnostic>("run_provider_shared_diagnostic", {
+      providerId,
+    });
+  } catch (error) {
+    console.error("run_provider_shared_diagnostic failed", error);
+    return null;
+  }
+}
+
 export type NativeVideoBounds = {
   x: number;
   y: number;

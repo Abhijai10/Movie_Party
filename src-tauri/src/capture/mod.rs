@@ -1,3 +1,4 @@
+pub mod diagnostic;
 pub mod macos;
 pub mod windows;
 

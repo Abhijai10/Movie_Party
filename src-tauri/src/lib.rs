@@ -120,6 +120,8 @@ pub fn run() {
             enter_cinema,
             request_play_countdown,
             continue_without_guest,
+            run_provider_shared_diagnostic,
+            list_provider_diagnostics,
             pause_playback,
             resume_playback,
             seek_relative,
@@ -304,6 +306,21 @@ fn continue_without_guest(
 }
 
 #[tauri::command]
+fn run_provider_shared_diagnostic(
+    provider_id: String,
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<crate::storage::sqlite::StoredProviderDiagnostic, String> {
+    runtime.run_provider_shared_diagnostic(provider_id)
+}
+
+#[tauri::command]
+fn list_provider_diagnostics(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Vec<crate::storage::sqlite::StoredProviderDiagnostic> {
+    runtime.list_provider_diagnostics()
+}
+
+#[tauri::command]
 fn enter_cinema(runtime: tauri::State<'_, app_runtime::AppRuntime>) -> app_runtime::AppSnapshot {
     runtime.enter_cinema()
 }
@@ -483,10 +500,20 @@ fn launch_provider(
     use crate::providers::sync::{provider_accepts_url, provider_id_from_str};
 
     if mode == "PROVIDER_SHARED" {
-        return Err(
-            "MP-CAPTURE-001 Provider Shared is experimental and unavailable until capture is verified on this device."
-                .to_string(),
-        );
+        // Batch 19: the gate consults the persisted empirical record
+        // (AGENTS §38). A verified diagnostic on THIS device unlocks the
+        // experimental path; anything else stays the honest MP-CAPTURE-001
+        // with the Sync Mode offer.
+        let verified = runtime
+            .list_provider_diagnostics()
+            .into_iter()
+            .any(|record| record.provider_id == provider_id && record.shared_available);
+        if !verified {
+            return Err(
+                "MP-CAPTURE-001 Provider Shared is experimental and unavailable until the capture diagnostic is verified on this device. Run the Shared diagnostic in Settings › Providers, or use Provider Sync Mode."
+                    .to_string(),
+            );
+        }
     }
     if mode != "PROVIDER_SYNC" {
         return Err("MP-PROVIDER-002 unsupported provider mode".to_string());
