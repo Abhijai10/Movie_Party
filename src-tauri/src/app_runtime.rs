@@ -132,6 +132,7 @@ impl Default for AppSnapshot {
                 room_state: "CREATED".to_string(),
                 strict_sync_paused: false,
                 position_ms: 0,
+                pending_operation: None,
             },
             network: NetworkSnapshot {
                 transport: "QUIC".to_string(),
@@ -206,6 +207,25 @@ pub struct SyncSnapshot {
     pub room_state: String,
     pub strict_sync_paused: bool,
     pub position_ms: u64,
+    /// A protocol operation in flight (PLAY/PAUSE/SEEK prepare). §25: the
+    /// Ready-Check countdown animates from this backend-provided deadline
+    /// — the frontend never invents its own unsynchronized countdown.
+    /// `execute_at_wall_ms` is a UI-display projection of the authoritative
+    /// host-monotonic deadline (monotonic time still drives execution,
+    /// AGENTS §16; wall clock is legal for UI display only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_operation: Option<PendingOperationSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingOperationSnapshot {
+    pub kind: String,
+    pub target_position_ms: u64,
+    /// Authoritative host-monotonic execution deadline (µs).
+    pub execute_at_host_mono_us: u64,
+    /// Wall-clock projection for UI display only (epoch ms).
+    pub execute_at_wall_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -450,6 +470,12 @@ struct AppRuntimeState {
     pending_operation_kind: Option<String>,
     pending_operation_target_ms: u64,
     pending_operation_execute_at_us: u64,
+    /// Wall-clock (epoch ms) reading taken together with the monotonic
+    /// reading at state init — lets snapshots project a host-monotonic
+    /// deadline into wall ms for UI display (AGENTS §16: execution itself
+    /// stays on the monotonic clock).
+    pending_operation_wall_anchor_ms: u64,
+    pending_operation_wall_anchor_mono_us: u64,
     /// Seek-only: whether the committed seek restarts playback afterwards
     /// (then the play protocol follows, §31).
     pending_operation_resume_after: bool,
@@ -577,30 +603,44 @@ fn reconnect_failure(error: quic::QuicError) -> ReconnectFailure {
 }
 
 impl AppRuntime {
+    /// UI_UX_SPEC §25: the Ready-Check countdown lead. The coordinator's
+    /// canonical play commit executes exactly this long after the host
+    /// presses Start; the frontend animates from the deadline the
+    /// backend broadcasts (never its own timer).
+    const COUNTDOWN_LEAD_US: u64 = 3_000_000;
+
     pub fn new() -> Self {
-        Self::new_without_emitter()
+        let runtime = Self::new_without_emitter();
+        runtime.anchor_wall_clock();
+        runtime
     }
 
     pub fn new_without_emitter() -> Self {
-        Self::new_with_emitter(None)
+        let runtime = Self::new_with_emitter(None);
+        runtime.anchor_wall_clock();
+        runtime
     }
 
     /// Construct a runtime with a test-injectable notifier. Unit tests never
     /// display real OS notifications.
     pub fn new_with_notifier(notifier: impl crate::notifications::Notifier + 'static) -> Self {
-        Self::new_with_emitter_and_key_store(
+        let runtime = Self::new_with_emitter_and_key_store(
             None,
             Arc::new(notifier),
             Arc::new(crate::secure::FakeKeyStore::new()),
-        )
+        );
+        runtime.anchor_wall_clock();
+        runtime
     }
 
     pub fn new_with_emitter(emitter: Option<Arc<dyn SnapshotSink>>) -> Self {
-        Self::new_with_emitter_and_key_store(
+        let runtime = Self::new_with_emitter_and_key_store(
             emitter,
             Arc::new(crate::notifications::NativeNotifier),
             Arc::new(crate::secure::NativeKeyStore),
-        )
+        );
+        runtime.anchor_wall_clock();
+        runtime
     }
 
     /// Test hook: inject an explicit OS-protected key store (e.g. a shared
@@ -658,6 +698,7 @@ impl AppRuntime {
                         room_state: "CREATED".to_string(),
                         strict_sync_paused: false,
                         position_ms: 0,
+                        pending_operation: None,
                     },
                     network: NetworkSnapshot {
                         transport: "QUIC".to_string(),
@@ -701,6 +742,8 @@ impl AppRuntime {
                     pending_operation_kind: None,
                     pending_operation_target_ms: 0,
                     pending_operation_execute_at_us: 0,
+                    pending_operation_wall_anchor_ms: 0,
+                    pending_operation_wall_anchor_mono_us: 0,
                     pending_operation_resume_after: false,
                     last_committed_operation_id: None,
                     commit_scheduled_for: None,
@@ -745,6 +788,19 @@ impl AppRuntime {
                 started_at: Instant::now(),
             }),
         }
+    }
+
+    /// §16: anchor the wall clock to the process monotonic clock so
+    /// snapshots can project host-monotonic deadlines into wall ms for
+    /// UI display (Ready-Check countdown, §25). Called from every public
+    /// constructor after state init.
+    fn anchor_wall_clock(&self) {
+        let mut state = self.lock();
+        state.pending_operation_wall_anchor_mono_us = monotonic_us();
+        state.pending_operation_wall_anchor_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
     }
 
     pub fn swap_emitter(&self, emitter: Option<Arc<dyn SnapshotSink>>) {
@@ -1817,6 +1873,7 @@ impl AppRuntime {
             room_state: "CREATED".to_string(),
             strict_sync_paused: false,
             position_ms: 0,
+            pending_operation: None,
         };
         state.local_participant.role = "Host".to_string();
         state.local_participant.connected = false;
@@ -2212,6 +2269,7 @@ impl AppRuntime {
                 room_state: "CREATED".to_string(),
                 strict_sync_paused: false,
                 position_ms: 0,
+                pending_operation: None,
             };
             state.provider = ProviderSnapshot {
                 mode: "LOCAL_PERFECT".to_string(),
@@ -3885,6 +3943,89 @@ impl AppRuntime {
         snapshot
     }
 
+    /// UI_UX_SPEC §25: host presses Start → the coordinator schedules the
+    /// canonical play operation with a 3-second countdown lead and
+    /// broadcasts PLAY_PREPARE. The commit fires at the backend-owned
+    /// deadline (the guest's PLAY_READY arrives during the window; the
+    /// countdown the user sees animates from the backend-provided
+    /// deadline — never a frontend-invented timer chain).
+    pub fn request_play_countdown(&self) -> AppSnapshot {
+        let snapshot = {
+            let mut state = self.lock();
+            if !Self::is_host_role(&state) {
+                state.error = Some("MP-CTRL-002 only the host can start the countdown".to_string());
+                sync_room_snapshot(&mut state);
+                return snapshot_from_state(&state);
+            }
+            if state.pending_operation_id.is_some() {
+                return snapshot_from_state(&state);
+            }
+            // Same readiness gates as host_play (provider + player health)
+            // so the countdown can never commit to a broken start.
+            if Self::provider_browser_is_media(&state)
+                && state.provider.readiness
+                    != crate::providers::sync::ProviderReadiness::PlaybackReady
+            {
+                state.error = Some(
+                    "MP-PROVIDER-003 open a title in the provider before starting playback"
+                        .to_string(),
+                );
+                sync_room_snapshot(&mut state);
+                return snapshot_from_state(&state);
+            }
+            if state.player_snapshot.state == "PLAYER_ERROR"
+                && state
+                    .player_snapshot
+                    .error_message
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("MP-MEDIA-001"))
+            {
+                state.error =
+                    Some("MP-MEDIA-001 player unavailable; cannot start playback".to_string());
+                sync_room_snapshot(&mut state);
+                return snapshot_from_state(&state);
+            }
+            let target_position = state.sync.position_ms;
+            let now = monotonic_us();
+            let prepared = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .prepare_play_scheduled(target_position, now + Self::COUNTDOWN_LEAD_US, 5_000);
+            let scheduled = match prepared {
+                Ok(s) => s,
+                Err(_) => {
+                    state.error = Some(
+                        "MP-SYNC-004 cannot start playback until all participants are ready"
+                            .to_string(),
+                    );
+                    sync_room_snapshot(&mut state);
+                    return snapshot_from_state(&state);
+                }
+            };
+            state.pending_operation_id = Some(scheduled.operation_id.to_string());
+            state.pending_operation_kind = Some("PLAY".to_string());
+            state.pending_operation_target_ms = scheduled.target_position_ms;
+            state.pending_operation_execute_at_us = scheduled.execute_at_host_mono_us;
+            let event = QuicServerEvent::PlayPrepare {
+                operation_id: scheduled.operation_id.to_string(),
+                target_position_ms: scheduled.target_position_ms,
+                minimum_buffer_ms: 5_000,
+            };
+            Self::send_host_event(&mut state, event);
+            let room_state = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .room_state;
+            state.room_state = room_state;
+            sync_room_snapshot(&mut state);
+            snapshot_from_state(&state)
+        };
+        self.inner.emit(snapshot.clone());
+        snapshot
+    }
+
     // Host-initiated pause — distributed PAUSE protocol:
     //   PAUSE_PREPARE (host) → PAUSE_READY (guest) → PAUSE_COMMIT (host)
     // The canonical Paused transition happens at the shared deadline.
@@ -5054,6 +5195,7 @@ impl AppRuntime {
             room_state: "ENDED".to_string(),
             strict_sync_paused: false,
             position_ms: 0,
+            pending_operation: None,
         };
         state.provider = ProviderSnapshot {
             mode: "LOCAL_PERFECT".to_string(),
@@ -6089,7 +6231,24 @@ fn snapshot_from_state(state: &AppRuntimeState) -> AppSnapshot {
         media: state.media.clone(),
         transfer: state.transfer.clone(),
         buffer: state.buffer.clone(),
-        sync: state.sync.clone(),
+        sync: {
+            let mut sync = state.sync.clone();
+            sync.pending_operation =
+                state
+                    .pending_operation_id
+                    .as_ref()
+                    .map(|_id| PendingOperationSnapshot {
+                        kind: state.pending_operation_kind.clone().unwrap_or_default(),
+                        target_position_ms: state.pending_operation_target_ms,
+                        execute_at_host_mono_us: state.pending_operation_execute_at_us,
+                        execute_at_wall_ms: project_host_mono_to_wall_ms(
+                            state.pending_operation_execute_at_us,
+                            state.pending_operation_wall_anchor_mono_us,
+                            state.pending_operation_wall_anchor_ms,
+                        ),
+                    });
+            sync
+        },
         network: state.network.clone(),
         call: state.call.clone(),
         provider: state.provider.clone(),
@@ -6102,6 +6261,22 @@ fn snapshot_from_state(state: &AppRuntimeState) -> AppSnapshot {
         error: state.error.clone(),
         player: state.player_snapshot.clone(),
     }
+}
+
+/// Project a host-monotonic microsecond deadline into wall-clock epoch ms
+/// for UI display (AGENTS §16: monotonic time still drives execution; this
+/// projection exists so the §25 Ready-Check countdown can animate from the
+/// backend-provided deadline instead of a frontend-invented timer).
+fn project_host_mono_to_wall_ms(
+    host_mono_us: u64,
+    anchor_mono_us: u64,
+    anchor_wall_ms: u64,
+) -> u64 {
+    if anchor_mono_us == 0 {
+        return 0;
+    }
+    let delta_us = host_mono_us.saturating_sub(anchor_mono_us);
+    anchor_wall_ms.saturating_add(delta_us / 1_000)
 }
 
 fn sync_room_snapshot(state: &mut AppRuntimeState) {
@@ -6224,10 +6399,11 @@ fn apply_recovery_to_state(state: &mut AppRuntimeState, event: FailureEvent, pla
 #[cfg(test)]
 mod tests {
     use super::{
-        adaptive_preload_deadline, reconnect_failure, should_notify_preload_wait,
-        sync_room_snapshot, AppRuntime, AppSnapshot, ReconnectFailure,
+        adaptive_preload_deadline, project_host_mono_to_wall_ms, reconnect_failure,
+        should_notify_preload_wait, sync_room_snapshot, AppRuntime, AppSnapshot, ReconnectFailure,
     };
     use crate::call::{CallSignal, CallSignalType};
+    use crate::network::quic::monotonic_us;
     use crate::network::quic::QuicError;
     use crate::resilience::{FailureEvent, RecoveryAction};
     use crate::room::MoviePartyInvite;
@@ -7294,6 +7470,112 @@ mod tests {
         assert_eq!(
             snapshot.error.as_deref(),
             Some("MP-MEDIA-001 player unavailable; cannot start playback")
+        );
+    }
+
+    /// §25 (Batch 17): request_play_countdown schedules the canonical play
+    /// operation with a 3-second countdown lead and exposes the deadline
+    /// on the snapshot so the frontend animates from backend time.
+    #[test]
+    fn request_play_countdown_exposes_backend_deadline() {
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            use crate::sync::consensus::ParticipantReadiness;
+            let coord_room_state = {
+                let mut coord = state
+                    .sync_coordinator
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                coord.host_ready(ParticipantReadiness::ready(5_000));
+                coord.guest_ready(ParticipantReadiness::ready(5_000));
+                coord.update_readiness_consensus(5_000);
+                coord.room_state
+            };
+            state.room_state = coord_room_state;
+            state.local_participant.role = "Host".to_string();
+            sync_room_snapshot(&mut state);
+        }
+
+        let before_mono = monotonic_us();
+        let snapshot = runtime.request_play_countdown();
+        let after_mono = monotonic_us();
+
+        let pending = snapshot
+            .sync
+            .pending_operation
+            .expect("countdown must expose the pending operation");
+        assert_eq!(pending.kind, "PLAY");
+        // §25: the deadline is ~3 s out (backend-owned, not a guess).
+        assert!(
+            pending.execute_at_host_mono_us >= before_mono + 2_900_000,
+            "deadline must be ~3s ahead, got {}",
+            pending.execute_at_host_mono_us - before_mono
+        );
+        assert!(
+            pending.execute_at_host_mono_us <= after_mono + 3_100_000,
+            "deadline must be ~3s ahead"
+        );
+        // §16: the wall projection is anchored, never 0 after construction.
+        assert!(
+            pending.execute_at_wall_ms > 0,
+            "wall projection must be anchored for UI display"
+        );
+        assert!(
+            pending.execute_at_wall_ms / 1_000 >= 1_700_000_000,
+            "wall projection must be a plausible epoch ms value"
+        );
+    }
+
+    /// §25: the countdown is host-only (§15 host authority) — the guest
+    /// gets an honest MP-CTRL-002, and no pending operation is created.
+    #[test]
+    fn request_play_countdown_is_host_only() {
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            state.local_participant.role = "Guest".to_string();
+            sync_room_snapshot(&mut state);
+        }
+
+        let snapshot = runtime.request_play_countdown();
+        assert_eq!(
+            snapshot.error.as_deref(),
+            Some("MP-CTRL-002 only the host can start the countdown")
+        );
+        assert!(
+            snapshot.sync.pending_operation.is_none(),
+            "a guest countdown attempt must not schedule an operation"
+        );
+    }
+
+    /// §25 + §16: the host-monotonic → wall-ms projection is anchored and
+    /// linear; the identity point (anchor) maps to the anchor wall value.
+    #[test]
+    fn host_mono_to_wall_projection_is_anchored() {
+        let runtime = AppRuntime::new();
+        let (anchor_mono, anchor_wall) = {
+            let state = runtime.lock();
+            (
+                state.pending_operation_wall_anchor_mono_us,
+                state.pending_operation_wall_anchor_ms,
+            )
+        };
+        assert!(anchor_mono > 0, "monotonic anchor must be set");
+        assert!(anchor_wall > 0, "wall anchor must be set");
+        assert_eq!(
+            project_host_mono_to_wall_ms(anchor_mono, anchor_mono, anchor_wall),
+            anchor_wall
+        );
+        // 1.5 s after the anchor projects exactly 1_500 ms later.
+        assert_eq!(
+            project_host_mono_to_wall_ms(anchor_mono + 1_500_000, anchor_mono, anchor_wall),
+            anchor_wall + 1_500
+        );
+        // Before the anchor saturates rather than underflowing.
+        assert_eq!(
+            project_host_mono_to_wall_ms(0, anchor_mono, anchor_wall),
+            anchor_wall
         );
     }
 

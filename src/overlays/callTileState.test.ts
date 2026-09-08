@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  CAMERA_CARD_DEFAULT_PX,
   clampCallTilePosition,
+  clampCameraCardSize,
   closeCallTileLocally,
   deriveRemoteCallPresentation,
+  loadCallTilePosition,
   minimizeCallTile,
   restoreCallTile,
+  saveCallTilePosition,
   showCallTile,
   type CallTileSessionState,
 } from "./callTileState";
@@ -13,6 +17,7 @@ const liveSession: CallTileSessionState = {
   position: { x: 200, y: 120 },
   isMinimized: false,
   isHidden: false,
+  sizePx: 220,
 };
 
 describe("call tile state", () => {
@@ -73,11 +78,13 @@ describe("call tile close semantics", () => {
       position: { x: 64, y: 400 },
       isMinimized: true,
       isHidden: true,
+      sizePx: 220,
     };
     expect(showCallTile(minimizedElsewhere)).toEqual({
       position: { x: 64, y: 400 },
       isMinimized: true,
       isHidden: false,
+      sizePx: 220,
     });
   });
 });
@@ -104,5 +111,48 @@ describe("call tile minimize semantics", () => {
       isHidden: false,
       isMinimized: true,
     });
+  });
+});
+
+// ── §28/§29 (Batch 17, P7): camera card spec values ─────────────────────
+
+describe("camera card size + persistence (UI_UX_SPEC §28)", () => {
+  it("defaults to 220px and clamps user resizes to 120–360", () => {
+    expect(CAMERA_CARD_DEFAULT_PX).toBe(220);
+    expect(clampCameraCardSize(CAMERA_CARD_DEFAULT_PX)).toBe(220);
+    expect(clampCameraCardSize(90)).toBe(120);
+    expect(clampCameraCardSize(500)).toBe(360);
+    expect(clampCameraCardSize(240.6)).toBe(241);
+    expect(clampCameraCardSize(Number.NaN)).toBe(220);
+  });
+
+  it("persists the position to localStorage and restores it (§28)", () => {
+    const stored: Record<string, string> = {};
+    const storage = {
+      getItem: (key: string) => stored[key] ?? null,
+      setItem: (key: string, value: string) => {
+        stored[key] = value;
+      },
+    } as Pick<Storage, "getItem" | "setItem">;
+    saveCallTilePosition({ x: 321, y: 45 }, storage);
+    expect(loadCallTilePosition({ x: 0, y: 0 }, storage)).toEqual({ x: 321, y: 45 });
+  });
+
+  it("ignores corrupt persisted positions and falls back (§28)", () => {
+    const stored: Record<string, string> = { mp_camera_card_position: "{oops" };
+    const storage = {
+      getItem: (key: string) => stored[key] ?? null,
+    } as Pick<Storage, "getItem">;
+    expect(loadCallTilePosition({ x: 10, y: 20 }, storage)).toEqual({ x: 10, y: 20 });
+    const stored2: Record<string, string> = { mp_camera_card_position: '{"x":"left","y":2}' };
+    const storage2 = { getItem: (key: string) => stored2[key] ?? null } as Pick<
+      Storage,
+      "getItem"
+    >;
+    expect(loadCallTilePosition({ x: 10, y: 20 }, storage2)).toEqual({ x: 10, y: 20 });
+  });
+
+  it("without storage (SSR/test) the fallback position is used", () => {
+    expect(loadCallTilePosition({ x: 5, y: 6 }, null)).toEqual({ x: 5, y: 6 });
   });
 });

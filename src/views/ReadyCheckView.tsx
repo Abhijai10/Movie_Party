@@ -2,6 +2,7 @@ import { motion } from "framer-motion";
 import { ArrowLeft, ArrowRight, Film } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { AppSnapshot } from "../backend/appRuntime";
+import { countdownDisplayFrom } from "../sync/countdownModel";
 import { CinemaButton } from "../components/mp/CinemaButton";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
@@ -11,18 +12,33 @@ import type { CallTileSessionState } from "../overlays/callTileState";
 
 type ReadyCheckViewProps = {
   snapshot: AppSnapshot;
-  onStart: () => void;
+  /** §25: host presses Start — schedules the backend-owned countdown. */
+  onRequestCountdown: () => void;
+  /** §25: called when the countdown completes so the shell enters cinema. */
+  onStarted: () => void;
   callTileSession: CallTileSessionState;
   onCallTileSessionChange: (next: CallTileSessionState) => void;
 };
 
 export function ReadyCheckView({
   snapshot,
-  onStart,
+  onRequestCountdown,
+  onStarted,
   callTileSession,
   onCallTileSessionChange,
 }: ReadyCheckViewProps) {
-  const [countdown, setCountdown] = useState<number | null>(null);
+  // §25: the countdown comes from the backend's scheduled operation —
+  // never a frontend-invented timer chain. A rAF ticker re-derives the
+  // display from the backend-provided deadline each frame.
+  const [nowWallMs, setNowWallMs] = useState(() => Date.now());
+  const executeAtWallMs = snapshot.sync.pendingOperation?.executeAtWallMs ?? null;
+  const display = countdownDisplayFrom(executeAtWallMs, nowWallMs);
+  const countdown =
+    display.phase === "running"
+      ? display.label
+      : display.phase === "done"
+        ? 0
+        : null;
   const transitionActive = countdown !== null;
   const prefersReducedMotion = useReducedMotion();
 
@@ -33,25 +49,32 @@ export function ReadyCheckView({
     snapshot.room.strictSync;
 
   useEffect(() => {
-    if (countdown === null) return;
-    if (countdown === 0) {
-      const t = setTimeout(() => {
-        onStart();
-      }, 620);
-      return () => {
-        clearTimeout(t);
-      };
+    if (executeAtWallMs == null) {
+      return;
     }
-    const t = setTimeout(() => {
-      setCountdown((c) => (c ?? 0) - 1);
-    }, 900);
-    return () => {
-      clearTimeout(t);
+    let frame = 0;
+    let completed = false;
+    const tick = () => {
+      const next = countdownDisplayFrom(executeAtWallMs, Date.now());
+      setNowWallMs(Date.now());
+      if (next.phase === "done" && !completed) {
+        completed = true;
+        // The backend commit at the deadline is authoritative; this is
+        // the visual handoff into cinema once it has fired.
+        onStarted();
+        return;
+      }
+      frame = window.requestAnimationFrame(tick);
     };
-  }, [countdown, onStart]);
+    frame = window.requestAnimationFrame(tick);
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [executeAtWallMs, onStarted]);
 
   const enterCinema = () => {
-    setCountdown(3);
+    // §25: Start schedules the backend countdown (host authority, §15).
+    onRequestCountdown();
   };
 
   const host = snapshot.participants.find((p) => p.role === "HOST");
@@ -70,10 +93,12 @@ export function ReadyCheckView({
       <header className="relative z-10 flex items-center justify-between px-12 pt-8">
         <button
           type="button"
+          disabled={transitionActive}
           onClick={() => {
-            setCountdown(null);
+            // §25: once the countdown is scheduled the commit is in
+            // flight; Back is disabled until it completes.
           }}
-          className="flex items-center gap-2 text-white/60 hover:text-white transition text-sm tracking-wider"
+          className="flex items-center gap-2 text-white/60 hover:text-white transition text-sm tracking-wider disabled:opacity-30 disabled:hover:text-white/60"
           data-testid="ready-back-btn"
         >
           <ArrowLeft className="w-4 h-4" strokeWidth={1.6} /> Back to lobby

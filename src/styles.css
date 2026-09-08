@@ -3704,10 +3704,12 @@ input[type=range].mp-range::-webkit-slider-thumb {
   display: grid;
   align-content: start;
   gap: 12px;
-  width: min(24vw, 260px);
-  min-width: 210px;
-  min-height: 220px;
-  aspect-ratio: 4 / 3;
+  /* §28: default 220px (overridable by the sizePx style from state),
+     clamped 120–360 by the model; 16:9 default aspect. */
+  width: 220px;
+  min-width: 120px;
+  max-width: 360px;
+  aspect-ratio: 16 / 9;
   overflow: hidden;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent 34%, rgba(0, 0, 0, 0.72)),
@@ -3863,11 +3865,18 @@ input[type=range].mp-range::-webkit-slider-thumb {
 }
 
 .camera-card.is-minimized {
-  width: 144px;
-  min-width: 144px;
-  min-height: 108px;
-  aspect-ratio: 4 / 3;
-  padding: 7px;
+  /* §29: the minimized camera is an approximately 48px avatar circle
+     with the peer name; click restores the full card. */
+  width: fit-content;
+  min-width: 48px;
+  min-height: 48px;
+  aspect-ratio: auto;
+  padding: 6px 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  cursor: pointer;
 }
 
 .camera-card.is-minimized .camera-video-stage {
@@ -3877,9 +3886,40 @@ input[type=range].mp-range::-webkit-slider-thumb {
 
 .camera-card.is-minimized .camera-video-placeholder,
 .camera-card.is-minimized .camera-avatar {
-  width: 50px;
-  height: 50px;
-  font-size: 1.1rem;
+  width: 48px;
+  height: 48px;
+  font-size: 1rem;
+}
+
+/* §28: resize affordance (bottom-right corner, keyboard-accessible). */
+.camera-card-resize {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: rgba(242, 242, 245, 0.55);
+  cursor: nwse-resize;
+  display: grid;
+  place-items: center;
+}
+
+.camera-card-resize::after {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  border-bottom-right-radius: 2px;
+}
+
+.camera-card-resize:hover {
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .remote-muted-indicator,

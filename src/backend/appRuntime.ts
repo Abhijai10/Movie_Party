@@ -115,6 +115,13 @@ export type AppSnapshot = {
     roomState: string;
     strictSyncPaused: boolean;
     positionMs: number;
+    /** §25: backend-scheduled operation; the countdown animates from it. */
+    pendingOperation: {
+      kind: string;
+      targetPositionMs: number;
+      executeAtHostMonoUs: number;
+      executeAtWallMs: number;
+    } | null;
   };
   network: {
     transport: string;
@@ -351,6 +358,13 @@ export async function markReady(): Promise<AppSnapshot | null> {
 
 export async function enterCinema(): Promise<AppSnapshot | null> {
   return invokeSnapshot("enter_cinema");
+}
+
+
+/** §25: host starts the backend-driven 3-2-1 countdown. The snapshot
+ *  returns the pending operation whose deadline the UI animates from. */
+export async function requestPlayCountdown(): Promise<AppSnapshot | null> {
+  return invoke<AppSnapshot>("request_play_countdown");
 }
 
 export type NativeVideoBounds = {

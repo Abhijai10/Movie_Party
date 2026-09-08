@@ -3,6 +3,8 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPoi
 import {
   canInitiateDragFrom,
   clampCallTilePosition,
+  clampCameraCardSize,
+  saveCallTilePosition,
   closeCallTileLocally,
   deriveRemoteCallPresentation,
   minimizeCallTile,
@@ -147,6 +149,8 @@ export function CallTile({
     }
     activePointerId.current = null;
     setIsDragging(false);
+    // §28: persist location locally when a drag ends.
+    saveCallTilePosition(session.position);
   };
 
   const startDrag = (event: ReactPointerEvent<HTMLElement>) => {
@@ -189,12 +193,53 @@ export function CallTile({
       ref={tileRef}
       className={`camera-card ${session.isMinimized ? "is-minimized" : ""} ${isDragging ? "is-dragging" : ""}`}
       aria-label={`${peerName} call`}
-      style={{ left: session.position.x, top: session.position.y }}
+      style={
+        session.isMinimized
+          ? { left: session.position.x, top: session.position.y }
+          : {
+              left: session.position.x,
+              top: session.position.y,
+              width: `${String(session.sizePx)}px`,
+            }
+      }
+      title={session.isMinimized ? `${peerName} — click to restore` : undefined}
+      onClick={
+        session.isMinimized
+          ? () => {
+              onSessionChange(restoreCallTile(session));
+            }
+          : undefined
+      }
       onPointerDown={startDrag}
       onPointerMove={moveDrag}
       onPointerUp={stopDrag}
       onPointerCancel={stopDrag}
     >
+      {session.isMinimized ? null : (
+        <button
+          type="button"
+          className="camera-card-resize"
+          data-call-tile-control
+          aria-label="Resize camera card"
+          title="Drag to resize (120–360 px)"
+          onPointerDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const startX = event.clientX;
+            const startSize = session.sizePx;
+            const onMove = (moveEvent: PointerEvent) => {
+              const next = startSize + (moveEvent.clientX - startX);
+              updateSession({ sizePx: clampCameraCardSize(next) });
+            };
+            const onUp = () => {
+              window.removeEventListener("pointermove", onMove);
+              window.removeEventListener("pointerup", onUp);
+            };
+            window.addEventListener("pointermove", onMove);
+            window.addEventListener("pointerup", onUp);
+          }}
+        />
+      )}
       {session.isMinimized ? null : (
         <header className="camera-card-header">
           <div>

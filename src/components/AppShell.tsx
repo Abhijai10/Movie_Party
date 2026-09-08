@@ -6,6 +6,7 @@ import {
   listSchedules,
   type StoredSchedule,
   enterCinema,
+  requestPlayCountdown,
   getProviderCapabilities,
   getTailscaleReadiness,
   joinParty,
@@ -703,7 +704,10 @@ export function AppShell() {
     return (
       <ReadyCheckView
         snapshot={snapshot}
-        onStart={goCinema}
+        onRequestCountdown={() => {
+          void requestPlayCountdown().then(applySnapshot);
+        }}
+        onStarted={goCinema}
         callTileSession={callTileSession}
         onCallTileSessionChange={setCallTileSession}
       />

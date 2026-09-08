@@ -27,7 +27,13 @@ import { BufferingOverlay } from "../overlays/BufferingOverlay";
 import { ProviderStatusOverlay } from "../overlays/ProviderStatusOverlay";
 import { FloatingReactions, ReactionTray } from "../overlays/ReactionTray";
 import { ReconnectOverlay } from "../overlays/ReconnectOverlay";
-import { ChatOverlay } from "../components/mp/ChatOverlay";
+import { ChatCompose, ChatHistoryCard } from "../components/mp/ChatOverlay";
+import {
+  emptyBubbleQueue,
+  enqueueChatBubble,
+  type ChatBubbleQueue,
+} from "../chat/bubbleQueue";
+import { ChatBubbles } from "../overlays/ChatBubbles";
 import { CinemaControls } from "../components/mp/CinemaControls";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
@@ -35,9 +41,7 @@ import type { MouseEvent, SyntheticEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useReducedMotion } from "../hooks/useReducedMotion";
 import {
-  applyChatArrival,
   canToggleChat,
-  closeChatPreview,
   closedChatOverlay,
   isChatOverlayOpen,
   openChatManually,
@@ -106,6 +110,10 @@ export function CinemaView({
   const [controlsVisible, setControlsVisible] = useState(true);
   const [privacyNotice, setPrivacyNotice] = useState("");
   const [hasUnreadChat, setHasUnreadChat] = useState(false);
+  // ADR-0003 / §35: lower-third ephemeral bubble queue.
+  const [bubbleQueue, setBubbleQueue] = useState<ChatBubbleQueue>(emptyBubbleQueue);
+  // §66: measured movie height drives the subtitle-zone bubble offset.
+  const [movieHeightPx, setMovieHeightPx] = useState(0);
   const [cameraManuallyEnabled, setCameraManuallyEnabled] = useState(false);
   const [microphoneManuallyEnabled, setMicrophoneManuallyEnabled] = useState(false);
   const [callLocalStream, setCallLocalStream] = useState<MediaStream | null>(null);
@@ -130,7 +138,6 @@ export function CinemaView({
   const callSessionStartingRef = useRef(false);
   const controlsTimer = useRef<number | null>(null);
   const previousChatLength = useRef(snapshot.chat.length);
-  const chatPreviewTimer = useRef<number | null>(null);
   const movieFrameRef = useRef<HTMLDivElement | null>(null);
   const ghostUiSnapshotRef = useRef<GhostUiSnapshot | null>(null);
   const isGhostMode = snapshot.ghostMode;
@@ -167,6 +174,7 @@ export function CinemaView({
     let attached = false;
     const updateSurface = () => {
       const rect = frame.getBoundingClientRect();
+      setMovieHeightPx(rect.height);
       const bounds = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
       const request = attached ? resizeNativeVideoSurface(bounds) : attachNativeVideoSurface(bounds);
       attached = true;
@@ -223,28 +231,17 @@ export function CinemaView({
       return;
     }
 
-    // Outside the modes the message is visible one way or another (open
-    // overlay or transient preview); the badge persists past a preview
-    // auto-close until the user opens the chat manually.
+    // §35: the message renders as a lower-third ephemeral bubble. The
+    // unread badge persists until the user opens the history manually.
     setHasUnreadChat(true);
-    setChatVisibility(applyChatArrival(chatVisibility, false));
-
-    if (chatPreviewTimer.current != null) {
-      window.clearTimeout(chatPreviewTimer.current);
-    }
-    chatPreviewTimer.current = window.setTimeout(() => {
-      setChatVisibility((current) => closeChatPreview(current));
-      chatPreviewTimer.current = null;
-    }, 5_000);
-  }, [chatVisibility, isGhostMode, isPrivacyMode, snapshot.chat.length]);
-
-  useEffect(() => {
-    return () => {
-      if (chatPreviewTimer.current != null) {
-        window.clearTimeout(chatPreviewTimer.current);
-      }
-    };
-  }, []);
+    setBubbleQueue((current) =>
+      enqueueChatBubble(
+        current,
+        snapshot.chat[snapshot.chat.length - 1] ?? { id: "unknown", sender: "Peer", body: "" },
+        Date.now(),
+      ),
+    );
+  }, [chatVisibility.manualOpen, isGhostMode, isPrivacyMode, snapshot.chat.length, snapshot.chat]);
 
   // Ghost/Privacy entry-exit bookkeeping. The chat visibility is captured
   // as it was *before* the mode hid it, so ending the mode can put the
@@ -260,11 +257,7 @@ export function CinemaView({
         ghostUiSnapshotRef.current = captureGhostUiSnapshot(chatVisibility);
       }
       // Hide the chat immediately (the CSS class hides everything else);
-      // a lingering transient preview would otherwise peek out later.
-      if (chatPreviewTimer.current != null) {
-        window.clearTimeout(chatPreviewTimer.current);
-        chatPreviewTimer.current = null;
-      }
+      // lingering bubbles are pruned by their own lifetimes.
       setChatVisibility(closedChatOverlay);
       return;
     }
@@ -737,25 +730,33 @@ export function CinemaView({
           session={callTileSession}
           onSessionChange={onCallTileSessionChange}
         />
-        <ChatOverlay
-          snapshot={snapshot}
-          draft={draft}
-          isComposing={isComposing}
-          isHistoryOpen={isHistoryOpen}
-          isDraftTooLong={isDraftTooLong}
-          onDraftChange={setDraft}
-          onSubmit={sendMessage}
-          onCloseCompose={() => {
-            setChatVisibility((current) => ({ ...current, manualOpen: false }));
-          }}
-          onCloseHistory={() => {
-            if (chatPreviewTimer.current != null) {
-              window.clearTimeout(chatPreviewTimer.current);
-              chatPreviewTimer.current = null;
-            }
-            setChatVisibility(closedChatOverlay);
-          }}
+        <ChatBubbles
+          queue={bubbleQueue}
+          movieHeightPx={movieHeightPx}
+          // §28: subtitle presence is not on the authoritative snapshot
+          // yet; false keeps the lower-third default until it is.
+          subtitlesActive={false}
+          onQueueChange={setBubbleQueue}
         />
+        {isComposing ? (
+          <ChatCompose
+            draft={draft}
+            isDraftTooLong={isDraftTooLong}
+            onDraftChange={setDraft}
+            onSubmit={sendMessage}
+            onClose={() => {
+              setChatVisibility((current) => ({ ...current, manualOpen: false }));
+            }}
+          />
+        ) : null}
+        {isHistoryOpen && !isComposing ? (
+          <ChatHistoryCard
+            snapshot={snapshot}
+            onClose={() => {
+              setChatVisibility(closedChatOverlay);
+            }}
+          />
+        ) : null}
         <FloatingReactions reactions={snapshot.reactions.slice(-4)} />
         <BufferingOverlay
           bufferingParticipant={snapshot.buffer.bufferingParticipant}
@@ -823,10 +824,6 @@ export function CinemaView({
           chatOpen={isComposing || isHistoryOpen}
           hasUnreadChat={hasUnreadChat}
           onToggleChat={() => {
-            if (chatPreviewTimer.current != null) {
-              window.clearTimeout(chatPreviewTimer.current);
-              chatPreviewTimer.current = null;
-            }
             if (isComposing) {
               setChatVisibility(closedChatOverlay);
               return;

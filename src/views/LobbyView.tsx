@@ -3,7 +3,7 @@ import { ArrowLeft, ArrowRight, Check, Copy, Film, MessageCircle, Users, Video }
 import { useMemo, useState, type SyntheticEvent } from "react";
 import type { AppSnapshot } from "../backend/appRuntime";
 import { sendChatMessage } from "../backend/appRuntime";
-import { ChatOverlay } from "../components/mp/ChatOverlay";
+import { ChatCompose } from "../components/mp/ChatOverlay";
 import { CinemaButton } from "../components/mp/CinemaButton";
 import { ParticipantCard } from "../components/mp/ParticipantCard";
 import { SilkBackground } from "../components/mp/SilkBackground";
@@ -356,21 +356,18 @@ export function LobbyView({
         </button>
       </div>
 
-      <ChatOverlay
-        snapshot={snapshot}
-        draft={draft}
-        isComposing={isChatOpen}
-        isHistoryOpen={isChatOpen}
-        isDraftTooLong={isDraftTooLong}
-        onDraftChange={setDraft}
-        onSubmit={sendLobbyMessage}
-        onCloseCompose={() => {
-          setIsChatOpen(false);
-        }}
-        onCloseHistory={() => {
-          setIsChatOpen(false);
-        }}
-      />
+      {isChatOpen ? (
+        <ChatCompose
+          draft={draft}
+          isDraftTooLong={isDraftTooLong}
+          onDraftChange={setDraft}
+          onSubmit={sendLobbyMessage}
+          onClose={() => {
+            setIsChatOpen(false);
+          }}
+        />
+      ) : null}
+
 
       <CallTile
         peerName={peerName}

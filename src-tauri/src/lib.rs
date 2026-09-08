@@ -118,6 +118,7 @@ pub fn run() {
             join_party,
             mark_ready,
             enter_cinema,
+            request_play_countdown,
             pause_playback,
             resume_playback,
             seek_relative,
@@ -285,6 +286,13 @@ async fn join_party(
 #[tauri::command]
 fn mark_ready(runtime: tauri::State<'_, app_runtime::AppRuntime>) -> app_runtime::AppSnapshot {
     runtime.set_ready()
+}
+
+#[tauri::command]
+fn request_play_countdown(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> app_runtime::AppSnapshot {
+    runtime.request_play_countdown()
 }
 
 #[tauri::command]
