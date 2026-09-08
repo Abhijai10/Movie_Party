@@ -39,11 +39,3 @@ libloading = { version = "0.8", optional = true }
 rfd = "0.15"
 rusqlite = { version = "0.31", features = ["bundled"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "ansi", "env-filter"] }
-
-# Batch 22 (P12): release profile — small, fast binaries with debug
-# symbols stripped (release hygiene; lto for the media-heavy core).
-[profile.release]
-lto = true
-codegen-units = 1
-strip = true
-opt-level = 3
