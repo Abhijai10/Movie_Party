@@ -41,7 +41,12 @@ jobs:
       # stable drift is exactly what broke CI (new lints:
       # unneeded_wildcard_pattern, manual_is_multiple_of, manual_dangling_ptr).
       # Bump this pin deliberately after re-verifying locally.
+      # NOTE: an explicit version installs with rustup's MINIMAL profile —
+      # unlike the runner's preinstalled stable, it has no rustfmt/clippy,
+      # so both components must be requested explicitly.
       - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rustfmt, clippy
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test
