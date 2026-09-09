@@ -92,18 +92,24 @@ Project State:
        no assertion weakened). Local 450/450 green after both.
 
     9. TAG/RELEASE RE-CUT: v0.9.0 (annotated) now points at the commit
-       with ALL of the above (d08d420); the GitHub release "Movie Party
-       v0.9.0" is cut from it. Hosted verification status:
-       ✅ Build Windows installer run 34397829828 SUCCEEDED end-to-end on
-       the first corrected workflow — NSIS installer built (40 MB
-       Movie.Party_0.9.0_x64-setup.exe), uploaded as artifact
-       Movie-Party-Windows-x64, AND attached to the release; re-dispatched
-       on the final tag so the shipped .exe matches the tagged commit.
-       Final CI + Build runs on the definitive tag: pending at tracker
-       write time — see the Actions tab for the authoritative state.
-    ⚠ Windows-hosted clippy/test run and the release .exe build remain
-       hosted-runner verifications (no Windows machine available locally
-       — Batch 21 constraint unchanged).
+       with ALL of the above (3ed5ee0); the GitHub release "Movie Party
+       v0.9.0" is cut from it. Hosted verification — FINAL, BOTH GREEN:
+       ✅ CI run 34403375646: Frontend, Rust (macos-latest),
+       Rust (windows-latest), cargo-audit, pnpm-audit — ALL SUCCESS.
+       ✅ Build run 34403379820: Windows x64 installer — SUCCESS;
+       Movie.Party_0.9.0_x64-setup.exe (38.15 MB) attached to the
+       release at https://github.com/Abhijai10/Movie_Party/releases/
+       tag/v0.9.0 — users can download the installer directly, no
+       clone, no build.
+    10. TEST SCHEDULING ON HOSTED RUNNERS: `cargo test -- --test-threads=1`
+        — parallel AppRuntime/loopback-QUIC tests starve 3-core
+        virtualized macOS runners (test_b busted its poll deadline at
+        5s and 30s while the near-identical test_t passed; a local
+        parallel run flaked 1-in-5 on 12 cores too). Serialization
+        changes scheduling only, never assertions; full suite green
+        locally both ways.
+    ⚠ Remaining external verification (unchanged from V1): §31.1 manual
+       matrix, DRM diagnostic runs, two-device sessions — user-driven.
 
 Previous state (V1 code-complete):
 🟩 ALL CODE-LEVEL BATCHES 1–23 COMPLETE (V1 code-complete). This round
