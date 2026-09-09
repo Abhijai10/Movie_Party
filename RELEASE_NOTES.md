@@ -1,6 +1,6 @@
 # Movie Party — Release Notes
 
-## 0.1.0 (V1 code-complete baseline)
+## 0.9.0 (V1 code-complete baseline)
 
 The private two-person desktop cinema: synchronized local-media playback,
 provider sync mode (YouTube/Netflix/Prime/JioHotstar), voice/video call
@@ -22,7 +22,7 @@ alongside the movie, strict synchronization, and scheduled parties.
   real-DRM spike (Batch 20 gate)
 
 ### Known limitations
-- Provider Shared Mode is diagnostic-only in 0.1.0 (D3-B)
+- Provider Shared Mode is diagnostic-only in 0.9.0 (D3-B)
 - macOS ScreenCaptureKit diagnostic requires ffmpeg (`brew install ffmpeg`)
 - Windows capture spike requires a physical Windows machine (Batch 21)
 

@@ -1,10 +1,10 @@
 name: CI
 
+# Manual-only: this workflow never runs automatically on push/PR. CI consumes
+# Actions minutes — run it deliberately from the Actions tab or with:
+#   gh workflow run ci.yml --ref <branch-or-tag>
 on:
-  push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
+  workflow_dispatch:
 
 jobs:
   frontend:
@@ -36,7 +36,12 @@ jobs:
         working-directory: src-tauri
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned toolchain: clippy's `-D warnings` gate must not drift from the
+      # toolchain the code was verified against — the silent 1.96 → 1.98
+      # stable drift is exactly what broke CI (new lints:
+      # unneeded_wildcard_pattern, manual_is_multiple_of, manual_dangling_ptr).
+      # Bump this pin deliberately after re-verifying locally.
+      - uses: dtolnay/rust-toolchain@1.98.0
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test
@@ -51,10 +56,13 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
       - run: cargo install cargo-audit --locked
+      # The Cargo workspace root — and its Cargo.lock — is the repo root,
+      # not src-tauri/. cargo audit from src-tauri/ failed with "Couldn't
+      # load Cargo.lock"; audit the workspace from its root instead.
       - run: cargo audit
-        working-directory: src-tauri
+        working-directory: .
 
   pnpm-audit:
     name: pnpm audit (advisory)

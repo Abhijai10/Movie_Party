@@ -357,16 +357,15 @@ pub fn display_frame(surface: usize, width: usize, height: usize, stride: usize,
 // frame buffer is presented with StretchDIBits and no per-pixel conversion
 // and no second rendering architecture.
 
-/// A validated Windows frame blit description. `dib_width` is the row pitch
-/// expressed as 32bpp pixels (`stride / 4`) — GDI derives row pitch from
-/// `biWidth`, so the DIB is declared `stride/4` pixels wide (frame pixels
-/// packed at each row start, padding columns at the end) and the blit's
-/// source rectangle samples only the real `width` columns. This is the
-/// Windows mirror of the macOS path passing `stride` as `bytesPerRow`.
+/// A validated Windows frame blit description. The bitmap header's `width`
+/// is the row pitch expressed as 32bpp pixels (`stride / 4`) — GDI derives
+/// row pitch from `biWidth`, so the DIB is declared `stride/4` pixels wide
+/// (frame pixels packed at each row start, padding columns at the end) and
+/// the blit's source rectangle samples only the real `width` columns. This
+/// is the Windows mirror of the macOS path passing `stride` as `bytesPerRow`.
 #[cfg(windows)]
 struct WindowsFrameBlit<'a> {
     hwnd: *mut std::ffi::c_void,
-    dib_width: i32,
     bitmap_header: BitmapInfoHeader,
     data: &'a [u8],
 }
@@ -410,7 +409,7 @@ fn validate_windows_frame(
     }
     // DIB rows are addressed in 4-byte pixel units, so a stride that is not
     // a whole number of 32bpp pixels cannot be expressed as a DIB width.
-    if stride % 4 != 0 {
+    if !stride.is_multiple_of(4) {
         return None;
     }
     if data.len() < stride.checked_mul(height)? {
@@ -422,7 +421,6 @@ fn validate_windows_frame(
     }
     Some(WindowsFrameBlit {
         hwnd: surface as *mut std::ffi::c_void,
-        dib_width: dib_width as i32,
         // Top-down DIB: a negative biHeight makes row 0 the top scanline,
         // which is how mpv's software renderer produces frames.
         bitmap_header: BitmapInfoHeader {
@@ -683,8 +681,10 @@ const WS_CHILD: u32 = 0x4000_0000;
 const WS_VISIBLE: u32 = 0x1000_0000;
 #[cfg(windows)]
 const SWP_NOACTIVATE: u32 = 0x0010;
+/// WinUser.h `#define HWND_BOTTOM ((HWND)1)` — `c_void` is a ZST with
+/// alignment 1, so `dangling_mut` yields exactly address 1.
 #[cfg(windows)]
-const HWND_BOTTOM: *mut std::ffi::c_void = 1 as *mut std::ffi::c_void;
+const HWND_BOTTOM: *mut std::ffi::c_void = std::ptr::dangling_mut::<std::ffi::c_void>();
 /// BI_RGB: an uncompressed bottom-up (or top-down with negative height)
 /// bitmap whose 32bpp pixels are B,G,R,reserved in memory — the exact byte
 /// order libmpv's `bgr0` software-render format produces.
@@ -828,7 +828,6 @@ mod tests {
         // The DIB is declared stride/4 pixels wide so GDI addresses rows at
         // the mpv stride (mirror of the macOS bytesPerRow); the blit source
         // rectangle samples only the real 2 columns.
-        assert_eq!(blit.dib_width, 32);
         assert_eq!(blit.bitmap_header.width, 32);
         // Top-down DIB: negative height flips the bottom-up GBI default.
         assert_eq!(blit.bitmap_header.height, -2);

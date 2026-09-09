@@ -1128,7 +1128,7 @@ impl QuicClient {
             .await?;
         match response {
             ServerResponse::ManifestResponse { manifest } => Ok(manifest),
-            ServerResponse::MediaError { message: _, .. } => Err(QuicError::UnexpectedResponse),
+            ServerResponse::MediaError { .. } => Err(QuicError::UnexpectedResponse),
             _ => Err(QuicError::UnexpectedResponse),
         }
     }
@@ -1552,25 +1552,22 @@ async fn handle_request(
             }
             response
         }
-        ClientRequest::Heartbeat {
-            seq,
-            sender,
-            sent_mono_us: _,
-            ..
-        } => match validate_authenticated_sequence(&session, &sender, seq) {
-            Ok(()) => ServerResponse::HeartbeatAck {
-                room_state: coordinator
-                    .as_ref()
-                    .and_then(|coordinator| {
-                        coordinator
-                            .lock()
-                            .ok()
-                            .map(|c| format!("{:?}", c.room_state).to_ascii_uppercase())
-                    })
-                    .unwrap_or_else(|| "LOBBY".to_string()),
-            },
-            Err(code) => ServerResponse::AuthReject { code },
-        },
+        ClientRequest::Heartbeat { seq, sender, .. } => {
+            match validate_authenticated_sequence(&session, &sender, seq) {
+                Ok(()) => ServerResponse::HeartbeatAck {
+                    room_state: coordinator
+                        .as_ref()
+                        .and_then(|coordinator| {
+                            coordinator
+                                .lock()
+                                .ok()
+                                .map(|c| format!("{:?}", c.room_state).to_ascii_uppercase())
+                        })
+                        .unwrap_or_else(|| "LOBBY".to_string()),
+                },
+                Err(code) => ServerResponse::AuthReject { code },
+            }
+        }
         ClientRequest::Ping {
             seq,
             sender,

@@ -14,6 +14,61 @@ It must be updated continuously.
 
 ```text
 Project State:
+🟩 CI/RELEASE PIPELINE REPAIR (2026-09-09) — COMPLETE (local gates; hosted
+    runs below). Root cause of every failing GitHub Actions run since
+    2026-09-01 identified and fixed:
+
+    1. RUST TOOLCHAIN DRIFT (the primary cause): CI pinned
+       `dtolnay/rust-toolchain@stable`, which silently moved 1.96 → 1.98.
+       Clippy 1.98 shipped new lints and `-D warnings` turned them into
+       hard errors: `unneeded_wildcard_pattern` (quic.rs MediaError match
+       arm + the Heartbeat arm's `sent_mono_us: _` next to `..`),
+       `manual_is_multiple_of` (native_surface.rs stride check),
+       `manual_dangling_ptr` (HWND_BOTTOM `1 as *mut c_void`), plus
+       dead_code on the WindowsFrameBlit.dib_width field. Fixes: patterns
+       collapsed to `..` only; `!stride.is_multiple_of(4)`;
+       `std::ptr::dangling_mut` (c_void is align-1, so it yields address
+       1 = the real HWND_BOTTOM); dib_width moved into the header only
+       (the struct field was never read); the macOS-only
+       bundled_libmpv_path test is now `#[cfg(target_os = "macos")]`
+       (it called a macOS-gated fn → E0425 on Windows CI).
+       Prevention: both workflows pin `dtolnay/rust-toolchain@1.98.0` —
+       the exact toolchain the code is now verified against; the pin is
+       commented with the drift story so it is only bumped deliberately.
+
+    2. BUILD WORKFLOW ARTIFACT PATH (Build Windows installer run on the
+       v0.9.0 tag): the NSIS installer built SUCCESSFULLY (log: "Finished
+       1 bundle at: D:\a\...\target\release\bundle\nsis\Movie Party_0.1.0_
+       x64-setup.exe") but was never uploaded — the workflow globbed
+       `src-tauri/target/...` while the workspace-root Cargo.toml means
+       cargo emits to `<repo>/target/`. Fixed the artifact + release paths
+       to `target/release/bundle/nsis/*.exe` and added
+       `if-no-files-found: error` so a silent no-artifact success can
+       never happen again.
+
+    3. CARGO-AUDIT LOCKFILE LOCATION: the job ran `cargo audit` from
+       src-tauri/, but the workspace Cargo.lock lives at the repo root →
+       "Couldn't load Cargo.lock" every run. It now audits from the
+       workspace root (`working-directory: .`).
+
+    4. WORKFLOW TRIGGERS (user requirement — Actions minutes): BOTH
+       workflows are now workflow_dispatch ONLY (ci.yml lost
+       push/PR-on-main; build.yml lost the tag trigger). Nothing runs
+       automatically anymore; runs are explicit `gh workflow run`
+       invocations.
+
+    5. VERSION 0.9.0: Cargo.toml + Cargo.lock + package.json +
+       tauri.conf.json + RELEASE_NOTES.md bumped 0.1.0 → 0.9.0 so the
+       installer filename matches the v0.9.0 release tag.
+
+    Gates (all on rust 1.98.0, the pinned CI version): cargo fmt --check
+    ✅ · clippy --all-targets --all-features -D warnings ✅ 0 · cargo test
+    ✅ 450 (368 lib, 2 ignored-by-design + integration) · pnpm lint ✅ 0 ·
+    vitest ✅ 140 · pnpm build ✅. ⚠ Windows-hosted clippy/test run and the
+    release .exe build remain hosted-runner verifications (no Windows
+    machine available locally — Batch 21 constraint unchanged).
+
+Previous state (V1 code-complete):
 🟩 ALL CODE-LEVEL BATCHES 1–23 COMPLETE (V1 code-complete). This round
     closed Batches 19, 22, and 23's automatable part; Batch 20 stays
     CONDITIONAL (not built, per plan + D3-B) and Batch 21 is externally

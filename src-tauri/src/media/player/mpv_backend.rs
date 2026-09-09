@@ -731,6 +731,7 @@ mod tests {
         // Creation should never panic even if mpv is unavailable
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn bundled_libmpv_path_resolves_correctly_inside_app_bundle() {
         let exe_dir = Path::new("/Applications/Movie Party.app/Contents/MacOS");

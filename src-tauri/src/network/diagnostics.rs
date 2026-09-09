@@ -128,7 +128,7 @@ mod tests {
 
     fn request(destination: PathBuf) -> DiagnosticExportRequest {
         DiagnosticExportRequest {
-            app_version: "0.1.0".to_string(),
+            app_version: "0.9.0".to_string(),
             platform: "macos".to_string(),
             beta_events: vec![beta::BetaEvent {
                 kind: beta::BetaEventKind::DiagnosticBundleExport,
