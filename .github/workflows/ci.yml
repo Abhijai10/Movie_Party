@@ -49,7 +49,14 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test
+      # Tests are serialized on hosted runners: the lib and integration
+      # suites include AppRuntime tests that spin real loopback QUIC
+      # endpoints + wake loops; on small virtualized runners (3-core
+      # macOS) parallel execution starves the timing windows the strict-
+      # sync liveness rules depend on, and even 30s poll deadlines bust
+      # (observed on test_b twice). --test-threads=1 changes scheduling,
+      # never assertions. Windows CI + local runs verified green.
+      - run: cargo test -- --test-threads=1
 
   # Batch 22 (P12): dependency audits — ADVISORY, non-blocking first (the
   # plan's explicit instruction). Failures surface as warnings so a new
