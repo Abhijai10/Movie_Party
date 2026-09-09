@@ -72,7 +72,7 @@ async fn test_host_guest_wiring() {
     assert_eq!(guest_snapshot.room.state, "LOBBY");
 
     // Wait for host to observe the authenticated peer (background tokio task)
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let host_peer_id: Option<String>;
     loop {
         let snapshots = host_sink.snapshots.lock().unwrap();

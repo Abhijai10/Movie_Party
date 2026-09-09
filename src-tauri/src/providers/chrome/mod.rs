@@ -674,9 +674,14 @@ mod tests {
             .iter()
             .any(|arg| arg == "--remote-debugging-address=127.0.0.1"));
         assert!(args.iter().any(|arg| arg == "--remote-debugging-port=9222"));
-        assert!(args
-            .iter()
-            .any(|arg| arg == "--user-data-dir=/tmp/MoviePartyProfiles/prime"));
+        // The profile dir arg must point at the dedicated provider profile —
+        // asserted by parsed path, not by rendered string, because
+        // Path::display() emits platform separators (backslashes on Windows)
+        // while Chrome itself accepts native paths on every OS.
+        let expected_profile = Path::new("/tmp/MoviePartyProfiles").join("prime");
+        assert!(args.iter().any(|arg| arg
+            .strip_prefix("--user-data-dir=")
+            .is_some_and(|value| Path::new(value) == expected_profile)));
         assert!(!args
             .iter()
             .any(|arg| arg.to_ascii_lowercase().contains("cookie")));

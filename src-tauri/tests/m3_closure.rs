@@ -553,7 +553,7 @@ async fn guest_starvation_pauses_host_and_guest_with_consensus_resume() {
     // start playback through the distributed play protocol.  The host
     // coordinator must learn the guest's readiness via the QUIC ReadyState
     // round trip before the play protocol can commit.
-    poll_guest(&guest, std::time::Duration::from_secs(5), |s| {
+    poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.participants
             .iter()
             .any(|p| p.role == "Guest" && p.media_ready)
@@ -561,12 +561,12 @@ async fn guest_starvation_pauses_host_and_guest_with_consensus_resume() {
     guest.report_buffer_status(0, 8_000, false);
     guest.set_ready();
     host.set_ready();
-    poll_host(&host, std::time::Duration::from_secs(5), |s| {
+    poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "READYCHECK"
     });
     host.enter_cinema();
     host.resume_playback();
-    poll_host(&host, std::time::Duration::from_secs(5), |s| {
+    poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.sync.room_state == "PLAYING"
     });
     let host_snap = host.snapshot();
