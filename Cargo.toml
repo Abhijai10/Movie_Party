@@ -2,7 +2,7 @@
 members = ["src-tauri"]
 resolver = "2"
 
-# Batch 22 (P12): release profile — small, fast binaries with debug
+# Release profile — small, fast binaries with debug
 # symbols stripped (release hygiene; lto for the media-heavy core).
 # Profiles live at the workspace root (member profiles are ignored).
 [profile.release]

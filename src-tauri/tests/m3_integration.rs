@@ -591,7 +591,7 @@ async fn test_18_player_buffering_feeds_strict_sync() {
 
     // Report buffer recovery — same atomic-snapshot rule.
     let recovered = runtime.report_buffer_status(0, 5_000, false);
-    // Batch 9B: percent is the whole-file transfer fraction, never a fake
+    // percent is the whole-file transfer fraction, never a fake
     // 100. A solo host has performed no guest transfer (bytes_available 0),
     // so the honest percent after recovery is 0 — recovery itself is
     // expressed via guest_buffer_ahead_ms and the cleared buffering flag.

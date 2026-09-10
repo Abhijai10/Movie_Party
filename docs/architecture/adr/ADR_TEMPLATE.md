@@ -313,9 +313,7 @@ List documents requiring changes:
 
 ```
 [ ] MASTER_PRD.md
-[ ] AGENTS.md
 [ ] PROTOCOL_SPEC.md
 [ ] UI_UX_SPEC.md
-[ ] IMPLEMENTATION_TRACKER.md
 ```
 ---

@@ -24,8 +24,8 @@ import {
  * Product-register rules: consistent CinemaButton vocabulary, state-rich
  * but restrained color (amber for destructive-confirm, sky for info),
  * no decorative motion. Truth rules: providers show empirical support
- * (AGENTS §38), Strict Sync is visible but NOT disableable (§56 — it is
- * core product behavior, AGENTS §14), destructive actions confirm.
+ * (§38), Strict Sync is visible but NOT disableable (§56 — it is
+ * core product behavior, §14), destructive actions confirm.
  */
 type SettingsViewProps = {
   snapshot: AppSnapshot;
@@ -86,7 +86,7 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
   });
   const [confirmResetProvider, setConfirmResetProvider] = useState<string | null>(null);
   const [exportedBundle, setExportedBundle] = useState<string | null>(null);
-  // Batch 19 (D3-B): Provider Shared diagnostic records + run state.
+  // Provider Shared diagnostic records + run state.
   const [diagnostics, setDiagnostics] = useState<Record<string, StoredProviderDiagnostic>>({});
   const [diagnosticRunning, setDiagnosticRunning] = useState<string | null>(null);
   const [diagnosticMessage, setDiagnosticMessage] = useState<string | null>(null);

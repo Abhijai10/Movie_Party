@@ -145,7 +145,7 @@ fn test_schedule_crud_persists() {
     let _ = std::fs::remove_file(&p);
 }
 
-/// Batch 16 (audit P14): the storage-layer duplicate was deleted — the ONE
+/// the storage-layer duplicate was deleted — the ONE
 /// canonical implementation is `scheduling::calculate_preload_start`
 /// (bits-correct: bytes×8/bps). The old duplicate divided bytes by a
 /// bits-per-second figure without ×8, reading transfers as 8× faster than

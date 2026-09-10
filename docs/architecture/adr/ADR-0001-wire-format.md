@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-02-14
-**Author:** Batch 11 (protocol truth & ADR foundation)
+**Author:** Movie Party maintainers
 **Supersedes:** PROTOCOL_SPEC §3 (as written)
 **Superseded by:** N/A
 
@@ -10,7 +10,7 @@
 
 # 1. CONTEXT
 
-- Current phase: V1 completion (post-M8; batches 11+ per the GLM audit).
+- Current phase: V1 completion (post-M8).
 - Affected subsystem: `src-tauri/src/network/quic.rs` framing layer and every
   `ClientRequest` / `ServerResponse` / `ServerEvent` message.
 - Expected behavior from MASTER_PRD / PROTOCOL_SPEC: §3 of the protocol spec
@@ -20,8 +20,8 @@
   JSON with a `u32` big-endian length prefix on each QUIC stream. Message
   discrimination happens via serde's tag-like enum representation
   (`{"type":"HelloAuth","payload":{...}}`), not via spec'd numeric IDs.
-- Why the existing spec text cannot stand: the audit (finding P1) flagged the
-  divergence as a spec-vs-code violation. Shipping V1 with the spec asserting
+- Why the existing spec text cannot stand: the spec-vs-code divergence is a
+  violation. Shipping V1 with the spec asserting
   CBOR while every byte on the wire is JSON makes the protocol documentation
   unusable as a source of truth — and §69's definition of done explicitly
   requires protocol docs to match implementation.
@@ -32,14 +32,13 @@ The locked requirement is protocol documentation integrity:
 
 ```text
 Protocol docs must match implementation (§69 DoD).
-All peer communication must follow PROTOCOL_SPEC.md (AGENTS §9).
+All peer communication must follow PROTOCOL_SPEC.md.
 ```
 
 Relevant documents:
 
 ```
 PROTOCOL_SPEC.md §3 (encoding), §5 (size limits), §10 (envelope)
-GLM audit finding P1 / decision point D1
 ```
 
 # 3. EVIDENCE
@@ -47,7 +46,7 @@ GLM audit finding P1 / decision point D1
 - `src-tauri/src/network/quic.rs::write_json` / `read_json_bytes`:
   `serde_json::to_vec` + `u32::to_be_bytes` length prefix (unchanged since
   the QUIC transport landed in M4).
-- Every message type in the audit's wire inventory serializes as JSON today;
+- Every message type in the wire inventory serializes as JSON today;
   no `serde_cbor`/`ciborium` dependency exists in `Cargo.toml`.
 - Tests in `src-tauri/src/network/quic.rs` (300+) parse JSON frames; a CBOR
   migration would rewrite every framing assertion.
@@ -105,13 +104,12 @@ Disadvantages:
 - ~2–3 days of work touching every wire test with zero user-visible gain.
 - Loses human-readable packet dumps during debugging.
 - High regression surface in the sync/call/relay paths weeks before V1
-  feature completion (Batch 12 needs the call relay to be stable).
+  feature completion (the call relay must stay stable).
 
 Risks:
 
 - Subtle map-ordering/canonicalization bugs in a hurry.
-- A late CBOR bug could destabilize the cross-device call path Batch 12
-  depends on.
+- A late CBOR bug could destabilize the cross-device call path.
 
 Estimated implementation impact:
 
@@ -125,7 +123,7 @@ Keep JSON as the wire format; amend §3 to document reality, and keep the
 numeric ID registry (see ADR-0002) as the authoritative registry even
 though the wire carries serde tags. Add the §5 256 KiB limit enforcement
 and the §10 envelope version/room fields so the envelope contract becomes
-enforced rather than aspirational (implemented in Batch 11).
+enforced rather than aspirational.
 
 Advantages:
 
@@ -150,7 +148,7 @@ Risks:
 Estimated implementation impact:
 
 ```
-Low (docs + the envelope/limit work already scheduled for Batch 11)
+Low (docs + the envelope/limit work)
 ```
 
 ## Option C — Do Nothing
@@ -158,8 +156,7 @@ Low (docs + the envelope/limit work already scheduled for Batch 11)
 Leave §3 asserting CBOR while code speaks JSON.
 
 Impact: the protocol spec is known-false on its most fundamental layer;
-every future reader/agent re-discovers the contradiction (this exact audit
-finding). Violates §69 DoD and AGENTS §9.
+every future reader re-discovers the contradiction. Violates §69 DoD.
 
 # 7. DECISION
 
@@ -182,10 +179,10 @@ Locked priority order is (1) synchronization correctness, (2) media
 continuity, (3) security, (4) cross-platform correctness, then efficiency.
 
 - Option B keeps synchronization and relay behavior byte-identical — zero
-  regression risk to the paths Batch 12 depends on (priority 1, 2).
+  regression risk to the call paths (priority 1, 2).
 - The security-relevant protocol properties (size limit, version gate, room
   binding, sequence ordering) are enforced by framing+envelope rules that are
-  encoding-agnostic — Batch 11 adds exactly those (priority 3).
+  encoding-agnostic (priority 3).
 - Cross-platform: JSON framing is OS-independent serde behavior (priority 4).
 - The only thing sacrificed is byte efficiency (priority 7-8), which V1
   control traffic makes irrelevant (chat and call-signal frames are <1 KiB).
@@ -213,11 +210,10 @@ continuity, (3) security, (4) cross-platform correctness, then efficiency.
 # 10. AFFECTED COMPONENTS
 
 ```
-src-tauri/src/network/quic.rs          (framing limit + envelope fields — Batch 11)
+src-tauri/src/network/quic.rs          (framing limit + envelope fields)
 src-tauri/src/protocol/mod.rs          (registry — ADR-0002)
 src-tauri/src/app_runtime.rs           (envelope construction/validation sites)
 docs/core_docs/PROTOCOL_SPEC.md        (§3, §5, §10 amended)
-docs/core_docs/IMPLEMENTATION_TRACKER.md
 ```
 
 # 11. PROTOCOL IMPACT
@@ -279,7 +275,7 @@ Windows → macOS / macOS → Windows: same bytes; QUIC streams carry the
 The wire bytes never changed under this ADR; rollback is documentation-only:
 restore §3's CBOR text and delete the §10 envelope-field requirement.
 The code changes (256 KiB gate, envelope fields) are independently safe and
-independently revertible (`git revert` of the Batch 11 commits) if a framing
+independently revertible (`git revert` of the framing commits) if a framing
 regression appears.
 
 # 17. DOCUMENTATION UPDATES
@@ -288,7 +284,5 @@ regression appears.
 [x] PROTOCOL_SPEC.md      — §3 amended (JSON canonical), §5 enforcement note,
                              §10 envelope fields documented
 [ ] MASTER_PRD.md          — none required
-[ ] AGENTS.md              — none required (§9/§10 already demand what we now do)
-[x] IMPLEMENTATION_TRACKER.md — Batch 11 entry
 [ ] UI_UX_SPEC.md           — none required
 ```

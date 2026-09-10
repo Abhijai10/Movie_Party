@@ -66,15 +66,15 @@ type CinemaViewProps = {
 const chatBodyLimitBytes = 2_000;
 const privacyNoticeMs = 2_200;
 const ghostNoticeMs = 800;
-/** Batch 13: camera-degradation notice duration (movie-first policy). */
+/** camera-degradation notice duration (movie-first policy). */
 const cameraNoticeMs = 3_200;
 
 /**
- * Batch 12: the production call path is the real cross-device session.
+ * the production call path is the real cross-device session.
  * The loopback self-test stays available only as a dev diagnostic on
- * localhost behind an explicit opt-in flag (AGENTS §30: unfinished/
+ * localhost behind an explicit opt-in flag (§30: unfinished/
  * diagnostic features behind flags), so default behavior never silently
- * falls back to a fake call (AGENTS §29).
+ * falls back to a fake call (§29).
  */
 function isCallLoopbackSelfTestEnabled(): boolean {
   if (typeof window === "undefined") {
@@ -297,7 +297,7 @@ export function CinemaView({
     }
   };
 
-  // ── Batch 12: real cross-device call session ───────────────────────────
+  // ── real cross-device call session ───────────────────────────
   //
   // Lifecycle effect: starts ONE RTCPeerConnection per call configuration.
   // Host offers; guest answers. The key deliberately EXCLUDES camera/mic
@@ -511,7 +511,7 @@ export function CinemaView({
     );
   }, [localCameraEnabled, localMicrophoneEnabled, callSessionLive]);
 
-  // Batch 13 (PRD §41 movie-first): the Rust ladder rewrites the camera
+  // (PRD §41 movie-first): the Rust ladder rewrites the camera
   // tier under network pressure; apply it to the LIVE session's sender
   // (encoder caps + track constraints — no SDP renegotiation). Keyed on
   // the full tier parameter set so re-renders with an unchanged tier
@@ -533,7 +533,7 @@ export function CinemaView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraTierParams, callSessionLive]);
 
-  // Batch 13: once-per-event degradation notice from the backend ladder
+  // once-per-event degradation notice from the backend ladder
   // ("Camera quality reduced to protect movie playback"). Displayed via
   // the existing cinematic notice surface; auto-clears like other
   // transient notices. The backend clears it on upgrade; this side only

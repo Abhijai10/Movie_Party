@@ -25,7 +25,7 @@ export type CountdownDisplay =
  * Derive the countdown display from the backend deadline.
  *
  * `nowWallMs` is the current wall clock (UI display only — legal per
- * AGENTS §16; execution itself is the backend's monotonic commit).
+ * §16; execution itself is the backend's monotonic commit).
  * `executeAtWallMs` is the backend-provided projection of the same
  * deadline. A negative remaining time is "done" — the backend commit is
  * the authority, the UI just reflects it.

@@ -17,14 +17,14 @@ alongside the movie, strict synchronization, and scheduled parties.
 - Resilience: crash watchers, §40 disconnect decision, sleep/wake +
   network revalidation, moved-file recovery
 - Ghost Mode & Privacy Mode
-- Provider Shared Mode: experimental diagnostic tier (D3-B) — capture
+- Provider Shared Mode: experimental diagnostic tier — capture
   verification + explicit Sync fallback; full transport pending the
-  real-DRM spike (Batch 20 gate)
+  real-DRM spike
 
 ### Known limitations
-- Provider Shared Mode is diagnostic-only in 0.9.0 (D3-B)
+- Provider Shared Mode is diagnostic-only in 0.9.0
 - macOS ScreenCaptureKit diagnostic requires ffmpeg (`brew install ffmpeg`)
-- Windows capture spike requires a physical Windows machine (Batch 21)
+- Windows capture spike requires a physical Windows machine
 
 The invite flow is complete: the lobby copies the full movieparty://
 link (browser-openable — the OS hands it to Movie Party's registered
@@ -35,5 +35,5 @@ save-as retention question (§52).
 ### Verification status
 All automated gates green (Rust fmt/clippy/363+ tests; frontend
 lint/tsc/137 vitest/build). The §31.1 manual matrix (two devices,
-real providers, real DRM content) is pending — see
-IMPLEMENTATION_TRACKER.md for the external-verification register.
+real providers, real DRM content) is pending physical hardware
+verification.

@@ -147,7 +147,7 @@ describe("isWellFormedSignal", () => {
   });
 });
 
-// ── Batch 13: adaptive camera tier → sender/track mappings (PRD §41) ────────
+// ── adaptive camera tier → sender/track mappings (PRD §41) ────────
 
 import {
   senderParametersForTier,
@@ -165,7 +165,7 @@ const tierState = (overrides: Partial<CameraTierState>): CameraTierState => ({
   ...overrides,
 });
 
-describe("senderParametersForTier — Batch 13 movie-first encoder caps", () => {
+describe("senderParametersForTier — movie-first encoder caps", () => {
   const baseParameters: RTCRtpSendParameters = {
     transactionId: "tx-1",
     codecs: [],
@@ -209,7 +209,7 @@ describe("senderParametersForTier — Batch 13 movie-first encoder caps", () => 
   });
 });
 
-describe("trackConstraintsForTier — Batch 13 capture downscale", () => {
+describe("trackConstraintsForTier — capture downscale", () => {
   it("requests the tier's frame with ideal (nearest-safe) values", () => {
     const constraints = trackConstraintsForTier(tierState({}));
     expect(constraints.width).toEqual({ ideal: 640 });

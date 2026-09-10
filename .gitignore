@@ -57,5 +57,6 @@ temp/
 # Package stores
 .pnpm-store/
 
-# AI agent temporary files
+# Local editor/agent scratch directories (never commit)
 .freebuff/
+.kilo/

@@ -10,15 +10,15 @@ import logoMark from "../assets/logo_mark.png";
 type HomeViewProps = {
   onCreate: () => void;
   onJoin: () => void;
-  /** Batch 16 (§53): persisted upcoming schedules. */
+  /** (§53): persisted upcoming schedules. */
   upcoming: StoredSchedule[];
   /** Latest preload progress per schedule id (0..1), from PRELOAD_STATE. */
   preloadProgress: Record<string, number>;
   /** Local media names by media id, for honest card titles. */
   mediaNameById: (mediaId: string) => string;
-  /** Batch 15 (§55–§62): open Settings. */
+  /** (§55–§62): open Settings. */
   onOpenSettings: () => void;
-  /** Batch 16 (§18): open the Schedule form. */
+  /** (§18): open the Schedule form. */
   onOpenSchedule: () => void;
 };
 

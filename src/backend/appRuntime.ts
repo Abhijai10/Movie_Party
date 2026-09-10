@@ -145,7 +145,7 @@ export type AppSnapshot = {
     microphone: {
       enabled: boolean;
     };
-    /** Once-per-event camera degradation notice (Batch 13 / PRD §41). */
+    /** Once-per-event camera degradation notice (PRD §41). */
     cameraNotice: string | null;
   };
   callSignals: Array<{
@@ -430,7 +430,7 @@ export async function continueWithoutGuest(): Promise<AppSnapshot | null> {
   return invoke<AppSnapshot>("continue_without_guest");
 }
 
-/** Batch 19 (D3-B): the persisted per-provider Shared diagnostic record. */
+/** the persisted per-provider Shared diagnostic record. */
 export type StoredProviderDiagnostic = {
   providerId: string;
   displayName: string;
@@ -446,7 +446,7 @@ export async function listProviderDiagnostics(): Promise<
   return invoke<StoredProviderDiagnostic[]>("list_provider_diagnostics");
 }
 
-/** Batch 19: run the 30 s Provider Shared capture diagnostic (ffmpeg-CLI
+/** run the 30 s Provider Shared capture diagnostic (ffmpeg-CLI
  *  bridge) and persist the empirical classification. */
 export async function runProviderSharedDiagnostic(
   providerId: string,
@@ -572,7 +572,7 @@ async function invokeSnapshot(
   }
 }
 
-// ── Batch 15/16: settings, first-run, and scheduling surfaces ───────────
+// ── settings, first-run, and scheduling surfaces ───────────
 
 export type PrerequisiteStatus = {
   id: string;

@@ -518,8 +518,8 @@ fn launch_provider(
     use crate::providers::sync::{provider_accepts_url, provider_id_from_str};
 
     if mode == "PROVIDER_SHARED" {
-        // Batch 19: the gate consults the persisted empirical record
-        // (AGENTS §38). A verified diagnostic on THIS device unlocks the
+        // the gate consults the persisted empirical record
+        // (§38). A verified diagnostic on THIS device unlocks the
         // experimental path; anything else stays the honest MP-CAPTURE-001
         // with the Sync Mode offer.
         let verified = runtime
@@ -770,8 +770,8 @@ fn guest_accept_schedule(
     runtime.guest_accept_schedule(&schedule_id, accepted)
 }
 
-/// Batch 15 (UI_UX_SPEC §11): truthful prerequisite statuses for First Run.
-/// Detection lives in Rust (AGENTS §6 — native detection is backend work);
+/// (UI_UX_SPEC §11): truthful prerequisite statuses for First Run.
+/// Detection lives in Rust (§6 — native detection is backend work);
 /// permissions are reported as NOT_REQUESTED unless the call-mode has
 /// already exercised them (no premature prompts, §11 rule).
 #[derive(Debug, Clone, serde::Serialize)]

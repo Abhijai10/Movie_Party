@@ -241,7 +241,7 @@ pub enum ClientRequest {
         media_id: String,
         chunk_index: u64,
     },
-    /// Batch 16 (§56): guest accepts a host-created schedule. The host
+    /// (§56): guest accepts a host-created schedule. The host
     /// relays the acknowledgement back as a ScheduleAccept broadcast.
     ScheduleAccept {
         seq: u64,
@@ -304,7 +304,7 @@ pub enum ServerResponse {
         granted: bool,
         reason: Option<String>,
     },
-    /// Batch 16 (§56): the host acknowledged the guest's schedule acceptance.
+    /// (§56): the host acknowledged the guest's schedule acceptance.
     ScheduleAcceptAck {
         schedule_id: String,
         accepted: bool,
@@ -409,9 +409,9 @@ pub enum ServerEvent {
         signal_type: String,
         data: String,
     },
-    /// Batch 16 (P8, PROTOCOL_SPEC §55): host broadcasts a created schedule.
+    /// (PROTOCOL_SPEC §55): host broadcasts a created schedule.
     /// Scheduling uses wall-clock UTC (PROTOCOL_SPEC §55; wall clock is legal
-    /// for scheduled movie time — playback sync stays monotonic, §16 AGENTS).
+    /// for scheduled movie time — playback sync stays monotonic, §16).
     ScheduleCreate {
         schedule_id: String,
         scheduled_start_utc_ms: i64,
@@ -532,7 +532,7 @@ pub enum QuicHostEvent {
         action: String,
         parameters: serde_json::Value,
     },
-    /// Batch 16 (§56): the guest accepted a broadcast schedule. The host
+    /// (§56): the guest accepted a broadcast schedule. The host
     /// relays acceptance into the room (the scheduling host confirms its
     /// own persistence; the guest registers local reminders).
     GuestScheduleAccept {
@@ -627,7 +627,7 @@ impl QuicServer {
     /// Broadcast a [`ServerEvent`] to all subscribers. The event is wrapped in
     /// an [`EventEnvelope`] carrying a strictly-increasing sequence number
     /// (drawn from `next_event_seq`), the host's device id as `sender`, and the
-    /// Batch 16: typed broadcast helpers for the scheduling wire events
+    /// typed broadcast helpers for the scheduling wire events
     /// (§55–§57). Every one goes through `broadcast` so the envelope carries
     /// the host's canonical seq — a guest can never see a stale/duplicate
     /// ordering (§10).
@@ -979,7 +979,7 @@ impl QuicClient {
         .await
     }
 
-    /// Batch 16 (§56): guest acknowledges a schedule. Fire-and-forget like
+    /// (§56): guest acknowledges a schedule. Fire-and-forget like
     /// the other guest control sends — the authoritative confirmation arrives
     /// as the host's ScheduleAccept *broadcast*.
     pub async fn send_schedule_accept(
@@ -1918,7 +1918,7 @@ async fn handle_request(
             }
             Err(code) => ServerResponse::AuthReject { code },
         },
-        // Batch 16 (§56): the guest's schedule acknowledgement is relayed
+        // (§56): the guest's schedule acknowledgement is relayed
         // to the host AppRuntime and echoed to both rooms as a broadcast so
         // each side can persist + register reminders exactly once.
         ClientRequest::ScheduleAccept {
@@ -3102,7 +3102,7 @@ mod tests {
         server_task.abort();
     }
 
-    // ── Batch 11 / PROTOCOL_SPEC §67: malformed-input property tests ─────────
+    // ── PROTOCOL_SPEC §67: malformed-input property tests ─────────
 
     /// §67 + §5: a control frame declaring an oversized length prefix must
     /// be rejected with MP-PROTO-004 before any allocation or parse, and
@@ -3328,7 +3328,7 @@ mod tests {
         assert!(super::validate_event_envelope(&base).is_ok());
     }
 
-    /// Batch 16 (§55–§57): every scheduling event round-trips through the
+    /// (§55–§57): every scheduling event round-trips through the
     /// JSON + u32-BE wire format with its payload intact. This proves the
     /// serde tag/content contract the frontend relies on.
     #[test]
@@ -3441,8 +3441,8 @@ mod tests {
 
     /// §52 + §5 property: a call signal larger than 64 KiB is accepted by
     /// the transport (it is under 256 KiB) but must be rejected by the call
-    /// subsystem's own payload validation (MP-CALL-001, tightened in
-    /// Batch 12). Here we assert the transport-level boundary so the two
+    /// subsystem's own payload validation (MP-CALL-001, tightened
+    /// further). Here we assert the transport-level boundary so the two
     /// limits stay correctly layered.
     #[tokio::test]
     async fn transport_allows_signal_under_control_limit() {

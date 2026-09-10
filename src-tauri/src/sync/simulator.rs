@@ -203,7 +203,7 @@ impl SyncSimulator {
         })
     }
 
-    /// Batch 23 (chaos): a seek lands exactly when the network drops
+    /// a seek lands exactly when the network drops
     /// packets. The strict-sync rule under test: the seek must NOT commit
     /// both sides onto a region the guest cannot buffer (§14/§41 — the
     /// host must not see destination frames before guest readiness).
@@ -269,7 +269,7 @@ impl SyncSimulator {
         })
     }
 
-    /// Batch 23 (chaos): RTT changes mid-movie (e.g. Wi-Fi → hotspot).
+    /// RTT changes mid-movie (e.g. Wi-Fi → hotspot).
     /// Under test: the commit lead recalculates from the NEW RTT, and the
     /// drift bound still holds across the transition.
     pub fn chaos_rtt_change_mid_movie(
@@ -285,7 +285,7 @@ impl SyncSimulator {
         })
     }
 
-    /// Batch 23 (chaos): the guest disconnects during buffer recovery.
+    /// the guest disconnects during buffer recovery.
     /// Under test: the recovery machine pauses for BOTH (§14) and never
     /// resumes without a readiness consensus — the sim models the
     /// reconnect handshake as the consensus gate.
@@ -413,7 +413,7 @@ mod tests {
         assert_eq!(simulator.guest.state, PlayerState::Paused);
     }
 
-    /// Batch 23 (chaos): packets drop exactly around a mid-movie seek —
+    /// packets drop exactly around a mid-movie seek —
     /// the seek must still land on target with drift bounded.
     #[test]
     fn chaos_seek_during_packet_loss_lands_on_target() {
@@ -438,7 +438,7 @@ mod tests {
         assert!((simulator.host.position_ms - simulator.guest.position_ms).abs() <= 100);
     }
 
-    /// Batch 23 (chaos): RTT changes mid-movie (30 ms fiber → 180 ms
+    /// RTT changes mid-movie (30 ms fiber → 180 ms
     /// hotspot) — the bound holds across the transition.
     #[test]
     fn chaos_rtt_change_mid_movie_keeps_the_bound() {
@@ -462,7 +462,7 @@ mod tests {
         assert!(report.p95_drift_ms <= 700);
     }
 
-    /// Batch 23 (chaos): the guest drops mid buffer-recovery — playback
+    /// the guest drops mid buffer-recovery — playback
     /// pauses for BOTH and resumes only after a real readiness consensus.
     #[test]
     fn chaos_disconnect_during_buffer_recovery_never_resumes_blind() {

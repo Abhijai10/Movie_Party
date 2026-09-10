@@ -58,10 +58,9 @@ jobs:
       # never assertions. Windows CI + local runs verified green.
       - run: cargo test -- --test-threads=1
 
-  # Batch 22 (P12): dependency audits — ADVISORY, non-blocking first (the
-  # plan's explicit instruction). Failures surface as warnings so a new
-  # advisory never blocks feature work; promotion to blocking is a later,
-  # deliberate decision.
+  # Dependency audits — ADVISORY, non-blocking by design. Failures surface
+  # as warnings so a new advisory never blocks feature work; promotion to
+  # blocking is a later, deliberate decision.
   cargo-audit:
     name: Cargo audit (advisory)
     runs-on: ubuntu-latest

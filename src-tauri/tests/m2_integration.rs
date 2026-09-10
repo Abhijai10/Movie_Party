@@ -457,7 +457,7 @@ async fn test_k_guest_buffer_starvation_pauses_and_recovers() {
     });
     let position = playing.sync.position_ms;
 
-    // Guest stalls: strict-sync input must pause the HOST (AGENTS.md §14)
+    // Guest stalls: strict-sync input must pause the HOST (§14)
     guest.report_buffer_status(position, 0, true);
     let host_buffering = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "BUFFERING"

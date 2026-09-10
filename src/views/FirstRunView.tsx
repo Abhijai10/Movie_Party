@@ -11,7 +11,7 @@ export type { PrerequisiteStatus };
 /**
  * UI_UX_SPEC §10 + §11 — First Run welcome + prerequisite checks.
  *
- * Truth rules (AGENTS §38 + §11):
+ * Truth rules (§38 + §11):
  * - every row shows the REAL detected state — "Not requested" for
  *   permissions we have not asked for yet. NEVER a green check for an
  *   unverified thing, and NEVER a premature permission prompt (the §11

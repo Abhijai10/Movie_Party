@@ -44,9 +44,9 @@ pub struct StoredIdentity {
 }
 
 /// A stored schedule record.
-/// Batch 16: camelCase on the wire — the TS contract (StoredSchedule)
+/// camelCase on the wire — the TS contract (StoredSchedule)
 /// declares camelCase fields; snake_case here would deliver undefined at
-/// runtime (same class of bug as the Batch 13 CameraState serde fix).
+/// runtime (same class of bug as the CameraState serde fix).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredSchedule {
@@ -82,9 +82,9 @@ pub struct StoredChatMessage {
     pub created_host_time_us: i64,
 }
 
-/// A persisted Provider Shared capture diagnostic (Batch 19, P10).
+/// A persisted Provider Shared capture diagnostic.
 /// camelCase on the wire — the TS contract declares camelCase fields.
-/// AGENTS §38: `shared_available` reflects a REAL diagnostic on THIS
+/// §38: `shared_available` reflects a REAL diagnostic on THIS
 /// device, never a guess.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -285,8 +285,8 @@ impl MoviePartyDb {
         Ok(schedules)
     }
 
-    /// Upsert a Provider Shared capture diagnostic (Batch 19). The row is
-    /// the empirical record for AGENTS §38 — `shared_available` is true
+    /// Upsert a Provider Shared capture diagnostic. The row is
+    /// the empirical record for §38 — `shared_available` is true
     /// ONLY when a real diagnostic verified capture on this device.
     pub fn upsert_provider_diagnostic(
         &self,
@@ -356,8 +356,8 @@ impl MoviePartyDb {
     }
 
     /// Update schedule status.
-    /// Batch 16 (§55): update a schedule's wall-clock start time. Wall-clock
-    /// is the legal domain for scheduled movie time (AGENTS §16).
+    /// (§55): update a schedule's wall-clock start time. Wall-clock
+    /// is the legal domain for scheduled movie time (§16).
     pub fn update_schedule_start(
         &self,
         schedule_id: &str,
@@ -569,7 +569,7 @@ impl MoviePartyDb {
 
     // ── Scheduling helpers ────────────────────────────────────────────────
 
-    // NOTE (audit P14, fixed in Batch 16): the preload-deadline formula
+    // NOTE: the preload-deadline formula
     // previously lived here as a DUPLICATE that divided bytes by a
     // bits-per-second goodput without ×8 (reading the transfer as 8×
     // faster than reality and scheduling preload 8× too late). There is
@@ -731,8 +731,8 @@ const MIGRATION_002: &str = "
 ALTER TABLE device_identity ADD COLUMN key_label TEXT NOT NULL DEFAULT '';
 ";
 
-/// v3 (Batch 19): persistent per-provider Provider Shared capture
-/// diagnostics — the empirical classification record (AGENTS §38:
+/// v3: persistent per-provider Provider Shared capture
+/// diagnostics — the empirical classification record (§38:
 /// provider support is empirical, never guessed). `shared_available`
 /// flips only when a real diagnostic on this device verified capture.
 const MIGRATION_003: &str = "
@@ -1020,7 +1020,7 @@ mod tests {
         );
     }
 
-    /// Audit P14 regression: the storage-layer duplicate divided BYTES by
+    /// Regression: the storage-layer duplicate divided BYTES by
     /// a BITS-per-second goodput (8× optimistic). The canonical
     /// scheduling::calculate_preload_start is bits-correct: 1 GB at
     /// 10 Mbps takes 800 s, ×1.4 = 1120 s ≈ 1_120_000 ms before the

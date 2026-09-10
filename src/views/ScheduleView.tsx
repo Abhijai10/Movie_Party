@@ -92,7 +92,7 @@ export function ScheduleView({ snapshot, onBack, onScheduled }: ScheduleViewProp
   /**
    * §18 estimated transfer: remaining bytes at the measured goodput with the
    * same 1.4 safety + 15-min margin the backend's canonical
-   * scheduling::calculate_preload_start applies (audit P14 — bits-correct).
+   * scheduling::calculate_preload_start applies (bits-correct).
    * Computed for display; the backend recomputes authoritatively on create.
    */
   const transferEstimate = useMemo(() => {
@@ -148,7 +148,7 @@ export function ScheduleView({ snapshot, onBack, onScheduled }: ScheduleViewProp
       });
       setSubmitting(false);
       if (scheduleId) {
-        // Batch 16: notification permission is requested NOW — the user
+        // notification permission is requested NOW — the user
         // just expressed intent to be reminded (§11: no premature prompts).
         // A denial never blocks the schedule; reminders just can't toast.
         if (typeof Notification !== "undefined" && Notification.permission === "default") {

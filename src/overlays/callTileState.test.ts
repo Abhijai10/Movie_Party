@@ -114,7 +114,7 @@ describe("call tile minimize semantics", () => {
   });
 });
 
-// ── §28/§29 (Batch 17, P7): camera card spec values ─────────────────────
+// ── §28/§29: camera card spec values ─────────────────────
 
 describe("camera card size + persistence (UI_UX_SPEC §28)", () => {
   it("defaults to 220px and clamps user resizes to 120–360", () => {

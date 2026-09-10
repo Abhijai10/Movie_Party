@@ -1,5 +1,5 @@
 /**
- * Batch 12: real cross-device call session.
+ * real cross-device call session.
  *
  * Replaces the local loopback self-test as the production path. Each
  * device runs ONE RTCPeerConnection; signaling travels over the existing
@@ -7,7 +7,7 @@
  * snapshot.callSignals).
  *
  * Design constraints (from the batch plan + PROTOCOL_SPEC):
- * - Host is the offerer (host authority, AGENTS §15); guest answers.
+ * - Host is the offerer (host authority, §15); guest answers.
  * - NON-TRICKLE ICE: both sides wait for icegatheringcomplete and embed
  *   candidates in the SDP. The guest→host signal path is a fire-and-forget
  *   tokio::spawn over QUIC, so candidate ordering is not guaranteed —
@@ -21,7 +21,7 @@
  *   participant snapshot, never negotiated.
  * - Mode downgrade (VIDEO_VOICE → VOICE_ONLY → OFF) and privacy mode tear
  *   the session down and require explicit re-enable (no silent fallbacks,
- *   AGENTS §29).
+ * §29).
  */
 
 import {
@@ -35,7 +35,7 @@ import {
 export type CallRole = "HOST" | "GUEST";
 
 /**
- * Batch 13: the runtime-recommended camera tier as it crosses the snapshot
+ * the runtime-recommended camera tier as it crosses the snapshot
  * boundary. Mirrors `call::CameraState` (camelCase serde) from the Rust
  * ladder; `tier` orders A < B < C < D (D = disabled).
  */
@@ -49,7 +49,7 @@ export type CameraTierState = {
 };
 
 /**
- * Pure tier-→sender-parameter mapping (Batch 13). Given the snapshot's
+ * Pure tier-→sender-parameter mapping. Given the snapshot's
  * camera state and a live video sender's current parameters, produce the
  * next parameters to set. Encoder caps only: no SDP renegotiation.
  *
@@ -70,7 +70,7 @@ export function senderParametersForTier(
 }
 
 /**
- * Pure tier-→track-constraint mapping (Batch 13). Downscale the captured
+ * Pure tier-→track-constraint mapping. Downscale the captured
  * resolution to the tier's frame (aspect preserved via width/height pair).
  * An exact frame is requested with ideal (browser may pick nearest).
  */
@@ -246,7 +246,7 @@ export type LiveCallSession = {
   /** MP-CALL error code if media acquisition degraded. */
   mediaErrorCode: string | null;
   /**
-   * Batch 13 (PRD §41 / audit P17): apply an adaptive-camera-tier state to
+   * (PRD §41): apply an adaptive-camera-tier state to
    * the LIVE sender. Movie-first: the runtime ladder decides the tier;
    * this maps it onto WebRTC sender parameters + track constraints.
    *

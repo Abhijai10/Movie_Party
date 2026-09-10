@@ -253,7 +253,7 @@ pub fn validate_signal(signal: &CallSignal, ledger: &mut CallSignalLedger) -> Re
             Ok(())
         }
         CallSignalType::Renegotiate => {
-            // Batch 12: a renegotiation REQUEST (not an SDP) — the peer's
+            // a renegotiation REQUEST (not an SDP) — the peer's
             // session restarted (mode change, privacy exit, view remount)
             // and needs a fresh offer from this device. Payload is a small
             // marker object. The ledger reset is CONDITIONAL: only an
@@ -467,7 +467,7 @@ mod tests {
         assert!(validate_signal(&signal, &mut ledger).is_err());
     }
 
-    // ── Batch 12: Renegotiate marker semantics (§52) ─────────────────────
+    // ── Renegotiate marker semantics (§52) ─────────────────────
 
     const MARKER: &str = r#"{"request":"renegotiate","v":1,"id":"s1-abc123"}"#;
     const OFFER_DATA: &str = r#"{"type":"offer","sdp":"v=0\r\n"}"#;

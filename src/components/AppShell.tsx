@@ -82,7 +82,7 @@ export function AppShell() {
   const [callTileSession, setCallTileSession] = useState<CallTileSessionState>(() =>
     createCallTileSessionState(),
   );
-  // ── Batch 15/16 state ──────────────────────────────────────────────────
+  // ── state ──────────────────────────────────────────────────
   const [upcoming, setUpcoming] = useState<StoredSchedule[]>([]);
   const [preloadProgress, setPreloadProgress] = useState<Record<string, number>>({});
   const [firstRunDone, setFirstRunDone] = useState<boolean>(() => {
@@ -189,14 +189,14 @@ export function AppShell() {
     void getProviderCapabilities().then(setProviderCapabilities);
   }, []);
 
-  // Batch 15 (§10/§11): First Run shows until the user continues once.
+  // (§10/§11): First Run shows until the user continues once.
   useEffect(() => {
     if (!firstRunDone) {
       setLocalScreen("FIRST_RUN");
     }
   }, [firstRunDone]);
 
-  // Batch 16 (§53): refresh upcoming schedules when home is visible.
+  // (§53): refresh upcoming schedules when home is visible.
   const isHomeVisible =
     snapshot === null ||
     (snapshot.screen === "HOME" && localScreen === null && devScreen === null);
@@ -227,7 +227,7 @@ export function AppShell() {
     }
   }, [snapshot?.media]);
 
-  // Batch 16 (§57): PRELOAD_STATE progress arrives via snapshots' transfer
+  // (§57): PRELOAD_STATE progress arrives via snapshots' transfer
   // when the schedule's media is the active transfer. Map it onto cards.
   useEffect(() => {
     if (snapshot?.transfer && snapshot.media) {
@@ -252,7 +252,7 @@ export function AppShell() {
   // Leave vs End-For-Everyone (host) vs just Leave (guest). The Tauri
   // window can't be intercepted from the renderer, so this fires on the
   // app's own close affordances; the OS-level close is handled by the
-  // backend's graceful teardown (Batch 13/14 work).
+  // backend's graceful teardown (earlier call work).
   useEffect(() => {
     const inParty =
       snapshot?.screen === "CINEMA" ||
@@ -270,7 +270,7 @@ export function AppShell() {
     return undefined;
   }, [snapshot?.screen, closePrompt.visible]);
 
-  // ── Batch 18 (P13): sleep/wake + network-change revalidation hooks ────
+  // ── sleep/wake + network-change revalidation hooks ────
   // SLEEP_WAKE: the OS hiding the window (lid close, sleep) followed by a
   // visible return after a real gap means clocks/buffers/devices must be
   // revalidated — the modeled plan pauses playback for both and rechecks
@@ -404,7 +404,7 @@ export function AppShell() {
     setLocalScreen("CREATE_PARTY");
   };
 
-  // Batch 15/16 navigation helpers.
+  // navigation helpers.
   const goSettings = () => {
     setDevScreen(null);
     setLocalScreen("SETTINGS");
@@ -680,12 +680,12 @@ export function AppShell() {
       </>
     );
 
-  // Batch 15 (§10/§11): First Run — one-time welcome + truthful checks.
+  // (§10/§11): First Run — one-time welcome + truthful checks.
   if (localScreen === "FIRST_RUN") {
     return <FirstRunView onContinue={completeFirstRun} />;
   }
 
-  // Batch 15 (§55–§62): Settings — always reachable from the shell.
+  // (§55–§62): Settings — always reachable from the shell.
   if (localScreen === "SETTINGS") {
     return (
       <>
@@ -695,7 +695,7 @@ export function AppShell() {
     );
   }
 
-  // Batch 16 (§18/§19): Schedule form.
+  // (§18/§19): Schedule form.
   if (localScreen === "SCHEDULE") {
     return (
       <>

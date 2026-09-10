@@ -1,19 +1,18 @@
-//! Batch 19 (P10 / D3-B): the Provider Shared **diagnostic** — the V1
+//! The Provider Shared **diagnostic** — the V1
 //! verification mechanism, deliberately experimental.
 //!
-//! Scope per the audit plan and PRD §109: V1 ships Shared as an
+//! Scope per PRD §109: V1 ships Shared as an
 //! EXPERIMENTAL diagnostic (capture + encode + sample + black-frame
 //! classification + explicit Sync fallback offer). Full transport is
-//! Batch 20, CONDITIONAL on this spike passing on real DRM content and
-//! on decision D3=A.
+//! deferred, CONDITIONAL on this spike passing on real DRM content.
 //!
-//! Mechanism: the **ffmpeg-CLI bridge** (the plan's documented V1
+//! Mechanism: the **ffmpeg-CLI bridge** (the documented V1
 //! diagnostic mechanism). On macOS the bridge captures via the `avfoundation`
 //! capture device and encodes with `h264_videotoolbox`; the 30 s sample
 //! is classified by the existing black-frame/static detection
 //! (`crate::capture::classify_video_capture`), never by guesswork.
 //!
-//! Honesty rules baked in (AGENTS §29/§38, no silent fallbacks):
+//! Honesty rules baked in (§29/§38, no silent fallbacks):
 //! - ffmpeg absent → a typed, actionable error — never a fake "unavailable";
 //! - capture permission not granted → MP-CAPTURE-001, with the user told
 //!   how to grant it;
@@ -30,7 +29,7 @@ use crate::capture::{
     FrameSampleStats,
 };
 
-/// The documented V1 diagnostic sample window (§ plan Batch 19 / PRD §109).
+/// The documented V1 diagnostic sample window (PRD §109).
 pub const DIAGNOSTIC_SAMPLE_SECONDS: u16 = 30;
 
 #[derive(Debug, thiserror::Error)]
@@ -141,7 +140,7 @@ pub fn outcome_for_classification(
 /// default avfoundation video device into a raw luma-stats sample.
 ///
 /// This runs the REAL capture for the diagnostic sample and returns the
-/// measured statistics. It never fabricates numbers (AGENTS §38): if the
+/// measured statistics. It never fabricates numbers: if the
 /// capture fails, callers receive the typed error instead.
 ///
 /// `capture_index` is the avfoundation device index (1 = main screen).

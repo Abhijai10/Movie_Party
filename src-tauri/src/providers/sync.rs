@@ -279,13 +279,13 @@ pub fn command_for_action(
     }
 }
 
-/// Batch 14 (audit P3): map a CANONICAL coordinator commit to the provider
+/// map a CANONICAL coordinator commit to the provider
 /// adapter action it implies. This is the bridge between the sync
 /// engine's commit kinds ("PLAY"/"PAUSE"/"SEEK", position in ms) and the
 /// provider CDP commands (actions with positions in seconds). None
 /// means the commit does not drive the provider (unknown kind).
 ///
-/// The coordinator remains the single authority (AGENTS §15): providers
+/// The coordinator remains the single authority (§15): providers
 /// never see guest-originated actions directly — only canonical commits
 /// produced by the host.
 pub fn provider_sync_action_for_commit(
@@ -302,8 +302,8 @@ pub fn provider_sync_action_for_commit(
     }
 }
 
-/// Batch 14: map a CDP/adapter execution failure to the honest runtime
-/// error (AGENTS §29 — no silent fallback; the user must see the
+/// map a CDP/adapter execution failure to the honest runtime
+/// error (§29 — no silent fallback; the user must see the
 /// provider-mode failure, never a fake local playback). Mirrors
 /// `map_provider_error`'s taxonomy for the command-execution path.
 pub fn command_error_to_runtime_error(
@@ -333,8 +333,8 @@ pub fn command_error_to_runtime_error(
     }
 }
 
-/// Batch 14: the user-facing error code + description for a provider
-/// runtime failure (stable MP-PROVIDER codes, AGENTS §23). Shared-mode
+/// the user-facing error code + description for a provider
+/// runtime failure (stable MP-PROVIDER codes, §23). Shared-mode
 /// fallback is never implied — Provider Sync failures surface as
 /// Provider Sync failures.
 pub fn provider_runtime_error_response(error: ProviderRuntimeError) -> (&'static str, String) {
@@ -569,7 +569,7 @@ mod tests {
         }
     }
 
-    // ── Batch 14: canonical-commit dispatch + error mapping (audit P3) ─────
+    // ── canonical-commit dispatch + error mapping ─────
 
     #[test]
     fn canonical_commits_map_to_provider_actions_with_second_positions() {
@@ -635,7 +635,7 @@ mod tests {
     #[test]
     fn every_provider_dispatches_through_the_same_adapter_interface() {
         // The coordinator's dispatch is provider-agnostic: the same action
-        // produces a CDP command for every provider (AGENTS §8 — no
+        // produces a CDP command for every provider (§8 — no
         // provider-specific logic outside adapters).
         for provider in [
             ProviderId::YouTube,

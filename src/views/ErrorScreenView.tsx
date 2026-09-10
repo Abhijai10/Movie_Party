@@ -7,7 +7,7 @@ import { SilkBackground } from "../components/mp/SilkBackground";
  * UI_UX_SPEC §64 — the Error screen.
  *
  * Stable MP code + human message + actionable options + collapsible
- * Technical Details. AGENTS §23: the stable code is the contract; raw
+ * Technical Details. §23: the stable code is the contract; raw
  * internals belong in the details, never replacing the code.
  *
  * Every recoverable error offers a useful action — there is no dead-end
@@ -39,7 +39,7 @@ export function extractMpCode(error: string | null | undefined): string {
 
 /**
  * Map an MP code family to a human message the user can act on. Codes are
- * the contract (AGENTS §23); this table keeps user copy honest and stable.
+ * the contract (§23); this table keeps user copy honest and stable.
  */
 export function humanMessageForCode(code: string): string {
   if (code.startsWith("MP-NET-TS")) {

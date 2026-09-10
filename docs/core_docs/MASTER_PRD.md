@@ -17,7 +17,7 @@
 
 This document is the single source of truth for Movie Party.
 
-An AI coding agent, human developer, or future contributor must **not make architectural decisions independently** when an answer already exists here.
+A human developer or future contributor must **not make architectural decisions independently** when an answer already exists here.
 
 If implementation reveals that a locked assumption is technically impossible, the developer must:
 
@@ -4154,7 +4154,7 @@ Tauri can produce Windows installer bundles; production signing/distribution is 
 
 # 99. PHASE COMPLETION RULE
 
-A coding agent may **not begin the next phase merely because code exists**.
+A phase may **not be begun merely because code exists**.
 
 A phase is complete only when:
 
@@ -4555,7 +4555,7 @@ V1 is complete only when:
 
 ---
 
-# 114. ARCHITECTURAL DECISIONS THAT CODING AGENTS MUST NOT CHANGE
+# 114. ARCHITECTURAL DECISIONS THAT MUST NOT BE CHANGED
 
 The following are considered **locked**:
 
@@ -4765,4 +4765,4 @@ PROVIDER SYNC MODE
 
 This architecture is the V1 baseline.
 
-Implementation should now proceed **phase by phase in the exact dependency order defined above rather than asking an AI coding agent to generate the whole project at once**.
+Implementation proceeds **phase by phase in the exact dependency order defined above**.

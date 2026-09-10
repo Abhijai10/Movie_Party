@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 /**
- * Batch 22 (P12): the explicit CSP is documented and tested. The policy
+ * the explicit CSP is documented and tested. The policy
  * must allow exactly what the running app needs — 'self' for everything,
  * with the minimal documented exceptions:
  *   - style-src 'unsafe-inline' — Tailwind/JIT + framer-motion inline styles;
@@ -16,7 +16,7 @@ const config = JSON.parse(
   readFileSync(resolve(__dirname, "../../src-tauri/tauri.conf.json"), "utf8"),
 ) as { app: { security: { csp?: string } } };
 
-describe("explicit CSP (Batch 22 / P12)", () => {
+describe("explicit CSP", () => {
   const csp = config.app.security.csp ?? "";
 
   it("is present and locked to self by default", () => {

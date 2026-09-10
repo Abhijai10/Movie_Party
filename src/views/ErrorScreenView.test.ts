@@ -3,7 +3,7 @@ import { extractMpCode, humanMessageForCode } from "./ErrorScreenView";
 import { stateLabelFor, type PrerequisiteStatus } from "./FirstRunView";
 import { transferEstimateFrom, preloadEarliestOnly } from "./ScheduleView";
 
-describe("ErrorScreenView code mapping (§64, AGENTS §23)", () => {
+describe("ErrorScreenView code mapping (§64, §23)", () => {
   it("extracts the stable MP code from a raw backend error string", () => {
     expect(extractMpCode("MP-NET-003 the current connection is too slow")).toBe("MP-NET-003");
     expect(extractMpCode("details: MP-PROVIDER-004 sign in first")).toBe("MP-PROVIDER-004");
@@ -50,7 +50,7 @@ describe("FirstRunView prerequisite states (§11 truth rules)", () => {
   });
 });
 
-describe("ScheduleView transfer math (§18, audit P14 bits-correct)", () => {
+describe("ScheduleView transfer math (§18, bits-correct)", () => {
   it("computes bytes→bits transfer time with the 1.4 safety factor", () => {
     // 1 GB remaining at 10 Mbps: 1e9×8/1e7 = 800 s; ×1.4 = 1120 min/60.
     const estimate = transferEstimateFrom({

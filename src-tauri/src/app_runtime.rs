@@ -239,7 +239,7 @@ pub struct SyncSnapshot {
     /// — the frontend never invents its own unsynchronized countdown.
     /// `execute_at_wall_ms` is a UI-display projection of the authoritative
     /// host-monotonic deadline (monotonic time still drives execution,
-    /// AGENTS §16; wall clock is legal for UI display only).
+    /// §16; wall clock is legal for UI display only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_operation: Option<PendingOperationSnapshot>,
 }
@@ -273,8 +273,8 @@ pub struct CallSnapshot {
     pub connected: bool,
     pub camera: CameraState,
     pub microphone: MicState,
-    /// Once-per-event camera degradation notice (Batch 13 / audit P17 /
-    /// PRD §41 movie-first policy). Set when the ladder downgrades or
+    /// Once-per-event camera degradation notice
+    /// (PRD §41 movie-first policy). Set when the ladder downgrades or
     /// disables the camera to protect movie continuity; cleared by the
     /// frontend consumer after display. None = nothing to show.
     pub camera_notice: Option<String>,
@@ -460,11 +460,11 @@ struct AppRuntimeState {
     #[allow(dead_code)]
     peer_readiness: Option<ParticipantReadiness>,
     media: Option<MediaManifest>,
-    /// Batch 18 (P13): the host's local media path. The play gate
+    /// the host's local media path. The play gate
     /// re-checks existence — a moved/renamed file fires the modeled
     /// MissingLocalFile plan (AskHostToLocateFile, §29 honest error).
     local_media_path: Option<String>,
-    /// Batch 19 (P10/D3-B): per-provider Provider Shared diagnostic
+    /// per-provider Provider Shared diagnostic
     /// attempt counts — the §69 failure policy needs the retry state.
     provider_shared_attempts: std::collections::HashMap<String, u8>,
     transfer: Option<TransferProgress>,
@@ -506,7 +506,7 @@ struct AppRuntimeState {
     pending_operation_execute_at_us: u64,
     /// Wall-clock (epoch ms) reading taken together with the monotonic
     /// reading at state init — lets snapshots project a host-monotonic
-    /// deadline into wall ms for UI display (AGENTS §16: execution itself
+    /// deadline into wall ms for UI display (§16: execution itself
     /// stays on the monotonic clock).
     pending_operation_wall_anchor_ms: u64,
     pending_operation_wall_anchor_mono_us: u64,
@@ -532,12 +532,12 @@ struct AppRuntimeState {
     /// Last peer request routed to the host under Shared Controls (guest side,
     /// for ControlDeny surfacing).
     pending_guest_request_id: Option<String>,
-    /// Batch 16 (§56): schedule id the guest most recently accepted /
+    /// (§56): schedule id the guest most recently accepted
     /// received, awaiting the host's echo before clearing.
     pending_guest_schedule: Option<String>,
     /// §52: the media awaiting a retention decision once the party ends.
     retention_prompt: Option<crate::storage::sqlite::StoredCacheEntry>,
-    /// Batch 16 (§57): latest host preload progress observed for the
+    /// (§57): latest host preload progress observed for the
     /// newest schedule (state string + 0..1 progress) — feeds the Home
     /// "Upcoming" card.
     pending_preload_state: Option<(String, f64)>,
@@ -569,10 +569,10 @@ struct AppRuntimeState {
     // ── M8: Automatic failure watchers ──────────────────────────────────
     /// Background task monitoring transfer progress for stalls.
     transfer_stall_watcher_task: Option<tokio::task::JoinHandle<()>>,
-    /// Batch 18 (P13): session-liveness watcher for the managed Chrome
+    /// session-liveness watcher for the managed Chrome
     /// (crash → ChromeCrash failure event → relaunch + readiness plan).
     chrome_crash_watcher_task: Option<tokio::task::JoinHandle<()>>,
-    /// Batch 18 (P13): player-failure watcher (sticky MP-MEDIA-001 →
+    /// player-failure watcher (sticky MP-MEDIA-001 →
     /// PlayerFailure failure event → reopen + readiness plan).
     player_failure_watcher_task: Option<tokio::task::JoinHandle<()>>,
     /// Guest-only authenticated reconnect loop. Exactly one may own a party.
@@ -582,7 +582,7 @@ struct AppRuntimeState {
     /// Guest periodic BUFFER_STATUS reporter (PROTOCOL_SPEC §28 / MASTER_PRD
     /// §21: report every ~500 ms while Playing). Exactly one may exist.
     buffer_status_task: Option<tokio::task::JoinHandle<()>>,
-    /// Batch 14: Provider Sync watch worker — polls the provider's own
+    /// Provider Sync watch worker — polls the provider's own
     /// player (position + buffer) over CDP and feeds the coordinator
     /// (PLAYER_STATE / BUFFER_LOW equivalents). Exactly one may exist.
     provider_watch_task: Option<tokio::task::JoinHandle<()>>,
@@ -600,14 +600,14 @@ struct AppRuntimeState {
     // ── M6: Managed Chrome session ownership ────────────────────────────
     /// Owned Chrome child process (previously leaked via forget).
     chrome_session: Option<crate::providers::chrome::ManagedChromeSession>,
-    // ── Batch 13: adaptive camera ladder ────────────────────────────────
+    // ── adaptive camera ladder ────────────────────────────────
     /// Monotonic timestamp of the last camera tier CHANGE applied by the
     /// ladder. Flapping protection: a minimum dwell between changes (see
     /// CAMERA_TIER_MIN_DWELL_MS) keeps a jittery goodput estimate from
     /// oscillating the encoder settings.
     camera_tier_changed_at: Option<std::time::Instant>,
     /// Last camera tier reported in a degradation notice. The
-    /// once-per-event degradation notice (audit P17 / PRD §41) fires on
+    /// once-per-event degradation notice (PRD §41) fires on
     /// each NEW downgrade event, not on every evaluation tick.
     camera_notice_tier: Option<crate::call::CameraTier>,
 }
@@ -1015,11 +1015,11 @@ impl AppRuntime {
         self.lock().local_participant.display_name = display_name.to_string();
     }
 
-    /// Batch 19 (P10 / D3-B): run the Provider Shared diagnostic for one
+    /// run the Provider Shared diagnostic for one
     /// provider on THIS device. The ffmpeg-CLI bridge (V1 mechanism per
     /// the plan) captures a 30 s sample and classifies it with the
     /// existing black-frame/static detector; the outcome is persisted
-    /// (AGENTS §38 — empirical, per-device) and the attempt count drives
+    /// (§38 — empirical, per-device) and the attempt count drives
     /// the §69 failure policy: ONE retry, then the explicit Sync Mode
     /// offer. Never a silent switch (§29).
     pub fn run_provider_shared_diagnostic(
@@ -1104,7 +1104,7 @@ impl AppRuntime {
         Ok(stored)
     }
 
-    /// Batch 19: the persisted per-provider diagnostics (empirical
+    /// the persisted per-provider diagnostics (empirical
     /// classification records for the Settings surface).
     pub fn list_provider_diagnostics(
         &self,
@@ -1124,7 +1124,7 @@ impl AppRuntime {
         self.spawn_chrome_crash_watcher();
     }
 
-    /// Batch 18 (P13): poll managed-Chrome session liveness. When the child
+    /// poll managed-Chrome session liveness. When the child
     /// dies mid-session (a real crash, not our graceful close — that takes
     /// the session out of state first), fire ChromeCrash so the modeled
     /// recovery plan runs: relaunch + readiness requirement, playback
@@ -1166,7 +1166,7 @@ impl AppRuntime {
         }
     }
 
-    /// Batch 18 (P13): poll the player snapshot for a sticky failure. The
+    /// poll the player snapshot for a sticky failure. The
     /// player module already surfaces honest MP-MEDIA-001 diagnostics; the
     /// watcher promotes a sticky error to the PlayerFailure recovery plan
     /// (reopen player + require readiness) so both sides pause (§14)
@@ -1230,7 +1230,7 @@ impl AppRuntime {
         let cdp_port = session.plan.cdp_port;
         let mut state = self.lock();
         state.chrome_session = Some(session);
-        // Batch 14: the provider browser is the room media — start the
+        // the provider browser is the room media — start the
         // position/buffer watch worker (idempotent replace).
         drop(state);
         self.spawn_provider_watch_worker();
@@ -1408,7 +1408,7 @@ impl AppRuntime {
     /// launching a new browser. Validates readiness before allowing the
     /// transition. The caller must have already created the room.
     pub fn attach_launched_provider(&self, provider_id: String, url: String) -> AppSnapshot {
-        // Batch 14: (re)attach the watch worker for the reused session.
+        // (re)attach the watch worker for the reused session.
         self.spawn_provider_watch_worker();
         let mut state = self.lock();
         state.provider.mode = "PROVIDER_SYNC".to_string();
@@ -1595,7 +1595,7 @@ impl AppRuntime {
         db.list_schedules().map_err(|e| format!("MP-STORE-001 {e}"))
     }
 
-    /// Batch 16 (§55): host creates a schedule AND broadcasts it so the
+    /// (§55): host creates a schedule AND broadcasts it so the
     /// guest persists it + registers reminders (§56). Runs the canonical
     /// validations from `create_schedule`, then wires the wire event.
     pub fn create_and_broadcast_schedule(
@@ -1628,7 +1628,7 @@ impl AppRuntime {
         Ok(schedule_id)
     }
 
-    /// Batch 16 (§56): guest acknowledges a received schedule. The guest
+    /// (§56): guest acknowledges a received schedule. The guest
     /// persists on ScheduleCreate (apply_peer_event); this sends the
     /// acceptance to the host, whose echo clears the pending marker.
     pub fn guest_accept_schedule(&self, schedule_id: &str, accepted: bool) -> AppSnapshot {
@@ -1652,8 +1652,8 @@ impl AppRuntime {
         self.lock().pending_preload_state.clone()
     }
 
-    /// Batch 16 (§55): update media AND broadcast so the guest's persisted
-    /// copy stays truthful. Host-authoritative (AGENTS §15).
+    /// (§55): update media AND broadcast so the guest's persisted
+    /// copy stays truthful. Host-authoritative (§15).
     pub fn update_and_broadcast_schedule_media(
         &self,
         schedule_id: &str,
@@ -1675,7 +1675,7 @@ impl AppRuntime {
         Ok(())
     }
 
-    /// Batch 16 (§56): cancel AND broadcast — the guest marks its copy
+    /// (§56): cancel AND broadcast — the guest marks its copy
     /// Cancelled so no reminder ever fires for a dead schedule.
     pub fn cancel_and_broadcast_schedule(&self, schedule_id: &str) -> Result<(), String> {
         let mut state = self.lock();
@@ -1856,7 +1856,7 @@ impl AppRuntime {
                                     schedule.media_id
                                 ),
                             );
-                            // Batch 16 (§57): broadcast the preload start so
+                            // (§57): broadcast the preload start so
                             // the guest's Home Upcoming card flips to
                             // "Preload 0%". Progress updates continue from
                             // the transfer path.
@@ -2239,7 +2239,7 @@ impl AppRuntime {
         let identity = self.inner.identity();
         let credentials = RoomCredentials::generate();
 
-        // Batch 18 (P13): remember the local path for the file-moved gate.
+        // remember the local path for the file-moved gate.
         self.lock().local_media_path = media_path
             .as_ref()
             .map(|p| p.trim().to_string())
@@ -2433,7 +2433,7 @@ impl AppRuntime {
         // no bytes are received for 30 seconds and fires TransferInterrupted.
         self.spawn_transfer_stall_watcher();
 
-        // Batch 18 (P13): the player-failure watcher promotes a sticky
+        // the player-failure watcher promotes a sticky
         // MP-MEDIA-001 to the PlayerFailure recovery plan.
         self.spawn_player_failure_watcher();
 
@@ -2808,7 +2808,7 @@ impl AppRuntime {
                 self.inner.emit(snapshot);
                 let _ = quality;
             }
-            // Batch 16 (§56): the guest accepted the schedule. Mark the
+            // (§56): the guest accepted the schedule. Mark the
             // stored schedule Accepted so the host's Home Upcoming card and
             // the scheduler stop treating it as pending confirmation.
             QuicHostEvent::GuestScheduleAccept {
@@ -2908,7 +2908,7 @@ impl AppRuntime {
             sync_room_snapshot(&mut state);
             let snapshot = snapshot_from_state(&state);
             drop(state);
-            // Batch 14: PROVIDER_SYNC rooms drive the provider browser.
+            // PROVIDER_SYNC rooms drive the provider browser.
             runtime.dispatch_provider_commit("PLAY", target);
             runtime.inner.emit(snapshot);
         });
@@ -2978,7 +2978,7 @@ impl AppRuntime {
             sync_room_snapshot(&mut state);
             let snapshot = snapshot_from_state(&state);
             drop(state);
-            // Batch 14: PROVIDER_SYNC rooms drive the provider browser.
+            // PROVIDER_SYNC rooms drive the provider browser.
             runtime.dispatch_provider_commit("PAUSE", target);
             runtime.inner.emit(snapshot);
         });
@@ -3046,7 +3046,7 @@ impl AppRuntime {
                 sync_room_snapshot(&mut state);
                 let snapshot = snapshot_from_state(&state);
                 drop(state);
-                // Batch 14: PROVIDER_SYNC rooms drive the provider browser.
+                // PROVIDER_SYNC rooms drive the provider browser.
                 runtime.dispatch_provider_commit("SEEK", target);
                 runtime.inner.emit(snapshot);
             }
@@ -3148,7 +3148,7 @@ impl AppRuntime {
         }
     }
 
-    /// M4+/Batch 10: periodic guest BUFFER_STATUS reporter. PROTOCOL_SPEC §28
+    /// M4+/periodic guest BUFFER_STATUS reporter. PROTOCOL_SPEC §28
     /// and MASTER_PRD §21 require the guest to report its buffer status every
     /// ~500 ms while the room is Playing. This worker owns that cadence; the
     /// transition-triggered reports in the player event loop stay unchanged.
@@ -3199,7 +3199,7 @@ impl AppRuntime {
                 // report_buffer_status picks up the CURRENT client under its
                 // own lock and relays over QUIC (guest path).
                 runtime.report_buffer_status(position_ms, headroom_ms, stalled);
-                // Batch 13: every observation tick also re-evaluates the
+                // every observation tick also re-evaluates the
                 // camera ladder with the fresh buffer/goodput inputs
                 // (movie-first degradation, PRD §41).
                 runtime.evaluate_camera_ladder();
@@ -3353,7 +3353,7 @@ impl AppRuntime {
         state.pending_operation_id = None;
         state.pending_operation_kind = None;
         state.commit_scheduled_for = None;
-        // M8/Batch 10: Wire through the proper recovery system so
+        // M8/Wire through the proper recovery system so
         // last_recovery is surfaced to the UI and the full RecoveryPlan is
         // recorded. The event is role-aware: the guest's peer loss is a
         // HOST crash, the host's peer loss is a GUEST crash. Both use the
@@ -3390,7 +3390,7 @@ impl AppRuntime {
         }
     }
 
-    /// Batch 16 test seam: the runtime's Arc<RuntimeInner> for direct
+    /// test seam: the runtime's Arc<RuntimeInner> for direct
     /// event delivery in tests.
     #[cfg(test)]
     #[allow(clippy::type_complexity)]
@@ -3398,7 +3398,7 @@ impl AppRuntime {
         std::sync::Arc::clone(&self.inner)
     }
 
-    /// Batch 16 test seam: deliver a guest-side peer event directly.
+    /// test seam: deliver a guest-side peer event directly.
     #[cfg(test)]
     fn apply_peer_event_pub(
         inner: &std::sync::Arc<RuntimeInner>,
@@ -3408,7 +3408,7 @@ impl AppRuntime {
         Self::apply_peer_event(inner, &env, event);
     }
 
-    /// Batch 16 test seam: deliver a host-side QUIC event directly.
+    /// test seam: deliver a host-side QUIC event directly.
     #[cfg(test)]
     fn apply_host_event_pub(inner: &std::sync::Arc<RuntimeInner>, event: QuicHostEvent) {
         // apply_host_event is a &self method; reconstruct via from_inner.
@@ -3427,7 +3427,7 @@ impl AppRuntime {
         let snapshot = {
             let mut state = inner.lock();
 
-            // §10 / AGENTS.md §10: an event envelope from another room must
+            // §10: an event envelope from another room must
             // never be applied, even though the QUIC layer already checked
             // the version and room presence. Host-side local broadcasts
             // (sender == self) skip this because the host trusts its own
@@ -3460,7 +3460,7 @@ impl AppRuntime {
             // The host orchestrates its own protocol operations directly
             // (on_guest_*_ready / host_*); the host self-subscriber must NOT
             // re-apply its own PREPARE/COMMIT broadcasts as if it were the
-            // receiving peer. Batch 12: CallSignal joins this list — the
+            // receiving peer. CallSignal joins this list — the
             // host's own relayed signals would otherwise be re-validated
             // against the same ledger it was validated in (duplicate-offer
             // MP-CALL-002) and re-appended to call_signals. The same guard
@@ -3569,7 +3569,7 @@ impl AppRuntime {
                         sync_room_snapshot(&mut state);
                         let snapshot = snapshot_from_state(&state);
                         drop(state);
-                        // Batch 14: PROVIDER_SYNC rooms drive the provider
+                        // PROVIDER_SYNC rooms drive the provider
                         // browser with the same canonical commit.
                         Self::from_inner(&inner_for_task)
                             .dispatch_provider_commit("PLAY", target_position_ms);
@@ -3642,7 +3642,7 @@ impl AppRuntime {
                         sync_room_snapshot(&mut state);
                         let snapshot = snapshot_from_state(&state);
                         drop(state);
-                        // Batch 14: PROVIDER_SYNC rooms drive the provider
+                        // PROVIDER_SYNC rooms drive the provider
                         // browser with the same canonical commit.
                         Self::from_inner(&inner_for_task)
                             .dispatch_provider_commit("PAUSE", target_position_ms);
@@ -3715,7 +3715,7 @@ impl AppRuntime {
                         sync_room_snapshot(&mut state);
                         let snapshot = snapshot_from_state(&state);
                         drop(state);
-                        // Batch 14: PROVIDER_SYNC rooms drive the provider
+                        // PROVIDER_SYNC rooms drive the provider
                         // browser with the same canonical commit.
                         Self::from_inner(&inner_for_task)
                             .dispatch_provider_commit("SEEK", target_position_ms);
@@ -3759,7 +3759,7 @@ impl AppRuntime {
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .room_state;
                     state.room_state = room_state;
-                    // Batch 13: fresh guest buffer observation → camera
+                    // fresh guest buffer observation → camera
                     // ladder re-evaluation (movie-first, PRD §41).
                     evaluate_camera_ladder_locked(&mut state);
                     sync_room_snapshot(&mut state);
@@ -3771,7 +3771,7 @@ impl AppRuntime {
                     // window while the whole file is still transferring.
                     state.buffer.percent = transfer_percent_for_state(&state);
                     state.buffer.guest_buffer_ahead_ms = buffer_ahead_ms;
-                    // Batch 13: recovery is an upgrade-leaning observation —
+                    // recovery is an upgrade-leaning observation —
                     // re-evaluate the camera ladder with the fresh buffer.
                     evaluate_camera_ladder_locked(&mut state);
                     // PROTOCOL_SPEC §30: BUFFER_RECOVERED does NOT auto-resume.
@@ -3950,11 +3950,11 @@ impl AppRuntime {
                         }
                     }
                 }
-                // ── Batch 16 (P8, §55–§57): scheduling on the guest ─────
+                // ── scheduling on the guest ─────
                 // The guest persists the schedule locally (so reminders fire
                 // even if the host app closes) and registers notifications,
                 // exactly as PROTOCOL_SPEC §56 requires. Wall-clock UTC is
-                // the legal clock domain for scheduling (§16 AGENTS).
+                // the legal clock domain for scheduling (§16).
                 QuicServerEvent::ScheduleCreate {
                     schedule_id,
                     scheduled_start_utc_ms,
@@ -4128,7 +4128,7 @@ impl AppRuntime {
             {
                 return snapshot_from_state(&state);
             }
-            // Batch 14 readiness gate (audit P3): a Provider Sync room
+            // readiness gate: a Provider Sync room
             // must not start the play protocol until the provider's own
             // page reports playback-ready media over CDP. Starting the
             // protocol on an unready provider would commit both sides
@@ -4153,7 +4153,7 @@ impl AppRuntime {
             if state.pending_operation_id.is_some() {
                 return snapshot_from_state(&state);
             }
-            // Batch 18 (P13): the local media file may have been moved or
+            // the local media file may have been moved or
             // renamed since the party started. An honest check before the
             // play protocol — never start a play that is doomed (§29).
             if let Some(path) = state.local_media_path.clone() {
@@ -4608,7 +4608,7 @@ impl AppRuntime {
         }
     }
 
-    /// Batch 14 (audit P3): Provider Sync watch worker. Polls the
+    /// Provider Sync watch worker. Polls the
     /// provider's own HTML5 player over CDP (position + buffered-ahead)
     /// while a provider-mode room is Playing, and feeds the readings into
     /// the coordinator — the provider-side equivalents of the guest
@@ -4617,7 +4617,7 @@ impl AppRuntime {
     /// - position → `state.sync.position_ms` (the host's own media clock in
     ///   PROVIDER_SYNC mode IS the provider player)
     /// - buffered-ahead < 3 s (PROTOCOL buffer gate) → strict-sync pause
-    ///   via the coordinator's `buffer_low` (AGENTS §14: the host stops
+    ///   via the coordinator's `buffer_low` (§14: the host stops
     ///   when the movie source cannot continue)
     /// - player gone (no media element / browser closed) → honest
     ///   MP-PROVIDER-003 error + strict pause (no silent fallback)
@@ -4706,7 +4706,7 @@ impl AppRuntime {
                             if recovery
                                 == crate::providers::sync::ProviderRecoveryAction::StrictGlobalPause
                             {
-                                // Strict sync (AGENTS §14): the provider
+                                // Strict sync (§14): the provider
                                 // source cannot continue → the room pauses.
                                 let _ = state
                                     .sync_coordinator
@@ -4747,12 +4747,12 @@ impl AppRuntime {
         }
     }
 
-    // ── Batch 14: Provider Sync canonical-commit dispatch (audit P3) ──────
+    // ── Provider Sync canonical-commit dispatch ──────
 
     /// True when the room's media lives in the managed provider browser
     /// (not the local mpv player) — canonical commits must drive the
     /// provider adapter over CDP. GENERIC_LINK rooms use the same managed
-    /// browser; SHARED mode remains experimental/blocked (AGENTS §30).
+    /// browser; SHARED mode remains experimental/blocked (§30).
     fn provider_browser_is_media(state: &AppRuntimeState) -> bool {
         matches!(
             state.provider.mode.as_str(),
@@ -4760,15 +4760,15 @@ impl AppRuntime {
         )
     }
 
-    /// Batch 14: dispatch a canonical commit to the live provider browser
+    /// dispatch a canonical commit to the live provider browser
     /// via its adapter (CDP play/pause/seek). The coordinator stays the
-    /// single authority (AGENTS §15): only canonical commits reach this —
+    /// single authority (§15): only canonical commits reach this —
     /// guest CONTROL_REQUESTs are already normalized into host canonical
     /// operations upstream.
     ///
     /// CDP is blocking TCP: the session is moved OUT of the state lock
     /// (into a spawned task) so a slow browser never freezes the runtime.
-    /// Failures surface honestly (MP-PROVIDER-003/004, AGENTS §29) — no
+    /// Failures surface honestly (MP-PROVIDER-003/004, §29) — no
     /// silent fallback to any other media mode.
     /// Private constructor from the shared inner: lets the static event
     /// loop arms (which only hold `&Arc<RuntimeInner>`) call the runtime's
@@ -4868,7 +4868,7 @@ impl AppRuntime {
         });
     }
 
-    /// Batch 14: surface a provider command failure honestly (no silent
+    /// surface a provider command failure honestly (no silent
     /// fallback): sets the provider snapshot to Error with the stable
     /// MP-PROVIDER code, mirrors the code into the room error field, and
     /// emits the snapshot so the UI reflects the failure immediately.
@@ -4883,7 +4883,7 @@ impl AppRuntime {
             state.provider.state = description;
             state.error = Some(code.to_string());
             // A dead provider browser is a strict-sync pause condition
-            // (AGENTS §14): both sides stop when the media source fails.
+            // (§14): both sides stop when the media source fails.
             if state.room_state == RoomState::Playing {
                 let _ = state
                     .sync_coordinator
@@ -5712,12 +5712,12 @@ impl AppRuntime {
     }
 }
 
-/// Batch 13 (audit P17, PRD §41, AGENTS §37): minimum time between camera
+/// (PRD §41): minimum time between camera
 /// tier changes. The ladder's inputs (goodput estimate, guest buffer) are
 /// inherently jittery; without a dwell the tier would oscillate and the
 /// encoder would thrash. One second of stability is required before the
 /// ladder may move the tier again.
-/// Batch 16: send a ServerEvent through the host's event broadcast channel
+/// send a ServerEvent through the host's event broadcast channel
 /// using the coordinator's canonical seq counter — the same pattern
 /// `send_host_event` uses for CoordinatorStateUpdate. Safe no-op when no
 /// host session is active.
@@ -5763,16 +5763,16 @@ const CAMERA_TIER_MIN_DWELL_MS: u64 = 1_000;
 /// Fallback movie bitrate estimate (bps) when no manifest/duration is
 /// available yet. 5 Mbps matches the audit's 5 Mbps movie-priority
 /// verification scenario and a typical HD stream; overestimating the
-/// movie keeps the camera conservative (movie-first, AGENTS §37).
+/// movie keeps the camera conservative (movie-first, §37).
 const FALLBACK_MOVIE_BITRATE_BPS: u64 = 5_000_000;
 
-/// Batch 14: provider player poll cadence. 1 s balances CDP cost against
+/// provider player poll cadence. 1 s balances CDP cost against
 /// the 3 s buffer gate the recovery policy applies (several consecutive
 /// low readings are needed before a strict pause triggers via
 /// `recovery_action`, so a single transient cannot pause the room).
 const PROVIDER_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Batch 13: adaptive camera ladder evaluation on an already-held state
+/// adaptive camera ladder evaluation on an already-held state
 /// guard. Same policy as `AppRuntime::evaluate_camera_ladder` (which see);
 /// this form exists so the host event-loop arms — which hold the lock for
 /// the whole snapshot build — can evaluate inline without re-entrant
@@ -5843,7 +5843,7 @@ fn evaluate_camera_ladder_locked(state: &mut AppRuntimeState) {
 }
 
 impl AppRuntime {
-    /// Batch 13: adaptive camera ladder evaluation. Reads the live
+    /// adaptive camera ladder evaluation. Reads the live
     /// feedback (measured goodput, RTT, guest buffer ahead, movie bitrate
     /// estimate) and applies the pure `recommend_camera_state` policy
     /// (movie-first: the camera tier drops before movie quality, PRD §41).
@@ -6122,7 +6122,7 @@ impl AppRuntime {
             {
                 let mut state = self.lock();
                 state.network.goodput_bps = goodput_bps;
-                // Batch 13: first measured goodput → camera ladder baseline.
+                // first measured goodput → camera ladder baseline.
                 evaluate_camera_ladder_locked(&mut state);
             }
         }
@@ -6321,7 +6321,7 @@ impl AppRuntime {
                                             goodput_bps,
                                         ));
                                         state.buffer.percent = Self::transfer_percent(&state);
-                                        // Batch 13: fresh goodput sample →
+                                        // fresh goodput sample →
                                         // camera ladder re-evaluation
                                         // (movie-first, PRD §41).
                                         evaluate_camera_ladder_locked(&mut state);
@@ -6551,10 +6551,10 @@ impl crate::scheduling::preload::PreloadExecutor for AppRuntimePreloadExecutor {
 
 // ── Snapshot builder & recovery helpers (unchanged) ───────────────────────────
 
-/// Batch 13: estimated movie bitrate (bps) = file bytes × 8 / duration.
+/// estimated movie bitrate (bps) = file bytes × 8 / duration.
 /// Falls back to a conservative 5 Mbps when the manifest or duration is
 /// unknown (typical HD stream; movie-first means erring high keeps the
-/// camera conservative, AGENTS §37).
+/// camera conservative, §37).
 fn movie_bitrate_estimate_bps(state: &AppRuntimeState) -> u64 {
     if let (Some(manifest), Some(duration_ms)) = (&state.media, state.player_snapshot.duration_ms) {
         if duration_ms > 0 && manifest.file_size > 0 {
@@ -6653,7 +6653,7 @@ fn snapshot_from_state(state: &AppRuntimeState) -> AppSnapshot {
 }
 
 /// Project a host-monotonic microsecond deadline into wall-clock epoch ms
-/// for UI display (AGENTS §16: monotonic time still drives execution; this
+/// for UI display (§16: monotonic time still drives execution; this
 /// projection exists so the §25 Ready-Check countdown can animate from the
 /// backend-provided deadline instead of a frontend-invented timer).
 fn project_host_mono_to_wall_ms(
@@ -7528,7 +7528,7 @@ mod tests {
         assert_eq!(snapshot.call_signals[0].signal_type, "OFFER");
     }
 
-    /// Batch 12 / PROTOCOL_SPEC §52: a CALL_SIGNAL body above 64 KiB must
+    /// PROTOCOL_SPEC §52: a CALL_SIGNAL body above 64 KiB must
     /// be rejected by validate_signal (the transport still allows it — it
     /// is under §5's 256 KiB — so this is the call subsystem's own gate).
     #[test]
@@ -7564,7 +7564,7 @@ mod tests {
         assert!(crate::call::validate_signal(&at_limit, &mut ledger).is_ok());
     }
 
-    /// Batch 12: the host self-subscriber must not re-apply its own relayed
+    /// the host self-subscriber must not re-apply its own relayed
     /// CallSignal (duplicate-offer MP-CALL-002 + double append), and a guest
     /// must not re-apply its own signal echoed back by the host broadcast.
     /// Both cases are `sender == local id` envelopes.
@@ -7616,7 +7616,7 @@ mod tests {
         );
     }
 
-    /// Batch 12 negative control: a CallSignal from the PEER still applies
+    /// negative control: a CallSignal from the PEER still applies
     /// (the guard must not swallow genuine remote signals).
     #[test]
     fn call_signal_from_peer_is_applied() {
@@ -7862,7 +7862,7 @@ mod tests {
         );
     }
 
-    /// §25 (Batch 17): request_play_countdown schedules the canonical play
+    /// §25: request_play_countdown schedules the canonical play
     /// operation with a 3-second countdown lead and exposes the deadline
     /// on the snapshot so the frontend animates from backend time.
     #[test]
@@ -8398,7 +8398,7 @@ mod tests {
         );
     }
 
-    // ── Batch 9B: Local Perfect production-closure focused tests ──────────────
+    // ── Local Perfect production-closure focused tests ──────────────
 
     /// Test double that records every playback-rate and seek command the
     /// runtime issues, so drift corrections can be asserted without a live
@@ -8694,7 +8694,7 @@ mod tests {
         }
     }
 
-    /// §40 (Batch 18): Continue Without Guest is host-only — the guest
+    /// §40: Continue Without Guest is host-only — the guest
     /// gets MP-CTRL-002 and no abandonment flag is set.
     #[test]
     fn continue_without_guest_is_host_only() {
@@ -8723,7 +8723,7 @@ mod tests {
         );
     }
 
-    /// §40 (Batch 18): the host's Continue Without Guest sets the
+    /// §40: the host's Continue Without Guest sets the
     /// coordinator override and records the explicit user decision in
     /// last_recovery (§29 — no silent mode change).
     #[test]
@@ -8755,7 +8755,7 @@ mod tests {
         );
     }
 
-    /// §40 (Batch 18): an abandoned guest satisfies all_ready only through
+    /// §40: an abandoned guest satisfies all_ready only through
     /// the explicit override — host readiness still matters.
     #[test]
     fn abandoned_guest_overrides_readiness_but_not_host() {
@@ -8785,7 +8785,7 @@ mod tests {
         assert!(!all_ready_without);
     }
 
-    /// Batch 18 (P13): a moved/renamed local media file fails host_play
+    /// a moved/renamed local media file fails host_play
     /// with the honest MP-MEDIA-002 + the AskHostToLocateFile plan — the
     /// play protocol never starts against a missing file.
     #[test]
@@ -8949,7 +8949,7 @@ fn local_device_toggles_never_mutate_peer_snapshot() {
     );
 }
 
-// ── Batch 13: adaptive camera ladder runtime wiring (audit P17 / PRD §41) ───
+// ── adaptive camera ladder runtime wiring (PRD §41) ───
 
 #[cfg(test)]
 mod camera_ladder_tests {
@@ -9134,7 +9134,7 @@ mod camera_ladder_tests {
     #[test]
     fn camera_state_serializes_camel_case_for_the_frontend_contract() {
         // The TS snapshot type declares targetBitrateBps/tier; the serde
-        // must match (this was silently snake_case before Batch 13).
+        // must match (this was silently snake_case before the camelCase fix).
         let json = serde_json::to_string(&CameraState::tier_b_enabled()).unwrap();
         assert!(json.contains("\"targetBitrateBps\""));
         assert!(json.contains("\"tier\":\"B\""));
@@ -9142,7 +9142,7 @@ mod camera_ladder_tests {
     }
 }
 
-// ── Batch 14: Provider Sync runtime dispatch tests (audit P3) ────────────────
+// ── Provider Sync runtime dispatch tests ────────────────
 
 #[cfg(test)]
 mod provider_dispatch_tests {
@@ -9163,7 +9163,7 @@ mod provider_dispatch_tests {
         runtime
     }
 
-    /// Batch 14 readiness gate: host_play must refuse to start the play
+    /// readiness gate: host_play must refuse to start the play
     /// protocol until the provider's own page reports playback-ready
     /// media. Honest MP-PROVIDER error, never a silent local fallback.
     #[test]
@@ -9216,7 +9216,7 @@ mod provider_dispatch_tests {
         );
     }
 
-    /// No silent fallback (AGENTS §29): a failed provider command must
+    /// No silent fallback (§29): a failed provider command must
     /// surface MP-PROVIDER-003 and strict-pause a Playing room, never
     /// pretend local playback continued.
     #[test]
@@ -9243,7 +9243,7 @@ mod provider_dispatch_tests {
             "error: {:?}",
             state.error
         );
-        // Strict sync (AGENTS §14): the room cannot stay Playing when
+        // Strict sync (§14): the room cannot stay Playing when
         // the movie source died.
         assert_eq!(
             state.room_state,
@@ -9253,7 +9253,7 @@ mod provider_dispatch_tests {
     }
 }
 
-// ── Batch 16: scheduling wire + persistence tests (audit P8/P14) ────────────
+// ── scheduling wire + persistence tests ────────────
 
 #[cfg(test)]
 mod scheduling_tests {
@@ -9360,7 +9360,7 @@ mod scheduling_tests {
         );
     }
 
-    /// Honest failure (AGENTS §29): a schedule arriving with no DB surfaces
+    /// Honest failure (§29): a schedule arriving with no DB surfaces
     /// MP-STORE-001 — never a silent pretend-persist.
     #[test]
     fn schedule_create_without_db_surfaces_honest_error() {

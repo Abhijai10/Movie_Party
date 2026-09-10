@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-02-14
-**Author:** Batch 11 (protocol truth & ADR foundation)
+**Author:** Movie Party maintainers
 **Supersedes:** PROTOCOL_SPEC §11 registry (as used by code)
 **Superseded by:** N/A
 
@@ -10,14 +10,14 @@
 
 # 1. CONTEXT
 
-- Current phase: V1 completion (batches 11+).
+- Current phase: V1 completion.
 - Affected subsystem: `src-tauri/src/protocol/mod.rs` (`MessageType` enum).
 - Expected behavior: PROTOCOL_SPEC §11 defines one numeric ID registry with
   reserved ranges (connection 1–6, clock 20–22, room 40–47, media 60–66,
   playback 80–88, shared-controls 100–103, transfer 120–125, network 140–141,
   call 160–163, social 180–181, scheduling 200–204, provider 220–223, error
   250) and §68 forbids redefining a registered ID.
-- Observed behavior: the pre-Batch-11 `MessageType` enum had only 15
+- Observed behavior: the earlier `MessageType` enum had only 15
   variants and — critically — three ID collisions with the spec's
   scheduling range: `ReadyState = 200`, `BufferStatus = 201`,
   `ControlRequest = 202`, colliding with the spec's own scheduling IDs
@@ -32,14 +32,13 @@
 ```text
 §68: A registered message ID must never be redefined.
 §11: The registry is the single source of truth for numeric IDs.
-Audit finding P1/P11: registry drift + unused constants must be fixed.
+Registry drift + unused constants must be fixed.
 ```
 
 Relevant documents:
 
 ```
 PROTOCOL_SPEC.md §11 (registry), §68 (ID stability)
-GLM audit P11
 ```
 
 # 3. EVIDENCE
@@ -76,7 +75,7 @@ Unknown:
   locked by the spec; the connection-scoped variants must move instead.
 - The wire format (ADR-0001) does not carry these IDs in V1, so moving them
   is zero-risk on the wire but must be recorded for future encodings.
-- No new message types may be invented (AGENTS §9): only spec-registered IDs
+- No new message types may be invented: only spec-registered IDs
   may appear.
 
 # 6. OPTIONS CONSIDERED
@@ -128,12 +127,12 @@ Risks: minimal — gated by full test suite.
 Impact:
 
 ```
-Low-Medium (one module + tests; done in Batch 11)
+Low-Medium (one module + tests)
 ```
 
 ## Option C — Do nothing / delete the enum
 
-Impact: registry drift persists (audit P11), or we lose the typed registry
+Impact: registry drift persists, or we lose the typed registry
 and re-introduce the "constants not actually used" problem from the other
 side.
 
@@ -146,7 +145,7 @@ zero collisions, exclusive scheduling range. Unknown IDs are rejected by
 from_u16 (None → MP-PROTO-005-style handling upstream). Unit tests enforce
 spec parity, uniqueness, and full round-trip. The three colliding variants
 moved to their spec-assigned IDs; the wire is unaffected (ADR-0001).
-Future message types must be added to §11 first (AGENTS §9), then here.
+Future message types must be added to §11 first, then here.
 ```
 
 # 8. WHY THIS OPTION
@@ -156,7 +155,7 @@ Future message types must be added to §11 first (AGENTS §9), then here.
 - Priority 3 (security): a single validated registry prevents a future
   misrouted or double-meaning ID from becoming an attack/bug vector once
   IDs appear on any wire or tool surface.
-- Spec authority (AGENTS §9): code follows the registry, not vice versa.
+- Spec authority: code follows the registry, not vice versa.
 - Machine enforcement beats convention: the uniqueness test makes recurrence
   of the original defect impossible to merge.
 
@@ -166,7 +165,7 @@ Future message types must be added to §11 first (AGENTS §9), then here.
 
 - Registry is complete, unique, spec-exact, and test-enforced.
 - Future encodings/tooling can consume `MessageType::from_u16` safely.
-- The "constants unused" audit smell is gone — the enum is now the source
+- The "constants unused" smell is gone — the enum is now the source
   of truth the envelope metadata module uses.
 
 ## Negative
@@ -178,7 +177,7 @@ Future message types must be added to §11 first (AGENTS §9), then here.
 
 - The registry remains informational for the JSON wire (ADR-0001) until a
   decision puts numeric IDs on the wire (which would then require §11 +
-  tests, per AGENTS §9).
+  tests).
 
 # 10. AFFECTED COMPONENTS
 
@@ -186,7 +185,6 @@ Future message types must be added to §11 first (AGENTS §9), then here.
 src-tauri/src/protocol/mod.rs   (full registry rewrite + tests)
 src-tauri/src/network/quic.rs  (imports; no behavior change)
 docs/core_docs/PROTOCOL_SPEC.md (unchanged — code now matches it)
-docs/core_docs/IMPLEMENTATION_TRACKER.md
 ```
 
 # 11. PROTOCOL IMPACT
@@ -239,6 +237,5 @@ V1, rollback is compile-time-only.
 
 ```
 [x] PROTOCOL_SPEC.md      — no change needed (code now matches §11)
-[x] IMPLEMENTATION_TRACKER.md — Batch 11 entry
-[ ] MASTER_PRD.md / AGENTS.md / UI_UX_SPEC.md — none required
+[ ] MASTER_PRD.md / UI_UX_SPEC.md — none required
 ```

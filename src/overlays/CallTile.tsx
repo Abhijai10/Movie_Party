@@ -17,7 +17,7 @@ type CallTileProps = {
   remoteCameraEnabled: boolean;
   remoteMicrophoneEnabled: boolean;
   remoteConnected: boolean;
-  /** Live remote media from the cross-device session (Batch 12). */
+  /** Live remote media from the cross-device session. */
   remoteStream: MediaStream | null;
   /** Live self-view media (muted; never plays locally). */
   localStream: MediaStream | null;

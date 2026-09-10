@@ -3826,7 +3826,7 @@ input[type=range].mp-range::-webkit-slider-thumb {
   font-size: 1.55rem;
 }
 
-/* Batch 12: live remote media fills the stage; placeholder/avatar render
+/* live remote media fills the stage; placeholder/avatar render
    only when there is no wire video to show. */
 .camera-remote-video {
   grid-area: 1 / 1;

@@ -63,7 +63,7 @@ Reason:
 
 Future protocol versions may introduce compact binary encodings and/or
 numeric keys; doing so requires a protocol minor bump plus §11-first
-registry planning (AGENTS §9), and per §68 no registered ID may ever be
+registry planning, and per §68 no registered ID may ever be
 redefined.
 
 Original V1 draft locked Canonical CBOR (RFC 8949); the implementation
@@ -99,7 +99,7 @@ Any control message larger than this must be rejected:
 MP-PROTO-004 MESSAGE_TOO_LARGE
 ```
 
-Enforcement (implemented, Batch 11): the length prefix is checked against
+Enforcement (implemented): the length prefix is checked against
 the limit BEFORE any allocation on both ends — a peer advertising an
 oversized frame is rejected at the framing layer without reading the body.
 The same gate applies to locally-built frames on the send path.
