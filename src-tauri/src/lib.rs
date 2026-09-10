@@ -8,6 +8,7 @@ pub mod media;
 pub mod network;
 pub mod notifications;
 pub mod privacy;
+pub mod process;
 pub mod protocol;
 pub mod providers;
 pub mod resilience;
@@ -239,7 +240,9 @@ fn open_external_url(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let result = std::process::Command::new("open").arg(url).spawn();
     #[cfg(target_os = "windows")]
-    let result = std::process::Command::new("explorer.exe").arg(url).spawn();
+    let result = crate::process::quiet_command("explorer.exe")
+        .arg(url)
+        .spawn();
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let result: Result<std::process::Child, std::io::Error> = Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,

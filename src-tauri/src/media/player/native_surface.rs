@@ -1,9 +1,17 @@
 //! Platform-native video host management for the Cinema webview.
 //!
-//! The host is positioned behind the transparent Cinema webview. React stays
+//! The host is positioned behind the webview, which is made transparent
+//! only while a native surface is attached (Cinema playback). React stays
 //! above it for controls and overlays while libmpv renders decoded frames
 //! through its software render API into an RGBA buffer, which this module
-//! pushes onto the host's CALayer (`display_frame`).
+//! pushes onto the platform surface (CALayer on macOS, a child HWND blit
+//! on Windows).
+//!
+//! Window background policy: the webview is OPAQUE (`#05050B`, the app
+//! background) for the entire app lifetime EXCEPT while a native video
+//! surface is attached. This kills the "transparent window flash" at
+//! startup (the window paints its own background before the web content
+//! arrives) while keeping the behind-the-webview video path intact.
 
 use std::sync::{Arc, Mutex};
 
@@ -43,6 +51,59 @@ pub struct NativeVideoSurfaceState {
     inner: Arc<Mutex<Option<PlatformSurface>>>,
 }
 
+/// The app's normal webview background: opaque, the same near-black the
+/// frontend paints (`#05050B`). Applied whenever no native video surface is
+/// alive, and at window creation (tauri.conf.json).
+#[cfg(windows)]
+const OPAQUE_BACKGROUND: tauri::utils::config::Color = tauri::utils::config::Color(5, 5, 11, 255);
+
+/// Fully transparent webview background (`alpha = 0` is the only alpha
+/// WebView2 accepts; any other value is promoted to opaque white).
+#[cfg(windows)]
+const TRANSPARENT_BACKGROUND: tauri::utils::config::Color = tauri::utils::config::Color(0, 0, 0, 0);
+
+/// Make the main webview opaque (normal app background). Called after the
+/// native video surface detaches, so the window can never stay stuck
+/// transparent behind UI that expects a solid backdrop.
+fn webview_opaque(webview: &tauri::WebviewWindow) {
+    #[cfg(windows)]
+    {
+        if let Err(error) = webview.set_background_color(Some(OPAQUE_BACKGROUND)) {
+            tracing::warn!(error = %error, "could not restore the opaque window background");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // macOS: `setDrawsBackground` is restored per-surface in detach.
+        let _ = webview;
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = webview;
+    }
+}
+
+/// Make the main webview transparent so the native video surface behind it
+/// shows through the `.movie-frame` area. Called once per attach.
+fn webview_transparent(webview: &tauri::WebviewWindow) {
+    #[cfg(windows)]
+    {
+        if let Err(error) = webview.set_background_color(Some(TRANSPARENT_BACKGROUND)) {
+            tracing::warn!(error = %error, "could not make the window transparent for cinema video");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // macOS: `setDrawsBackground(false)` happens inside the attach
+        // (the WKWebView is reached through the objc bridge).
+        let _ = webview;
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = webview;
+    }
+}
+
 impl NativeVideoSurfaceState {
     pub fn attach(&self, app: &AppHandle, bounds: NativeVideoBounds) -> Result<usize, PlayerError> {
         let bounds = bounds.validate()?;
@@ -51,6 +112,13 @@ impl NativeVideoSurfaceState {
                 reason: "main webview is unavailable".to_string(),
             }
         })?;
+        let was_attached = {
+            let guard = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.is_some()
+        };
         let output = std::sync::Arc::new(Mutex::new(Err(PlayerError::NativeSurfaceUnavailable {
             reason: "native surface creation did not run".to_string(),
         })));
@@ -95,12 +163,25 @@ impl NativeVideoSurfaceState {
         let mut guard = output
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        std::mem::replace(
+        let surface_result = std::mem::replace(
             &mut *guard,
             Err(PlayerError::NativeSurfaceUnavailable {
                 reason: "native surface result was consumed".to_string(),
             }),
-        )
+        );
+        match surface_result {
+            Ok(handle) if !was_attached => {
+                webview_transparent(&webview);
+                Ok(handle)
+            }
+            Ok(handle) => Ok(handle),
+            Err(error) => {
+                // A failed attach must not leave the window transparent:
+                // there is no video surface behind the webview to show.
+                webview_opaque(&webview);
+                Err(error)
+            }
+        }
     }
 
     pub fn detach(&self, app: &AppHandle) -> Result<(), PlayerError> {
@@ -121,7 +202,9 @@ impl NativeVideoSurfaceState {
             })
             .map_err(|error| PlayerError::NativeSurfaceUnavailable {
                 reason: error.to_string(),
-            })
+            })?;
+        webview_opaque(&webview);
+        Ok(())
     }
 }
 

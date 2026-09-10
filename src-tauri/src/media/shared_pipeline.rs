@@ -66,7 +66,7 @@ pub async fn run_macos_shared_pipeline_proof(
     }
 
     run_command(
-        Command::new("ffmpeg")
+        crate::process::quiet_command("ffmpeg")
             .arg("-y")
             .arg("-loop")
             .arg("1")
@@ -93,7 +93,7 @@ pub async fn run_macos_shared_pipeline_proof(
     }
 
     run_command(
-        Command::new("ffmpeg")
+        crate::process::quiet_command("ffmpeg")
             .arg("-y")
             .arg("-i")
             .arg(&encoded)

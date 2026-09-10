@@ -96,6 +96,18 @@ export function AppShell() {
     visible: false,
     isHost: false,
   });
+  /** Seconds since mount without a snapshot — drives the honest boot
+   *  escalation when the runtime is unresponsive. */
+  const [secondsWaiting, setSecondsWaiting] = useState(0);
+  useEffect(() => {
+    if (snapshot) return;
+    const timer = window.setInterval(() => {
+      setSecondsWaiting((value) => value + 1);
+    }, 1_000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [snapshot]);
   /** Media filenames seen in snapshots, by media id — for Upcoming cards. */
   const mediaNameCache = useRef<Record<string, string>>({});
   /** §56: schedule ids the guest already answered (accepted or declined)
@@ -619,7 +631,16 @@ export function AppShell() {
   };
 
   if (!snapshot) {
-    return (
+    // Boot escalation: honest copy instead of an eternal spinner. The
+    // runtime normally answers in well under a second; anything past
+    // 8 s is a real fault the user should know about, not sit through.
+    const bootStage = secondsWaiting >= 8 ? "slow" : "starting";
+    return bootStage === "slow" ? (
+      <LoadingState
+        title="Movie Party is taking longer than usual"
+        message="The local runtime has not responded yet. If this screen stays for more than a minute, restart the app."
+      />
+    ) : (
       <LoadingState title="Starting Movie Party" message="Connecting to the local app runtime." />
     );
   }

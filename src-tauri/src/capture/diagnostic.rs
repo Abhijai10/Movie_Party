@@ -22,7 +22,6 @@
 //!   Sync Mode explicitly — no auto-restart, no silent mode switch.
 
 use std::path::PathBuf;
-use std::process::Command;
 
 use crate::capture::{
     classify_video_capture, failure_action, CaptureAvailability, CaptureFailureAction,
@@ -60,7 +59,7 @@ pub struct DiagnosticOutcome {
 
 /// Probe whether the ffmpeg CLI exists (the V1 bridge's only dependency).
 pub fn ffmpeg_present() -> bool {
-    Command::new("ffmpeg")
+    crate::process::quiet_command("ffmpeg")
         .arg("-version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -162,7 +161,7 @@ pub fn run_capture_sample(
     // signalstats writes `lavfi.signalstats.YAVG` (mean luma) per frame;
     // YMIN/YMAX spread gives the variance proxy; the changed-frame ratio is
     // derived by the caller from the stats file's frame count deltas.
-    let output = Command::new("ffmpeg")
+    let output = crate::process::quiet_command("ffmpeg")
         .arg("-y")
         .arg("-f")
         .arg("avfoundation")

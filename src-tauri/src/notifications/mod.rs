@@ -135,7 +135,7 @@ fn native_windows_notify(title: &str, body: &str) -> Result<(), String> {
          [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Movie Party').Show($toast)",
         encoded,
     );
-    let result = std::process::Command::new("powershell")
+    let result = crate::process::quiet_command("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())

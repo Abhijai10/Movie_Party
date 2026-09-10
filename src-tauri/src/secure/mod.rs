@@ -168,7 +168,7 @@ fn native_credential_manager_store(label: &str, seed: &[u8; 32]) -> Result<(), S
         label.replace('\'', "''"),
         encoded,
     );
-    let result = std::process::Command::new("powershell")
+    let result = crate::process::quiet_command("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -190,7 +190,7 @@ fn native_credential_manager_load(label: &str) -> Result<Option<[u8; 32]>, Strin
          if ($cred -and $cred.Count -gt 0) {{ $cred[0].Password }} else {{ '' }}",
         label.replace('\'', "''"),
     );
-    let output = std::process::Command::new("powershell")
+    let output = crate::process::quiet_command("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -222,7 +222,7 @@ fn native_credential_manager_delete(label: &str) -> Result<(), String> {
          if ($cred) {{ $vault.Remove($cred[0]) }}",
         label.replace('\'', "''"),
     );
-    let result = std::process::Command::new("powershell")
+    let result = crate::process::quiet_command("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())

@@ -1,4 +1,6 @@
-@import url(https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Outfit:wght@200;300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap);
+/* Self-hosted variable fonts (bundled by Vite; CSP forbids remote CSS,
+   and a remote @import also blocked first paint in the packaged app). */
+@import "./assets/fonts/fonts.css";
 *, ::before, ::after{
   --tw-border-spacing-x: 0;
   --tw-border-spacing-y: 0;
@@ -4310,6 +4312,45 @@ input[type=range].mp-range::-webkit-slider-thumb {
 
 .modal-body p {
   margin: 0;
+}
+
+/* Indeterminate bar used by LoadingState — the same motion language the
+   boot splash (index.html) used, so loading feels continuous. */
+.loading-bar {
+  width: 148px;
+  height: 2px;
+  margin: 4px auto 0;
+  border-radius: 2px;
+  background: rgba(159, 122, 234, 0.18);
+  overflow: hidden;
+}
+
+.loading-bar::after {
+  content: "";
+  display: block;
+  height: 100%;
+  width: 40%;
+  border-radius: 2px;
+  background: #9f7aea;
+  animation: mp-loading-slide 1.15s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+}
+
+@keyframes mp-loading-slide {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(290%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-bar::after {
+    animation: none;
+    transform: none;
+    width: 100%;
+    background: rgba(159, 122, 234, 0.5);
+  }
 }
 
 .action-row {

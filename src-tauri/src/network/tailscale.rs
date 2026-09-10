@@ -1,7 +1,6 @@
 use std::{net::Ipv4Addr, path::PathBuf, time::Duration};
 
 use serde::{self, Deserialize, Serialize};
-use tokio::process::Command;
 
 pub const DEFAULT_TAILSCALE_PORT: u16 = 47_821;
 
@@ -123,7 +122,7 @@ pub async fn detect_status() -> Result<TailscaleStatus, TailscaleError> {
     for executable in candidate_executables() {
         let output = tokio::time::timeout(
             Duration::from_secs(3),
-            Command::new(&executable)
+            crate::process::quiet_async_command(&executable)
                 .args(["status", "--json"])
                 .output(),
         )
@@ -300,7 +299,7 @@ pub fn open_tailscale_app() -> Result<(), TailscaleError> {
     #[cfg(not(target_os = "macos"))]
     {
         for executable in candidate_executables() {
-            match std::process::Command::new(&executable).spawn() {
+            match crate::process::quiet_command(executable.as_os_str()).spawn() {
                 Ok(_) => return Ok(()),
                 Err(_) => continue,
             }
