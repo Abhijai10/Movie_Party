@@ -223,8 +223,10 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
   };
 
   return (
-    <div className="relative w-screen h-screen overflow-hidden" data-testid="settings">
-      <SilkBackground variant="calm" />
+    <div className="relative w-screen min-h-screen overflow-y-auto" data-testid="settings">
+      <div className="fixed inset-0 pointer-events-none">
+        <SilkBackground variant="calm" />
+      </div>
       <header className="relative z-10 flex items-center justify-between px-12 pt-8">
         <button
           type="button"
@@ -237,10 +239,11 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
         <StatusIndicator state="sync" label="Strict Sync" />
       </header>
 
-      <main className="relative z-10 max-w-[1300px] mx-auto px-12 mt-4 h-[calc(100vh-120px)] grid grid-cols-12 gap-10">
-        <nav aria-label="Settings sections" className="col-span-12 lg:col-span-3">
+      <main className="relative z-10 max-w-[1300px] mx-auto px-12 mt-6 pb-20 grid grid-cols-12 gap-10 items-start">
+        <nav aria-label="Settings sections" className="col-span-12 lg:col-span-3 lg:sticky lg:top-6 self-start">
           <h1 className="font-serif-display text-white text-4xl tracking-[-0.02em]">Settings</h1>
-          <ul className="mt-8 space-y-1">
+          <div className="mt-8 rounded-2xl border border-white/10 bg-white/[0.03] p-2.5">
+            <ul className="space-y-1">
             {SECTIONS.map((item) => (
               <li key={item.id}>
                 <button
@@ -251,8 +254,8 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
                   aria-current={section === item.id}
                   className={`w-full text-left px-4 py-2.5 rounded-lg text-sm transition ${
                     section === item.id
-                      ? "bg-white/[0.07] text-white"
-                      : "text-white/55 hover:text-white hover:bg-white/[0.03]"
+                      ? "bg-white/[0.09] text-white shadow-[inset_2px_0_0_0_#9F7AEA]"
+                      : "text-white/55 hover:text-white hover:bg-white/[0.04]"
                   }`}
                 >
                   {item.label}
@@ -260,6 +263,7 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
               </li>
             ))}
           </ul>
+          </div>
         </nav>
 
         <motion.section
@@ -269,6 +273,13 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
           transition={{ duration: 0.25 }}
           className="col-span-12 lg:col-span-9 max-w-2xl"
         >
+          <h2
+            className="font-serif-display text-2xl text-white/90 tracking-tight"
+            data-testid={`settings-section-title-${section}`}
+          >
+            {SECTIONS.find((item) => item.id === section)?.label ?? "Settings"}
+          </h2>
+          <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.03] px-6 py-5">
           {section === "general" ? (
             <div data-testid="settings-general">
               <Row label="Display name">{snapshot.participants[0]?.displayName ?? "You"}</Row>
@@ -553,6 +564,7 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
               </Row>
             </div>
           ) : null}
+          </div>
         </motion.section>
       </main>
     </div>

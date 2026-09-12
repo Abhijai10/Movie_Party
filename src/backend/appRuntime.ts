@@ -249,6 +249,154 @@ export async function getTailscaleReadiness(): Promise<TailscaleReadiness> {
 
 export type TailscaleSetupAction = "INSTALL" | "OPEN_APP" | "PARTNER_HELP";
 
+// ── Friends (saved movie partners) ────────────────────────────────────────
+
+/** A selectable tailnet peer from `tailscale status`. */
+export type FriendCandidate = {
+  /** Full MagicDNS name — the stable identity key. */
+  peerKey: string;
+  displayName: string;
+  ip: string | null;
+  online: boolean;
+  /** direct | peerRelay | derpRelay | unknown | offline */
+  path: string;
+};
+
+/** A saved friend with its cached connection verification. */
+export type StoredFriend = {
+  peerKey: string;
+  displayName: string;
+  ip: string | null;
+  addedAtMs: number;
+  lastVerifiedAtMs: number | null;
+  lastPath: string | null;
+  lastLatencyMs: number | null;
+};
+
+/** Result of a real `tailscale ping` verification through the tunnel. */
+export type PeerConnectionProbe = {
+  reachable: boolean;
+  path: string | null;
+  latencyMs: number | null;
+  message: string;
+};
+
+/** tailnet_peers payload. */
+export type TailnetPeersView = {
+  candidates: FriendCandidate[];
+  saved: StoredFriend[];
+};
+
+/** Candidate → friend shape (display copy for the UI). */
+export function friendStatusFor(
+  friend: StoredFriend,
+  candidateOnline: boolean | undefined,
+): "connected" | "online" | "offline" {
+  if (friend.lastVerifiedAtMs != null) return "connected";
+  if (candidateOnline != null) return candidateOnline ? "online" : "offline";
+  return "offline";
+}
+
+/** Human copy for a friend's connection state. */
+export function friendStatusCopy(friend: StoredFriend, status: ReturnType<typeof friendStatusFor>): string {
+  if (status === "connected") {
+    const via = friend.lastPath ? ` · ${summarizePath(friend.lastPath)}` : "";
+    const ms = friend.lastLatencyMs != null ? ` · ${String(friend.lastLatencyMs)} ms` : "";
+    return `Connection verified${via}${ms}`;
+  }
+  if (status === "online") return "Online — not verified yet";
+  return "Offline";
+}
+
+/** "direct/ipv4 192.168.1.5:41641" → "direct"; "relay \"derp-3\"" → "relay". */
+export function summarizePath(path: string): string {
+  const head = path.split(/[\/ ]/)[0] ?? path;
+  return head === "relay-late" ? "relay" : head;
+}
+
+export async function tailnetPeers(): Promise<TailnetPeersView | null> {
+  try {
+    return await invoke<TailnetPeersView>("tailnet_peers");
+  } catch {
+    return null;
+  }
+}
+
+export async function tailnetPeersOrThrow(): Promise<TailnetPeersView> {
+  return invoke<TailnetPeersView>("tailnet_peers");
+}
+
+export async function addFriend(peerKey: string, displayName?: string): Promise<StoredFriend> {
+  return invoke<StoredFriend>("add_friend", {
+    peerKey,
+    displayName: displayName ?? null,
+  });
+}
+
+/** friend_invite_link payload — your shareable identity. */
+export type FriendInviteLink = {
+  /** movieparty://friend/… deep link to hand out. */
+  link: string;
+  /** Your tailnet peer key (carried inside the link payload). */
+  peerKey: string;
+  /** The display name carried in the link. */
+  displayName: string;
+};
+
+/** Your friend-invite link — the QR/link friends scan to add you. */
+export async function friendInviteLink(): Promise<FriendInviteLink> {
+  return invoke<FriendInviteLink>("friend_invite_link");
+}
+
+/** Rename a saved friend — friendly names instead of tailnet jargon. */
+export async function renameFriend(peerKey: string, displayName: string): Promise<StoredFriend> {
+  return invoke<StoredFriend>("rename_friend", { peerKey, displayName });
+}
+
+export async function removeFriend(peerKey: string): Promise<void> {
+  await invoke("remove_friend", { peerKey });
+}
+
+export async function listFriends(): Promise<StoredFriend[]> {
+  return invoke<StoredFriend[]>("list_friends");
+}
+
+export async function verifyFriend(
+  peerKey: string,
+): Promise<{ friend: StoredFriend; probe: PeerConnectionProbe }> {
+  return invoke<{ friend: StoredFriend; probe: PeerConnectionProbe }>("verify_friend", {
+    peerKey,
+  });
+}
+
+/** Human copy for a friend-flow error (stable MP codes → honest text). */
+export function friendErrorCopy(error: unknown, fallback: string): string {
+  const detail =
+    typeof error === "string" ? error : error instanceof Error ? error.message : String(error);
+  if (detail.includes("MP-NET-TS-001")) {
+    return "Tailscale isn't installed on this device. Install it, then check again.";
+  }
+  if (detail.includes("MP-NET-TS-003")) {
+    return "Tailscale isn't responding right now. Open the Tailscale app, then check again.";
+  }
+  if (detail.includes("MP-NET-TS-004")) {
+    return "That device has no usable Tailscale address.";
+  }
+  if (detail.includes("MP-NET-TS-007")) {
+    return "No answer through the tunnel. Ask your friend to turn on their device and Tailscale, then verify again.";
+  }
+  if (detail.includes("MP-NET-TS-008")) {
+    return "That device isn't in your Tailscale network. Ask them to join your tailnet, then check again.";
+  }
+  if (detail.includes("MP-STORE-001")) {
+    return "Movie Party couldn't save that on this device.";
+  }
+  if (detail.includes("MP-FRIEND-001")) {
+    return "Pick a name between 1 and 40 characters.";
+  }
+  return fallback;
+}
+
 /** Returns `null` on success or a user-readable failure message. */
 export async function openTailscaleSetup(action: TailscaleSetupAction): Promise<string | null> {
   try {

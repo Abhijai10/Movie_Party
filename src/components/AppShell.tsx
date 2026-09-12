@@ -5,6 +5,7 @@ import {
   createLocalParty,
   listSchedules,
   type StoredSchedule,
+  type StoredFriend,
   enterCinema,
   requestPlayCountdown,
   getProviderCapabilities,
@@ -39,6 +40,7 @@ import { SettingsView } from "../views/SettingsView";
 import { CreatePartyView, type CreatePartyRequest } from "../views/CreatePartyView";
 import { EndPartyConfirmView } from "../views/EndPartyConfirmView";
 import { HomeView } from "../views/HomeView";
+import { FriendsView } from "../views/FriendsView";
 import { JoinPartyView } from "../views/JoinPartyView";
 import { LobbyView } from "../views/LobbyView";
 import { ReadyCheckView } from "../views/ReadyCheckView";
@@ -55,7 +57,7 @@ import {
   shouldShowPartnerConnectView,
 } from "../backend/tailscaleOnboarding";
 
-type LocalScreen = "CREATE_PARTY" | "SETTINGS" | "SCHEDULE" | "FIRST_RUN" | null;
+type LocalScreen = "CREATE_PARTY" | "SETTINGS" | "SCHEDULE" | "FRIENDS" | "FIRST_RUN" | null;
 
 /** §69: window-close-during-party state. */
 type ClosePromptState = { visible: boolean; isHost: boolean };
@@ -85,6 +87,10 @@ export function AppShell() {
   // ── state ──────────────────────────────────────────────────
   const [upcoming, setUpcoming] = useState<StoredSchedule[]>([]);
   const [preloadProgress, setPreloadProgress] = useState<Record<string, number>>({});
+  /** Saved friends (Add Friend surface) — refreshed by FriendsPanel. */
+  const [friends, setFriends] = useState<StoredFriend[]>([]);
+  /** A friend invite that arrived via deep link — accepted by FriendsView. */
+  const [pendingFriendInvite, setPendingFriendInvite] = useState<string | null>(null);
   const [firstRunDone, setFirstRunDone] = useState<boolean>(() => {
     try {
       return localStorage.getItem("mp_first_run_complete") === "1";
@@ -149,6 +155,14 @@ export function AppShell() {
 
   const openJoinWithInvite = useCallback(
     (rawInvite: string) => {
+      // Friend invites open the Friends tab and are accepted there — the
+      // payload names the inviter so they land in the list directly.
+      if (rawInvite.trim().toLowerCase().startsWith("movieparty://friend/")) {
+        setDevScreen(null);
+        setLocalScreen("FRIENDS");
+        setPendingFriendInvite(rawInvite.trim());
+        return;
+      }
       const parsed = parseMoviePartyInvite(rawInvite);
       setDevScreen(null);
       setLocalScreen(null);
@@ -427,6 +441,11 @@ export function AppShell() {
     setLocalScreen("SCHEDULE");
   };
 
+  const goFriends = () => {
+    setDevScreen(null);
+    setLocalScreen("FRIENDS");
+  };
+
   // Media naming for Upcoming cards — the snapshot's live media when it
   // matches, else a stored cache entry name, else the honest raw id.
   // §56: the guest's pending schedule accept — shown until answered.
@@ -696,6 +715,7 @@ export function AppShell() {
           mediaNameById={mediaNameFor}
           onOpenSettings={goSettings}
           onOpenSchedule={goSchedule}
+          onOpenFriends={goFriends}
         />
         {debugHudEnabled ? <DebugHud snapshot={snapshot} /> : null}
       </>
@@ -728,6 +748,25 @@ export function AppShell() {
             void listSchedules().then((schedules) => {
               setUpcoming(schedules);
             });
+          }}
+          friends={friends}
+        />
+        {debugHudEnabled ? <DebugHud snapshot={snapshot} /> : null}
+      </>
+    );
+  }
+
+  // Friends — the invite-link surface (share a QR, friends land here).
+  if (localScreen === "FRIENDS") {
+    return (
+      <>
+        <FriendsView
+          onBack={goHome}
+          friends={friends}
+          onFriendsChanged={setFriends}
+          pendingInvite={pendingFriendInvite}
+          onPendingInviteConsumed={() => {
+            setPendingFriendInvite(null);
           }}
         />
         {debugHudEnabled ? <DebugHud snapshot={snapshot} /> : null}
@@ -853,6 +892,7 @@ export function AppShell() {
         mediaNameById={mediaNameFor}
         onOpenSettings={goSettings}
         onOpenSchedule={goSchedule}
+        onOpenFriends={goFriends}
       />
       {debugHudEnabled ? <DebugHud snapshot={snapshot} /> : null}
       {retentionPrompt != null ? (

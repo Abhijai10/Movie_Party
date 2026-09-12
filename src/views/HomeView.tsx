@@ -1,8 +1,9 @@
 import { motion } from "framer-motion";
-import { ArrowRight, Settings, Ticket } from "lucide-react";
+import { ArrowRight, CalendarDays, Settings, Ticket, Users } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import type { StoredSchedule } from "../backend/appRuntime";
 import { CinemaButton } from "../components/mp/CinemaButton";
-import { MovieReelHero } from "../components/mp/MovieReelHero";
+import { MovieCarouselHero } from "../components/mp/MovieCarouselHero";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
 import logoMark from "../assets/logo_mark.png";
@@ -20,7 +21,45 @@ type HomeViewProps = {
   onOpenSettings: () => void;
   /** (§18): open the Schedule form. */
   onOpenSchedule: () => void;
+  /** Open the Friends tab (invite links + friend list). */
+  onOpenFriends: () => void;
 };
+
+/**
+ * Header action chip — an unmistakable BUTTON: icon + label + border +
+ * background affordance. The hero's decorative words ("Cinema · Sync ·
+ * Together") stay plain and low-contrast, so controls never blend into
+ * copy.
+ */
+function NavChip({
+  icon: Icon,
+  label,
+  onClick,
+  testId,
+  iconOnly = false,
+}: {
+  icon: LucideIcon;
+  label: string;
+  onClick: () => void;
+  testId: string;
+  iconOnly?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      data-testid={testId}
+      className="flex items-center gap-2 px-3.5 py-2 rounded-full border border-white/12 bg-white/[0.06] hover:bg-white/[0.12] hover:border-white/25 transition text-white/75 hover:text-white"
+    >
+      <Icon className="w-4 h-4" strokeWidth={1.7} />
+      {iconOnly ? null : (
+        <span className="text-[11px] tracking-[0.18em] uppercase">{label}</span>
+      )}
+    </button>
+  );
+}
 
 export function HomeView({
   onCreate,
@@ -30,6 +69,7 @@ export function HomeView({
   mediaNameById,
   onOpenSettings,
   onOpenSchedule,
+  onOpenFriends,
 }: HomeViewProps) {
   const mediaNameFor = mediaNameById;
   const preloadPercentLabel = (scheduleId: string): string => {
@@ -37,10 +77,12 @@ export function HomeView({
     return percent != null ? String(Math.round(percent * 100)) : "0";
   };
   return (
-    <div className="relative w-screen h-screen overflow-hidden">
-      <SilkBackground />
+    <div className="relative w-screen min-h-screen overflow-x-hidden" data-testid="home-screen">
+      <div className="fixed inset-0 pointer-events-none">
+        <SilkBackground />
+      </div>
 
-      <header className="relative z-10 flex items-center justify-between px-12 pt-8">
+      <header className="relative z-10 flex flex-wrap items-center justify-between gap-4 px-12 pt-8">
         <div className="flex items-center gap-3">
           <img
             src={logoMark}
@@ -50,40 +92,41 @@ export function HomeView({
           />
           <span className="font-serif-display text-xl tracking-tight text-white">Movie Party</span>
         </div>
-        <div className="hidden md:flex items-center gap-8 text-[11px] tracking-[0.28em] uppercase text-white/50">
+        <div
+          className="hidden lg:flex items-center gap-6 text-[11px] tracking-[0.32em] uppercase text-white/30 select-none"
+          aria-hidden="true"
+        >
           <span>Cinema</span>
+          <span className="w-px h-3 bg-white/10" />
           <span>Sync</span>
+          <span className="w-px h-3 bg-white/10" />
           <span>Together</span>
         </div>
-        <div className="flex items-center gap-5">
-          <button
-            type="button"
+        <div className="flex items-center gap-2.5">
+          <NavChip
+            icon={CalendarDays}
+            label="Schedule"
             onClick={onOpenSchedule}
-            className="text-[11px] tracking-[0.22em] uppercase text-white/50 hover:text-white transition"
-            data-testid="home-schedule-btn"
-            title="Schedule a movie for later"
-          >
-            Schedule
-          </button>
-          <button
-            type="button"
+            testId="home-schedule-btn"
+          />
+          <NavChip icon={Users} label="Friends" onClick={onOpenFriends} testId="home-friends-btn" />
+          <NavChip
+            icon={Settings}
+            label="Settings"
             onClick={onOpenSettings}
-            aria-label="Open settings"
-            data-testid="home-settings-btn"
-            className="text-white/50 hover:text-white transition"
-          >
-            <Settings className="w-[18px] h-[18px]" strokeWidth={1.6} />
-          </button>
+            testId="home-settings-btn"
+            iconOnly
+          />
           <StatusIndicator state="sync" label="Strict Sync" />
         </div>
       </header>
 
-      <main className="relative z-10 max-w-[1300px] mx-auto px-12 h-[calc(100vh-80px)] grid grid-cols-12 gap-8 items-center">
+      <main className="relative z-10 max-w-[1300px] mx-auto px-12 py-10 grid grid-cols-12 gap-10 items-start">
         <motion.section
           initial={{ opacity: 0, y: 24 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.9, ease: [0.22, 1, 0.36, 1] }}
-          className="col-span-12 lg:col-span-6 flex flex-col justify-center"
+          className="col-span-12 lg:col-span-6 flex flex-col"
         >
           <span className="text-[11px] tracking-[0.32em] uppercase text-white/50 mb-6">
             ● Welcome back
@@ -125,7 +168,7 @@ export function HomeView({
             </CinemaButton>
           </div>
 
-          <div className="mt-12 flex items-center gap-6 text-[11px] tracking-[0.24em] uppercase text-white/40">
+          <div className="mt-12 flex flex-wrap items-center gap-6 text-[11px] tracking-[0.24em] uppercase text-white/40">
             <StatusIndicator state="ready" label="Strict sync on" />
             <span className="w-px h-3 bg-white/15" />
             <span>End-to-end private</span>
@@ -185,9 +228,9 @@ export function HomeView({
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: 1.2, ease: "easeOut", delay: 0.2 }}
-          className="col-span-12 lg:col-span-6 h-[600px] relative"
+          className="col-span-12 lg:col-span-6 lg:sticky lg:top-8 h-[600px] relative"
         >
-          <MovieReelHero />
+          <MovieCarouselHero />
         </motion.section>
       </main>
     </div>

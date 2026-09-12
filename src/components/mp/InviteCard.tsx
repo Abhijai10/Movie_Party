@@ -12,7 +12,16 @@ import { inviteQrSvg } from "../../backend/appRuntime";
  * with Movie Party installed opens the join screen with the ticket
  * pre-filled (AppShell consumes deep links + startup args).
  */
-export function InviteCard({ inviteCode }: { inviteCode: string }) {
+export function InviteCard({
+  inviteCode,
+  title,
+  qrHint,
+}: {
+  inviteCode: string;
+  /** Optional label overrides (the Friends surface uses its own copy). */
+  title?: string;
+  qrHint?: string;
+}) {
   const [mode, setMode] = useState<"code" | "qr">("code");
   const [qr, setQr] = useState<string | null>(null);
   const [copied, setCopied] = useState<"none" | "code" | "link">("none");
@@ -60,7 +69,7 @@ export function InviteCard({ inviteCode }: { inviteCode: string }) {
     >
       <div className="flex items-center justify-between">
         <span className="text-[11px] tracking-[0.28em] uppercase text-white/50">
-          {mode === "qr" ? "Scan to join" : "Invite link"}
+          {mode === "qr" ? (qrHint ?? "Scan to join") : (title ?? "Invite link")}
         </span>
         <button
           type="button"

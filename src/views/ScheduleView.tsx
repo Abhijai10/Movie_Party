@@ -4,7 +4,12 @@ import { ArrowLeft, CalendarClock, TriangleAlert } from "lucide-react";
 import { CinemaButton } from "../components/mp/CinemaButton";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
-import { createAndBroadcastSchedule, type AppSnapshot } from "../backend/appRuntime";
+import {
+  createAndBroadcastSchedule,
+  friendStatusFor,
+  type AppSnapshot,
+  type StoredFriend,
+} from "../backend/appRuntime";
 import type { CallMode } from "../call/webrtc";
 
 /**
@@ -18,11 +23,17 @@ import type { CallMode } from "../call/webrtc";
  * explicit warning and still refuses the unsafe value.
  * §19: if the guest is currently offline the schedule still saves, with
  * the honest offline notice.
+ *
+ * Guests are picked from saved friends (Add Friend on Home) — the schedule
+ * targets the verified friend by default and falls back to the connected
+ * participant or a manual id.
  */
 type ScheduleViewProps = {
   snapshot: AppSnapshot;
   onBack: () => void;
   onScheduled: () => void;
+  /** Saved friends (Add Friend surface) for the guest picker. */
+  friends: StoredFriend[];
 };
 
 const CALL_MODES: Array<{ id: CallMode; label: string }> = [
@@ -74,7 +85,19 @@ function formatMinutes(minutes: number): string {
   return rest > 0 ? `${String(hours)} h ${String(rest)} min` : `${String(hours)} h`;
 }
 
-export function ScheduleView({ snapshot, onBack, onScheduled }: ScheduleViewProps) {
+/** "Connection verified 2 h ago" style relative label. */
+function summarizeFriendWhen(friend: StoredFriend): string {
+  if (friend.lastVerifiedAtMs == null) return "";
+  const deltaMs = Date.now() - friend.lastVerifiedAtMs;
+  const minutes = Math.round(deltaMs / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${String(minutes)} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${String(hours)} h ago`;
+  return `${String(Math.round(hours / 24))} d ago`;
+}
+
+export function ScheduleView({ snapshot, onBack, onScheduled, friends }: ScheduleViewProps) {
   const media = snapshot.media;
   const guest = snapshot.participants.find((participant) => participant.role !== snapshot.room.role);
   const roomId = snapshot.room.roomId ?? "";
@@ -86,6 +109,10 @@ export function ScheduleView({ snapshot, onBack, onScheduled }: ScheduleViewProp
   const [preloadMinutesEarly, setPreloadMinutesEarly] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  /** Guest selection: a saved friend's peer key, or "connected" (the live
+   * participant), or "manual" (type a device id). */
+  const [guestChoice, setGuestChoice] = useState<string>("connected");
+  const [manualGuestId, setManualGuestId] = useState("");
 
   const scheduledUtcMs = localInputToUtcMs(dateValue, timeValue);
 
@@ -121,6 +148,13 @@ export function ScheduleView({ snapshot, onBack, onScheduled }: ScheduleViewProp
 
   const guestOnline = guest?.connected ?? false;
   const guestName = guest?.displayName ?? "your partner";
+  /** The chosen saved friend (when the guest picker targets one). */
+  const selectedFriend = friends.find((f) => f.peerKey === guestChoice);
+  /** guestDeviceId submitted with the schedule. */
+  const guestDeviceId =
+    guestChoice === "connected" || guestChoice === "manual"
+      ? guest?.id ?? "guest"
+      : (selectedFriend?.peerKey ?? guest?.id ?? "guest");
 
   const scheduleNow = () => {
     if (scheduledUtcMs == null) {
@@ -135,6 +169,12 @@ export function ScheduleView({ snapshot, onBack, onScheduled }: ScheduleViewProp
       setError("Create the party and choose the movie first.");
       return;
     }
+    if (guestChoice === "manual" && manualGuestId.trim().length === 0) {
+      setError("Enter the guest's device id, or pick a friend.");
+      return;
+    }
+    const resolvedGuestDeviceId =
+      guestChoice === "manual" ? manualGuestId.trim() : guestDeviceId;
     setError(null);
     setSubmitting(true);
     void (async () => {
@@ -143,7 +183,7 @@ export function ScheduleView({ snapshot, onBack, onScheduled }: ScheduleViewProp
         mediaId,
         scheduledStartUtcMs: scheduledUtcMs,
         plannedPreloadUtcMs: plannedPreloadUtcMs,
-        guestDeviceId: guest?.id ?? "guest",
+        guestDeviceId: resolvedGuestDeviceId,
         callMode: callMode,
       });
       setSubmitting(false);
@@ -166,8 +206,10 @@ export function ScheduleView({ snapshot, onBack, onScheduled }: ScheduleViewProp
   };
 
   return (
-    <div className="relative w-screen h-screen overflow-hidden" data-testid="schedule-screen">
-      <SilkBackground variant="calm" />
+    <div className="relative w-screen min-h-screen overflow-y-auto" data-testid="schedule-screen">
+      <div className="fixed inset-0 pointer-events-none">
+        <SilkBackground variant="calm" />
+      </div>
       <header className="relative z-10 flex items-center justify-between px-12 pt-8">
         <button
           type="button"
@@ -180,7 +222,7 @@ export function ScheduleView({ snapshot, onBack, onScheduled }: ScheduleViewProp
         <StatusIndicator state="sync" label="Strict Sync" />
       </header>
 
-      <main className="relative z-10 max-w-xl mx-auto px-12 mt-6 h-[calc(100vh-140px)] overflow-y-auto">
+      <main className="relative z-10 max-w-2xl w-full mx-auto px-12 mt-8 pb-20">
         <motion.section
           initial={{ opacity: 0, y: 14 }}
           animate={{ opacity: 1, y: 0 }}
@@ -189,50 +231,148 @@ export function ScheduleView({ snapshot, onBack, onScheduled }: ScheduleViewProp
           <h1 className="font-serif-display text-white text-4xl tracking-[-0.02em]">
             Schedule the movie
           </h1>
+          <p className="mt-3 text-sm text-white/50">
+            Pick a time — Movie Party preloads the movie so the night starts perfectly in sync.
+          </p>
 
-          <div className="mt-8 space-y-5" data-testid="schedule-form">
-            <div className="grid grid-cols-2 gap-4">
-              <label className="block">
-                <span className="text-xs tracking-[0.18em] uppercase text-white/50">Date</span>
+          <div className="mt-10 space-y-6" data-testid="schedule-form">
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+              <div className="grid grid-cols-2 gap-5">
+                <label className="block">
+                  <span className="text-xs tracking-[0.18em] uppercase text-white/50">Date</span>
+                  <input
+                    type="date"
+                    value={dateValue}
+                    onChange={(event) => {
+                      setDateValue(event.target.value);
+                    }}
+                    style={{ colorScheme: "dark" }}
+                    className="mt-2 w-full bg-[#0D0B14] border border-white/15 rounded-lg px-3.5 py-2.5 text-sm text-white/95 focus:outline-none focus:border-sky-400/50"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-xs tracking-[0.18em] uppercase text-white/50">Time</span>
+                  <input
+                    type="time"
+                    value={timeValue}
+                    onChange={(event) => {
+                      setTimeValue(event.target.value);
+                    }}
+                    style={{ colorScheme: "dark" }}
+                    className="mt-2 w-full bg-[#0D0B14] border border-white/15 rounded-lg px-3.5 py-2.5 text-sm text-white/95 focus:outline-none focus:border-sky-400/50"
+                  />
+                </label>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 space-y-6">
+              <div>
+                <span className="text-xs tracking-[0.18em] uppercase text-white/50">Movie</span>
+                <p className="mt-2 text-sm text-white/80">
+                  {media ? media.filename : "No movie chosen yet — pick one in Create Party first"}
+                </p>
+              </div>
+
+              <div>
+                <span className="text-xs tracking-[0.18em] uppercase text-white/50">Guest</span>
+              {friends.length > 0 ? (
+                <div className="mt-2.5 flex flex-wrap gap-2.5" data-testid="schedule-guest-picker">
+                  {friends.map((friend) => {
+                    const status = friendStatusFor(friend, undefined);
+                    const chosen = guestChoice === friend.peerKey;
+                    return (
+                      <button
+                        key={friend.peerKey}
+                        type="button"
+                        onClick={() => {
+                          setGuestChoice(friend.peerKey);
+                        }}
+                        aria-pressed={chosen}
+                        title={
+                          status === "connected"
+                            ? `Connection verified · ${friend.lastPath ?? ""} · ${String(friend.lastLatencyMs ?? "?")} ms`
+                            : status === "online"
+                              ? "Online — not verified yet"
+                              : "Offline"
+                        }
+                        className={`px-4 py-2 rounded-full text-xs tracking-[0.12em] uppercase border transition ${
+                          chosen
+                            ? "border-sky-400/50 bg-sky-400/10 text-sky-100"
+                            : "border-white/15 text-white/55 hover:text-white"
+                        }`}
+                        data-testid={`schedule-guest-${friend.displayName}`}
+                      >
+                        {friend.displayName}
+                        {status === "connected" ? " ✓" : ""}
+                      </button>
+                    );
+                  })}
+                  {guest ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setGuestChoice("connected");
+                      }}
+                      aria-pressed={guestChoice === "connected"}
+                      className={`px-4 py-2 rounded-full text-xs tracking-[0.12em] uppercase border transition ${
+                        guestChoice === "connected"
+                          ? "border-sky-400/50 bg-sky-400/10 text-sky-100"
+                          : "border-white/15 text-white/55 hover:text-white"
+                      }`}
+                      data-testid="schedule-guest-connected"
+                    >
+                      {guestName} (connected)
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setGuestChoice("manual");
+                    }}
+                    aria-pressed={guestChoice === "manual"}
+                    className={`px-4 py-2 rounded-full text-xs tracking-[0.12em] uppercase border transition ${
+                      guestChoice === "manual"
+                        ? "border-sky-400/50 bg-sky-400/10 text-sky-100"
+                        : "border-white/15 text-white/55 hover:text-white"
+                    }`}
+                    data-testid="schedule-guest-manual"
+                  >
+                    Someone else
+                  </button>
+                </div>
+              ) : (
+                <p className="mt-2 text-sm text-white/80" data-testid="schedule-guest-name">
+                  {guestName}
+                  {guest ? "" : " — add a friend on Home to schedule directly"}
+                </p>
+              )}
+              {guestChoice === "manual" ? (
                 <input
-                  type="date"
-                  value={dateValue}
+                  value={manualGuestId}
                   onChange={(event) => {
-                    setDateValue(event.target.value);
+                    setManualGuestId(event.target.value);
                   }}
-                  className="mt-2 w-full bg-white/[0.04] border border-white/15 rounded-lg px-3.5 py-2.5 text-sm text-white/90 focus:outline-none focus:border-sky-400/50"
+                  placeholder="Guest device id"
+                  style={{ colorScheme: "dark" }}
+                  className="mt-2.5 w-full bg-[#0D0B14] border border-white/15 rounded-lg px-3.5 py-2.5 text-sm text-white/95 placeholder:text-white/40 focus:outline-none focus:border-sky-400/50 font-mono-mp"
+                  data-testid="schedule-guest-manual-input"
                 />
-              </label>
-              <label className="block">
-                <span className="text-xs tracking-[0.18em] uppercase text-white/50">Time</span>
-                <input
-                  type="time"
-                  value={timeValue}
-                  onChange={(event) => {
-                    setTimeValue(event.target.value);
-                  }}
-                  className="mt-2 w-full bg-white/[0.04] border border-white/15 rounded-lg px-3.5 py-2.5 text-sm text-white/90 focus:outline-none focus:border-sky-400/50"
-                />
-              </label>
+              ) : null}
+              {guestChoice !== "manual" && guestChoice !== "connected" && selectedFriend ? (
+                <p className="mt-2 text-xs text-white/45">
+                  {selectedFriend.lastVerifiedAtMs != null
+                    ? `Connection verified ${summarizeFriendWhen(selectedFriend)}`
+                    : "Not verified yet — use Connect on the Friends panel to test the tunnel first."}
+                </p>
+              ) : null}
+              </div>
             </div>
 
-            <div>
-              <span className="text-xs tracking-[0.18em] uppercase text-white/50">Movie</span>
-              <p className="mt-2 text-sm text-white/80">
-                {media ? media.filename : "No movie chosen yet — pick one in Create Party first"}
-              </p>
-            </div>
-
-            <div>
-              <span className="text-xs tracking-[0.18em] uppercase text-white/50">Guest</span>
-              <p className="mt-2 text-sm text-white/80">{guestName}</p>
-            </div>
-
-            <fieldset>
+            <fieldset className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
               <legend className="text-xs tracking-[0.18em] uppercase text-white/50">
                 Call mode
               </legend>
-              <div className="mt-2.5 flex flex-wrap gap-2.5">
+              <div className="mt-3 flex flex-wrap gap-2.5">
                 {CALL_MODES.map((mode) => (
                   <button
                     key={mode.id}
@@ -329,7 +469,7 @@ export function ScheduleView({ snapshot, onBack, onScheduled }: ScheduleViewProp
               </p>
             ) : null}
 
-            <div className="pt-2 pb-10">
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 flex flex-wrap items-center gap-4">
               <CinemaButton
                 onClick={scheduleNow}
                 disabled={submitting || scheduledUtcMs == null}
@@ -337,6 +477,9 @@ export function ScheduleView({ snapshot, onBack, onScheduled }: ScheduleViewProp
               >
                 {submitting ? "Saving…" : "Save Schedule"}
               </CinemaButton>
+              <p className="text-xs text-white/40">
+                Your friend gets a reminder — even if they're offline right now.
+              </p>
             </div>
           </div>
         </motion.section>
