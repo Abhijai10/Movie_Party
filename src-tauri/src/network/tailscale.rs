@@ -4,6 +4,17 @@ use serde::{self, Deserialize, Serialize};
 
 pub const DEFAULT_TAILSCALE_PORT: u16 = 47_821;
 
+/// The macOS Tailscale CLI bundled with the GUI app is an IPC client, not a
+/// standalone daemon client. When it is spawned by a GUI application
+/// (Finder/Dock launch → no terminal ancestry), `TERM` is absent from the
+/// environment and the CLI falls back to a GUI-attachment path that fails
+/// with `Tailscale.CLIError error 3` — printed to **stdout with exit code
+/// 0**, which previously masqueraded as valid status output and surfaced as
+/// the eternal "Tailscale is installed but not responding" gate. Setting any
+/// `TERM` value restores the socket/IPC path used from terminals. This is
+/// verified experimentally against Tailscale 1.102.4 on macOS.
+const GUI_ENV_TERM: (&str, &str) = ("TERM", "dumb");
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TailscalePath {
     Direct,
@@ -93,6 +104,17 @@ pub enum TailscaleError {
     OpenFailed(String),
 }
 
+/// Errors that the macOS Tailscale GUI-CLI wrapper prints to **stdout**
+/// while still exiting 0. `tailscale status --json` must return a JSON
+/// document; any of these prefixes means the probe actually failed even
+/// though the exit status lies. Without this check the wrapper's error text
+/// reached `parse_status_json`, failed, and was reported as
+/// DAEMON_UNAVAILABLE ("installed but not responding") on every GUI launch.
+const KNOWN_WRAPPER_ERRORS: [&str; 2] = [
+    "The Tailscale GUI failed to start",
+    "failed to connect to tailscaled",
+];
+
 pub fn candidate_executables() -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -116,20 +138,39 @@ pub fn candidate_executables() -> Vec<PathBuf> {
     }
 }
 
+/// True when the CLI's stdout is a known wrapper/daemon failure banner
+/// rather than status JSON (some of these exit 0 — exit status alone lies).
+pub fn is_wrapper_error_stdout(stdout: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(stdout);
+    let trimmed = text.trim();
+    if trimmed.starts_with('{') || trimmed.is_empty() {
+        return false;
+    }
+    KNOWN_WRAPPER_ERRORS
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+}
+
 pub async fn detect_status() -> Result<TailscaleStatus, TailscaleError> {
     let mut last_error = None;
 
     for executable in candidate_executables() {
+        let mut command = crate::process::quiet_async_command(&executable);
+        command.env(GUI_ENV_TERM.0, GUI_ENV_TERM.1);
         let output = tokio::time::timeout(
             Duration::from_secs(3),
-            crate::process::quiet_async_command(&executable)
-                .args(["status", "--json"])
-                .output(),
+            command.args(["status", "--json"]).output(),
         )
         .await;
 
         match output {
             Ok(Ok(output)) if output.status.success() => {
+                if is_wrapper_error_stdout(&output.stdout) {
+                    // The wrapper failed but lied with exit code 0 — treat
+                    // exactly like a failed run and try the next candidate.
+                    last_error = Some(first_line_of(&output.stdout));
+                    continue;
+                }
                 return parse_status_json(&output.stdout);
             }
             Ok(Ok(output)) => {
@@ -147,6 +188,15 @@ pub async fn detect_status() -> Result<TailscaleStatus, TailscaleError> {
         Some(error) if !error.trim().is_empty() => Err(TailscaleError::CommandFailed(error)),
         _ => Err(TailscaleError::ExecutableNotFound),
     }
+}
+
+fn first_line_of(stdout: &[u8]) -> String {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .next()
+        .unwrap_or("unknown CLI failure")
+        .trim()
+        .to_string()
 }
 
 pub async fn local_readiness() -> TailscaleReadiness {
@@ -423,9 +473,9 @@ struct RawNode {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_allowed_party_ipv4, is_usable_tailscale_ipv4, parse_status_json, readiness_from_error,
-        readiness_from_status, required_ipv4, usable_peers, TailscaleError, TailscalePath,
-        TailscalePeer, TailscaleState,
+        is_allowed_party_ipv4, is_usable_tailscale_ipv4, is_wrapper_error_stdout,
+        parse_status_json, readiness_from_error, readiness_from_status, required_ipv4,
+        usable_peers, TailscaleError, TailscalePath, TailscalePeer, TailscaleState,
     };
 
     #[test]
@@ -842,5 +892,29 @@ mod tests {
         let result = usable_peers(&all);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].dns_name, "a");
+    }
+
+    // ── GUI-env TERM fix ────────────────────────────────────────────
+
+    #[test]
+    fn wrapper_error_stdout_is_detected_even_with_exit_zero_shape() {
+        // Exact banner reproduced from a GUI-launched Movie Party spawning
+        // the macOS Tailscale CLI (1.102.4) with no TERM in the environ.
+        let stdout = "The Tailscale GUI failed to start: The operation couldn\u{2019}t be completed. (Tailscale.CLIError error 3.)\n";
+        assert!(is_wrapper_error_stdout(stdout.as_bytes()));
+        // JSON status documents must never be classified as wrapper errors.
+        assert!(!is_wrapper_error_stdout(br#"{"BackendState":"Running"}"#));
+        assert!(!is_wrapper_error_stdout(b""));
+        assert!(!is_wrapper_error_stdout(
+            b"failed to connect: permission denied"
+        ));
+    }
+
+    #[test]
+    fn tailscaled_socket_failure_is_detected() {
+        // Linux/standalone-daemon flavor of the same lie (exit 0, banner).
+        assert!(is_wrapper_error_stdout(
+            b"failed to connect to tailscaled: dial unix /var/run/tailscaled.socket: connect: no such file or directory"
+        ));
     }
 }
