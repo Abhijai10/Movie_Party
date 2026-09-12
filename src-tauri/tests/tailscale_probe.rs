@@ -41,3 +41,27 @@ fn detect_status_works_without_terminal_environment() {
         }
     }
 }
+
+#[test]
+fn verify_peer_connection_reports_cleanly_without_terminal_env() {
+    if std::env::var("TERM").is_ok() {
+        std::env::remove_var("TERM");
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    // 100.64.0.0 is inside the CGNAT range but never allocated; the probe
+    // must return a structured failure, never a panic — and on a real
+    // tailnet the message must not be the GUI-wrapper banner.
+    let probe = rt.block_on(movie_party_lib::network::tailscale::verify_peer_connection(
+        "100.64.0.0".parse().expect("ipv4"),
+    ));
+    assert!(!probe.reachable);
+    assert!(
+        !probe.message.contains("Tailscale GUI failed to start"),
+        "regression: wrapper banner leaked into ping probe: {}",
+        probe.message
+    );
+    println!("probe message: {}", probe.message);
+}

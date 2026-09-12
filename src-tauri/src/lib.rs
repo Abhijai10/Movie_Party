@@ -110,6 +110,13 @@ pub fn run() {
             get_app_snapshot,
             get_tailscale_readiness,
             open_tailscale_setup,
+            tailnet_peers,
+            add_friend,
+            remove_friend,
+            list_friends,
+            verify_friend,
+            friend_invite_link,
+            rename_friend,
             show_home,
             show_join_party,
             request_end_party,
@@ -234,6 +241,72 @@ async fn open_tailscale_setup(action: TailscaleSetupAction) -> Result<(), String
             open_external_url("https://tailscale.com/kb/1084/sharing")
         }
     }
+}
+
+/// Add Friend: tailnet peers (candidates) + saved friends with cached
+/// verification results. Errors carry the stable MP-NET-TS codes so the UI
+/// can show the appropriate Tailscale setup state.
+#[tauri::command]
+async fn tailnet_peers(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<crate::network::tailscale::TailnetPeersView, String> {
+    runtime.tailnet_peers().await
+}
+
+/// Save (or refresh) a friend by their Tailscale peer key (MagicDNS name).
+/// The optional display name overrides the tailnet-derived name (invites).
+#[tauri::command]
+async fn add_friend(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    peer_key: String,
+    display_name: Option<String>,
+) -> Result<crate::storage::sqlite::StoredFriend, String> {
+    runtime.add_friend(peer_key, display_name).await
+}
+
+/// This device's friend-invite link — the QR/link share for Add Friend.
+#[tauri::command]
+async fn friend_invite_link(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<crate::network::tailscale::FriendInviteLink, String> {
+    runtime.friend_invite().await
+}
+
+/// Rename a saved friend (friendly names over tailnet jargon).
+#[tauri::command]
+fn rename_friend(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    peer_key: String,
+    display_name: String,
+) -> Result<crate::storage::sqlite::StoredFriend, String> {
+    runtime.rename_friend(&peer_key, &display_name)
+}
+
+/// Remove a saved friend.
+#[tauri::command]
+fn remove_friend(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    peer_key: String,
+) -> Result<(), String> {
+    runtime.remove_friend(&peer_key)
+}
+
+/// Saved friends with cached verification results.
+#[tauri::command]
+fn list_friends(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Vec<crate::storage::sqlite::StoredFriend> {
+    runtime.list_friends()
+}
+
+/// Verify the real tunnel connection to a saved friend via tailscale ping
+/// and persist the result. Returns the friend + the raw probe.
+#[tauri::command]
+async fn verify_friend(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    peer_key: String,
+) -> Result<crate::network::tailscale::FriendVerification, String> {
+    runtime.verify_friend(&peer_key).await
 }
 
 fn open_external_url(url: &str) -> Result<(), String> {

@@ -12,7 +12,7 @@ use rusqlite::{params, Connection};
 
 use super::StorageError;
 
-const CURRENT_SCHEMA_VERSION: i32 = 3;
+const CURRENT_SCHEMA_VERSION: i32 = 4;
 
 /// Helper to lock a Mutex, converting PoisonError to StorageError.
 fn lock_mutex<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, StorageError> {
@@ -97,6 +97,27 @@ pub struct StoredProviderDiagnostic {
     pub sample_seconds: u16,
 }
 
+/// A saved movie-partner friend: a chosen Tailscale tailnet peer.
+/// `peer_key` is the peer's full MagicDNS name (stable across IP changes);
+/// the last verified probe result is kept so the Home panel can show honest
+/// connection health without re-pinging on every render.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredFriend {
+    /// Full Tailscale DNS name, e.g. "rahul-mac.tailc930b7.ts.net."
+    pub peer_key: String,
+    pub display_name: String,
+    /// Last usable Tailscale CGNAT IPv4 observed for the peer.
+    pub ip: Option<String>,
+    pub added_at_ms: i64,
+    /// Timestamp of the last successful `tailscale ping` verification.
+    pub last_verified_at_ms: Option<i64>,
+    /// Path reported by the last verification (direct / relay …).
+    pub last_path: Option<String>,
+    /// Latency (ms) reported by the last verification.
+    pub last_latency_ms: Option<u32>,
+}
+
 impl MoviePartyDb {
     /// Open or create the database at the given path.
     /// Runs migrations automatically and idempotently.
@@ -166,6 +187,11 @@ impl MoviePartyDb {
 
         if current < 3 {
             conn.execute_batch(MIGRATION_003)
+                .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        }
+
+        if current < 4 {
+            conn.execute_batch(MIGRATION_004)
                 .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         }
 
@@ -342,6 +368,104 @@ impl MoviePartyDb {
             diagnostics.push(row.map_err(|e| StorageError::Sqlite(e.to_string()))?);
         }
         Ok(diagnostics)
+    }
+
+    // ── Friends (saved movie partners) ─────────────────────────────────────
+
+    /// Upsert a friend. The peer key (full MagicDNS name) is the identity;
+    /// re-adding the same peer refreshes its cached observations.
+    pub fn upsert_friend(&self, friend: &StoredFriend) -> Result<(), StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        conn.execute(
+            "INSERT INTO friends (peer_key, display_name, ip, added_at_ms, last_verified_at_ms, last_path, last_latency_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(peer_key) DO UPDATE SET
+                display_name = excluded.display_name,
+                ip = excluded.ip,
+                last_verified_at_ms = excluded.last_verified_at_ms,
+                last_path = excluded.last_path,
+                last_latency_ms = excluded.last_latency_ms",
+            rusqlite::params![
+                friend.peer_key,
+                friend.display_name,
+                friend.ip,
+                friend.added_at_ms,
+                friend.last_verified_at_ms,
+                friend.last_path,
+                friend.last_latency_ms.map(|v| v as i64),
+            ],
+        )
+        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Update only the cached verification result of a saved friend.
+    pub fn update_friend_verification(
+        &self,
+        peer_key: &str,
+        ip: Option<&str>,
+        verified_at_ms: Option<i64>,
+        path: Option<&str>,
+        latency_ms: Option<u32>,
+    ) -> Result<(), StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        conn.execute(
+            "UPDATE friends
+             SET ip = COALESCE(?2, ip),
+                 last_verified_at_ms = ?3,
+                 last_path = ?4,
+                 last_latency_ms = ?5
+             WHERE peer_key = ?1",
+            rusqlite::params![
+                peer_key,
+                ip,
+                verified_at_ms,
+                path,
+                latency_ms.map(|v| v as i64),
+            ],
+        )
+        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(())
+    }
+
+    /// All saved friends, ordered by display name.
+    pub fn list_friends(&self) -> Result<Vec<StoredFriend>, StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT peer_key, display_name, ip, added_at_ms,
+                        last_verified_at_ms, last_path, last_latency_ms
+                 FROM friends ORDER BY display_name",
+            )
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(StoredFriend {
+                    peer_key: row.get(0)?,
+                    display_name: row.get(1)?,
+                    ip: row.get(2)?,
+                    added_at_ms: row.get(3)?,
+                    last_verified_at_ms: row.get(4)?,
+                    last_path: row.get(5)?,
+                    last_latency_ms: row
+                        .get::<_, Option<i64>>(6)?
+                        .map(|v| v.clamp(0, u32::MAX as i64) as u32),
+                })
+            })
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        let mut friends = Vec::new();
+        for row in rows {
+            friends.push(row.map_err(|e| StorageError::Sqlite(e.to_string()))?);
+        }
+        Ok(friends)
+    }
+
+    /// Remove a saved friend by peer key.
+    pub fn delete_friend(&self, peer_key: &str) -> Result<(), StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        conn.execute("DELETE FROM friends WHERE peer_key = ?1", [peer_key])
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(())
     }
 
     /// Delete a schedule by ID.
@@ -747,6 +871,21 @@ CREATE TABLE IF NOT EXISTS providers (
 CREATE INDEX IF NOT EXISTS idx_providers_recent ON providers(provider_id, verified_at_ms);
 ";
 
+/// v4: saved movie-partner friends — the chosen Tailscale tailnet peers.
+/// `peer_key` (full MagicDNS name) is the stable identity; IP and probe
+/// results are cached observations that refresh on each verification.
+const MIGRATION_004: &str = "
+CREATE TABLE IF NOT EXISTS friends (
+    peer_key TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    ip TEXT,
+    added_at_ms INTEGER NOT NULL,
+    last_verified_at_ms INTEGER,
+    last_path TEXT,
+    last_latency_ms INTEGER
+);
+";
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -758,6 +897,115 @@ mod tests {
         let db = MoviePartyDb::open_in_memory().expect("open");
         let version = db.schema_version().expect("version");
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn friends_crud_round_trip() {
+        let db = MoviePartyDb::open_in_memory().expect("open");
+        assert!(db.list_friends().expect("empty list").is_empty());
+
+        let friend = StoredFriend {
+            peer_key: "rahul-mac.tailc930b7.ts.net.".to_string(),
+            display_name: "rahul-mac".to_string(),
+            ip: Some("100.64.0.42".to_string()),
+            added_at_ms: 1_000,
+            last_verified_at_ms: None,
+            last_path: None,
+            last_latency_ms: None,
+        };
+        db.upsert_friend(&friend).expect("insert");
+
+        // Re-add with fresh verification data → upsert refreshes, no dupes.
+        db.update_friend_verification(
+            "rahul-mac.tailc930b7.ts.net.",
+            Some("100.64.0.43"),
+            Some(2_000),
+            Some("direct"),
+            Some(23),
+        )
+        .expect("verify update");
+
+        let friends = db.list_friends().expect("list");
+        assert_eq!(friends.len(), 1);
+        assert_eq!(friends[0].peer_key, "rahul-mac.tailc930b7.ts.net.");
+        assert_eq!(friends[0].ip.as_deref(), Some("100.64.0.43"));
+        assert_eq!(friends[0].last_verified_at_ms, Some(2_000));
+        assert_eq!(friends[0].last_path.as_deref(), Some("direct"));
+        assert_eq!(friends[0].last_latency_ms, Some(23));
+
+        db.delete_friend("rahul-mac.tailc930b7.ts.net.")
+            .expect("delete");
+        assert!(db.list_friends().expect("list after delete").is_empty());
+        // Deleting an unknown peer key is a no-op, not an error.
+        db.delete_friend("never-saved").expect("idempotent delete");
+    }
+
+    #[test]
+    fn friends_upsert_replaces_cached_observations() {
+        let db = MoviePartyDb::open_in_memory().expect("open");
+        db.upsert_friend(&StoredFriend {
+            peer_key: "pc.tailnet.ts.net.".to_string(),
+            display_name: "pc".to_string(),
+            ip: Some("100.64.0.9".to_string()),
+            added_at_ms: 1,
+            last_verified_at_ms: Some(50),
+            last_path: Some("direct".to_string()),
+            last_latency_ms: Some(10),
+        })
+        .expect("first add");
+        // Second add of the same peer with no verification yet clears the
+        // stale verification but keeps exactly one row.
+        db.upsert_friend(&StoredFriend {
+            peer_key: "pc.tailnet.ts.net.".to_string(),
+            display_name: "pc-renamed".to_string(),
+            ip: None,
+            added_at_ms: 2,
+            last_verified_at_ms: None,
+            last_path: None,
+            last_latency_ms: None,
+        })
+        .expect("second add");
+        let friends = db.list_friends().expect("list");
+        assert_eq!(friends.len(), 1);
+        assert_eq!(friends[0].display_name, "pc-renamed");
+        assert_eq!(
+            friends[0].added_at_ms, 1,
+            "original added_at is kept by ON CONFLICT"
+        );
+        assert!(friends[0].ip.is_none());
+        assert!(friends[0].last_verified_at_ms.is_none());
+    }
+
+    #[test]
+    fn migration_v4_upgrades_v3_database() {
+        // Build a v3 database (no friends table), then reopen through
+        // MoviePartyDb::open so the migration path runs against a real file.
+        let dir = std::env::temp_dir().join(format!("mp-friends-mig-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let db_path = dir.join("friends.db");
+        {
+            let conn = Connection::open(&db_path).expect("open raw");
+            conn.execute_batch(MIGRATION_001).expect("v1 schema");
+            conn.execute_batch(MIGRATION_003).expect("v3 schema");
+            conn.execute_batch("PRAGMA user_version=3;")
+                .expect("set v3");
+        }
+        let db = MoviePartyDb::open(&db_path).expect("migrate to v4");
+        assert_eq!(db.schema_version().expect("version"), 4);
+        // The friends table is usable immediately after migration.
+        db.upsert_friend(&StoredFriend {
+            peer_key: "k".to_string(),
+            display_name: "k".to_string(),
+            ip: None,
+            added_at_ms: 1,
+            last_verified_at_ms: None,
+            last_path: None,
+            last_latency_ms: None,
+        })
+        .expect("insert post-migration");
+        assert_eq!(db.list_friends().expect("list").len(), 1);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]

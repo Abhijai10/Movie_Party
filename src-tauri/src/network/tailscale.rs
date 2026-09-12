@@ -51,6 +51,119 @@ pub fn usable_peers(peers: &[TailscalePeer]) -> Vec<&TailscalePeer> {
         .collect()
 }
 
+/// A tailnet peer presented for friend selection: stable key (DNS name),
+/// display name, usable IP, online flag, and the current path classification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FriendCandidate {
+    /// Stable identity key: the peer's full Tailscale DNS name (ends with
+    /// `.<tailnet>.ts.net.`). Survives IP changes and renames of the label.
+    pub peer_key: String,
+    /// Human-facing device label (hostname part of the DNS name).
+    pub display_name: String,
+    /// First usable Tailscale CGNAT IPv4, when present.
+    pub ip: Option<String>,
+    pub online: bool,
+    /// direct | peerRelay | derpRelay | unknown | offline
+    pub path: String,
+}
+
+/// Human label for a peer's DNS name: strips the trailing dot and the
+/// MagicDNS suffix so "rahul-mac.tailc930b7.ts.net." reads "rahul-mac".
+pub fn peer_display_name(dns_name: &str) -> String {
+    let trimmed = dns_name.trim_end_matches('.');
+    if let Some(stripped) = trimmed.strip_suffix(".ts.net") {
+        // "rahul-mac.tailc930b7" → "rahul-mac" (first label = device name)
+        return stripped.split('.').next().unwrap_or(stripped).to_string();
+    }
+    trimmed.to_string()
+}
+
+fn path_label(path: &TailscalePath) -> &'static str {
+    match path {
+        TailscalePath::Direct => "direct",
+        TailscalePath::PeerRelay => "peerRelay",
+        TailscalePath::DerpRelay => "derpRelay",
+        TailscalePath::Unknown => "unknown",
+        TailscalePath::Offline => "offline",
+    }
+}
+
+/// Maps a parsed status into friend candidates, ordered: online first, then
+/// by display name. Includes ALL peers with a usable IP (the UI shows the
+/// online flag so offline friends are visible but visually distinct).
+pub fn friend_candidates(status: &TailscaleStatus) -> Vec<FriendCandidate> {
+    let mut candidates: Vec<FriendCandidate> = status
+        .peers
+        .iter()
+        .filter(|p| p.usable_ipv4().is_some() && !p.dns_name.trim().is_empty())
+        .map(|p| FriendCandidate {
+            peer_key: p.dns_name.clone(),
+            display_name: peer_display_name(&p.dns_name),
+            ip: p.usable_ipv4().map(|ip| ip.to_string()),
+            online: p.online,
+            path: path_label(&p.path).to_string(),
+        })
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.online
+            .cmp(&a.online)
+            .then_with(|| a.display_name.cmp(&b.display_name))
+    });
+    candidates
+}
+
+/// The friends surface's payload: selectable tailnet peers plus the saved
+/// friends (with their cached verification results).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TailnetPeersView {
+    pub candidates: Vec<FriendCandidate>,
+    pub saved: Vec<crate::storage::sqlite::StoredFriend>,
+}
+
+/// verify_friend payload: the refreshed friend record + the raw probe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FriendVerification {
+    pub friend: crate::storage::sqlite::StoredFriend,
+    pub probe: PeerConnectionProbe,
+}
+
+/// friend_invite_link payload: this device's shareable identity. The link
+/// carries the peer key + a friendly name so the receiving app adds the
+/// inviter directly — no peer-table browsing, no addresses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FriendInviteLink {
+    pub link: String,
+    pub peer_key: String,
+    pub display_name: String,
+}
+
+/// Compact base64url (unpadded) — the friend-invite payload codec. Matches
+/// the frontend's buildFriendInviteLink byte-for-byte, so links built by
+/// either side parse identically.
+pub fn base64url_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = u32::from(chunk[0]);
+        let b1 = chunk.get(1).map(|b| u32::from(*b)).unwrap_or(0);
+        let b2 = chunk.get(2).map(|b| u32::from(*b)).unwrap_or(0);
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[((triple >> 6) & 0x3F) as usize] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(triple & 0x3F) as usize] as char);
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TailscaleStatus {
     pub backend_state: Option<String>,
@@ -197,6 +310,151 @@ fn first_line_of(stdout: &[u8]) -> String {
         .unwrap_or("unknown CLI failure")
         .trim()
         .to_string()
+}
+
+/// A real reachability probe for one tailnet peer, as reported by
+/// `tailscale ping` — an actual WireGuard-level packet exchange through the
+/// tunnel, not a status-table lookup. This is the "is the connection really
+/// established" check behind Add Friend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerConnectionProbe {
+    pub reachable: bool,
+    /// direct | relay | relay-late | none — from the ping's route line.
+    pub path: Option<String>,
+    /// Round-trip latency in milliseconds, when the peer answered.
+    pub latency_ms: Option<u32>,
+    pub message: String,
+}
+
+impl PeerConnectionProbe {
+    fn ok(path: String, latency_ms: u32) -> Self {
+        Self {
+            reachable: true,
+            path: Some(path),
+            latency_ms: Some(latency_ms),
+            message: String::new(),
+        }
+    }
+
+    fn fail(message: String) -> Self {
+        Self {
+            reachable: false,
+            path: None,
+            latency_ms: None,
+            message,
+        }
+    }
+}
+
+/// Runs `tailscale ping --timeout --c 1 <ip>` and parses the route+latency
+/// line. Output formats (verified against 1.102.4):
+///   pong from <host> (<ip>) via <path> in <n>ms
+///   pong from <host> (<ip>) via <path>-late in <n>ms   (relay warming up)
+///   ping "<ip>": timed out / no reply
+pub async fn verify_peer_connection(ip: Ipv4Addr) -> PeerConnectionProbe {
+    let mut last_error: Option<String> = None;
+
+    for executable in candidate_executables() {
+        let mut command = crate::process::quiet_async_command(&executable);
+        command.env(GUI_ENV_TERM.0, GUI_ENV_TERM.1);
+        let output = tokio::time::timeout(
+            Duration::from_secs(6),
+            command
+                .args(["ping", "--timeout=3s", "--c=1", &ip.to_string()])
+                .output(),
+        )
+        .await;
+
+        match output {
+            Ok(Ok(out)) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                if let Some(probe) = parse_ping_stdout(&stdout) {
+                    return probe;
+                }
+                // Unparseable success output — fall through to next candidate.
+                last_error = Some(first_line_of(&out.stdout));
+            }
+            Ok(Ok(out)) => {
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                // `tailscale ping` exit flavors (verified against 1.102.4):
+                //   unreachable peer → exit 1, "no matching peer" on stderr;
+                //   offline peer     → exit 1, "timed out" on stdout +
+                //                       "no reply" on stderr;
+                //   reachable peer   → exit 0, "pong from … via … in Nms".
+                if stderr.contains("no matching peer") {
+                    return PeerConnectionProbe::fail(
+                        "MP-NET-TS-008 that device is not in your Tailscale network".to_string(),
+                    );
+                }
+                if stdout.contains("no reply")
+                    || stdout.contains("timed out")
+                    || stderr.contains("no reply")
+                {
+                    return PeerConnectionProbe::fail(format!(
+                        "MP-NET-TS-007 no answer from {ip} through the tunnel"
+                    ));
+                }
+                last_error = Some(if stderr.trim().is_empty() {
+                    first_line_of(&out.stdout)
+                } else {
+                    stderr.trim().to_string()
+                });
+            }
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(Err(error)) => last_error = Some(error.to_string()),
+            Err(_) => last_error = Some("ping check timed out".to_string()),
+        }
+    }
+
+    PeerConnectionProbe::fail(format!(
+        "MP-NET-TS-003 Tailscale ping could not run: {}",
+        last_error.unwrap_or_else(|| "executable was not found".to_string())
+    ))
+}
+
+/// Parses the first meaningful line of `tailscale ping` output.
+/// Returns `None` when the output matches nothing known.
+pub fn parse_ping_stdout(stdout: &str) -> Option<PeerConnectionProbe> {
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.contains("no reply") || line.contains("timed out") {
+            return Some(PeerConnectionProbe::fail(
+                "MP-NET-TS-007 no answer from the peer through the tunnel".to_string(),
+            ));
+        }
+        // pong from host-name (100.x.y.z) via direct/relay in 123ms
+        if let Some(rest) = line.strip_prefix("pong from ") {
+            if let Some((path, latency)) = parse_pong_route_latency(rest) {
+                return Some(PeerConnectionProbe::ok(path, latency));
+            }
+        }
+        // Unrecognized but non-empty line — keep scanning; the ping command
+        // may print a leading notice (e.g. "passthrough mode") before pongs.
+    }
+    None
+}
+
+/// Extracts `via <path> in <n>ms` from the tail of a pong line.
+fn parse_pong_route_latency(rest: &str) -> Option<(String, u32)> {
+    let via_pos = rest.find("via ")?;
+    let after_via = &rest[via_pos + 4..];
+    let in_pos = after_via.find(" in ")?;
+    let path = after_via[..in_pos].trim().to_string();
+    let latency_str = after_via[in_pos + 4..].trim();
+    let digits: String = latency_str
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    let latency = digits.parse::<u32>().ok()?;
+    if path.is_empty() {
+        return None;
+    }
+    Some((path, latency))
 }
 
 pub async fn local_readiness() -> TailscaleReadiness {
@@ -473,9 +731,10 @@ struct RawNode {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_allowed_party_ipv4, is_usable_tailscale_ipv4, is_wrapper_error_stdout,
-        parse_status_json, readiness_from_error, readiness_from_status, required_ipv4,
-        usable_peers, TailscaleError, TailscalePath, TailscalePeer, TailscaleState,
+        friend_candidates, is_allowed_party_ipv4, is_usable_tailscale_ipv4,
+        is_wrapper_error_stdout, parse_ping_stdout, parse_status_json, peer_display_name,
+        readiness_from_error, readiness_from_status, required_ipv4, usable_peers, FriendCandidate,
+        PeerConnectionProbe, TailscaleError, TailscalePath, TailscalePeer, TailscaleState,
     };
 
     #[test]
@@ -916,5 +1175,139 @@ mod tests {
         assert!(is_wrapper_error_stdout(
             b"failed to connect to tailscaled: dial unix /var/run/tailscaled.socket: connect: no such file or directory"
         ));
+    }
+
+    // ── Add Friend: candidate mapping ───────────────────────────────
+
+    #[test]
+    fn peer_display_name_strips_magicdns_suffix() {
+        assert_eq!(
+            peer_display_name("rahul-mac.tailc930b7.ts.net."),
+            "rahul-mac"
+        );
+        assert_eq!(peer_display_name("pc.tailnet.ts.net."), "pc");
+        // No MagicDNS suffix → returned without the trailing dot only.
+        assert_eq!(peer_display_name("plain-host."), "plain-host");
+        assert_eq!(peer_display_name(""), "");
+    }
+
+    #[test]
+    fn friend_candidates_online_first_with_display_names() {
+        let status = parse_status_json(
+            br#"{
+              "BackendState": "Running",
+              "Self": {"TailscaleIPs": ["100.64.0.10"]},
+              "Peer": {
+                "off": {
+                  "DNSName": "zed.tailc930b7.ts.net.",
+                  "TailscaleIPs": ["100.64.0.3"],
+                  "Online": false
+                },
+                "on": {
+                  "DNSName": "rahul-mac.tailc930b7.ts.net.",
+                  "TailscaleIPs": ["100.64.0.42"],
+                  "Online": true,
+                  "CurAddr": "100.64.0.42:47821"
+                },
+                "lan": {
+                  "DNSName": "lan-only.tailc930b7.ts.net.",
+                  "TailscaleIPs": ["192.168.1.9"],
+                  "Online": true
+                },
+                "unnamed": {
+                  "DNSName": "",
+                  "TailscaleIPs": ["100.64.0.7"],
+                  "Online": true
+                }
+              }
+            }"#,
+        )
+        .expect("valid status");
+
+        let candidates = friend_candidates(&status);
+        // lan-only (no CGNAT) and unnamed peers are excluded.
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].display_name, "rahul-mac");
+        assert!(candidates[0].online);
+        assert_eq!(candidates[0].ip.as_deref(), Some("100.64.0.42"));
+        assert_eq!(candidates[0].path, "direct");
+        assert_eq!(candidates[0].peer_key, "rahul-mac.tailc930b7.ts.net.");
+        assert!(!candidates[1].online);
+        assert_eq!(candidates[1].display_name, "zed");
+    }
+
+    // ── Add Friend: real ping probe parsing ────────────────────────
+
+    #[test]
+    fn parse_ping_stdout_direct_pong() {
+        let probe = parse_ping_stdout(
+            "pong from rahul-mac.tailc930b7.ts.net. (100.64.0.42) via direct/ipv4 192.168.1.5:41641 in 23ms\n",
+        )
+        .expect("parsed");
+        assert!(probe.reachable);
+        assert_eq!(probe.path.as_deref(), Some("direct/ipv4 192.168.1.5:41641"));
+        assert_eq!(probe.latency_ms, Some(23));
+    }
+
+    #[test]
+    fn parse_ping_stdout_relay_pong() {
+        let probe =
+            parse_ping_stdout("pong from host (100.64.0.42) via relay \"derp-3\" in 118ms\n")
+                .expect("parsed");
+        assert!(probe.reachable);
+        assert_eq!(probe.path.as_deref(), Some("relay \"derp-3\""));
+        assert_eq!(probe.latency_ms, Some(118));
+    }
+
+    #[test]
+    fn parse_ping_stdout_no_reply_is_failure() {
+        let probe = parse_ping_stdout("ping \"100.64.0.42\": timed out\n2026/09/12 no reply\n")
+            .expect("parsed");
+        assert!(!probe.reachable);
+        assert!(probe.message.starts_with("MP-NET-TS-007"));
+    }
+
+    #[test]
+    fn parse_ping_stdout_empty_is_none() {
+        assert!(parse_ping_stdout("\n \n").is_none());
+    }
+
+    #[test]
+    fn parse_ping_stdout_ignores_leading_notices() {
+        let probe = parse_ping_stdout(
+            "passthrough mode engaged\npong from pc (100.64.0.9) via direct in 12ms\n",
+        )
+        .expect("parsed");
+        assert!(probe.reachable);
+        assert_eq!(probe.latency_ms, Some(12));
+    }
+
+    #[test]
+    fn probe_fail_shape_is_stable() {
+        let probe = PeerConnectionProbe::fail("MP-NET-TS-007 down".to_string());
+        assert!(!probe.reachable);
+        assert!(probe.path.is_none());
+        assert!(probe.latency_ms.is_none());
+        let ok = PeerConnectionProbe::ok("direct".to_string(), 40);
+        assert!(ok.reachable);
+        assert_eq!(ok.path.as_deref(), Some("direct"));
+        assert_eq!(ok.latency_ms, Some(40));
+    }
+
+    #[test]
+    fn friend_candidate_sorts_offline_last() {
+        // The type round-trips through serde for the IPC boundary; verify
+        // camelCase field names survive so the frontend contract holds.
+        let candidate = FriendCandidate {
+            peer_key: "k".to_string(),
+            display_name: "d".to_string(),
+            ip: Some("100.64.0.1".to_string()),
+            online: true,
+            path: "direct".to_string(),
+        };
+        let json = serde_json::to_string(&candidate).expect("serializes");
+        assert!(json.contains("\"peerKey\""));
+        assert!(json.contains("\"displayName\""));
+        assert!(json.contains("\"latencyMs\"") || !json.contains("latencyMs"));
     }
 }

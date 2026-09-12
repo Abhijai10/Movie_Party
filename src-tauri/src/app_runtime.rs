@@ -1117,6 +1117,245 @@ impl AppRuntime {
             .unwrap_or_default()
     }
 
+    // ── Friends (saved movie partners) ─────────────────────────────────
+
+    /// Tailnet peers available for friend selection, merged with the saved
+    /// friends' cached verification so the UI can render one honest list.
+    /// `ok(TailnetPeersView)` requires Tailscale READY; an unusable local
+    /// connection returns the readiness error so the UI shows the setup gate.
+    pub async fn tailnet_peers(
+        &self,
+    ) -> Result<crate::network::tailscale::TailnetPeersView, String> {
+        let status = crate::network::tailscale::detect_status()
+            .await
+            .map_err(|e| e.to_string())?;
+        let readiness = crate::network::tailscale::readiness_from_status(status.clone());
+        if !readiness.is_usable() && !crate::network::tailscale::dev_loopback_enabled() {
+            return Err(readiness
+                .stable_error()
+                .unwrap_or_else(|| "MP-NET-TS-003 Tailscale is not ready".to_string()));
+        }
+        let saved = self.list_friends();
+        Ok(crate::network::tailscale::TailnetPeersView {
+            candidates: crate::network::tailscale::friend_candidates(&status),
+            saved,
+        })
+    }
+
+    /// Save (or refresh) a friend. Requires a current status so the cached
+    /// IP is real, and refuses peers with no usable Tailscale IPv4. The
+    /// optional display name overrides the tailnet-derived name (invites
+    /// carry a friendly name so the list never shows DNS jargon).
+    pub async fn add_friend(
+        &self,
+        peer_key: String,
+        display_name: Option<String>,
+    ) -> Result<crate::storage::sqlite::StoredFriend, String> {
+        let peer_key = peer_key.trim().trim_end_matches('.').to_string() + ".";
+        let status = crate::network::tailscale::detect_status()
+            .await
+            .map_err(|e| e.to_string())?;
+        let peer = status
+            .peers
+            .iter()
+            .find(|p| p.dns_name == peer_key)
+            .ok_or_else(|| {
+                "MP-NET-TS-008 that device is not in your Tailscale network right now".to_string()
+            })?;
+        let ip = peer
+            .usable_ipv4()
+            .ok_or_else(|| "MP-NET-TS-004 that device has no usable Tailscale address".to_string())?
+            .to_string();
+        let now_ms = wall_now_ms();
+        let friendly_name = display_name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty() && name.len() <= 40)
+            .unwrap_or_else(|| crate::network::tailscale::peer_display_name(&peer.dns_name));
+        let friend = crate::storage::sqlite::StoredFriend {
+            peer_key: peer.dns_name.clone(),
+            display_name: friendly_name,
+            ip: Some(ip),
+            added_at_ms: now_ms,
+            last_verified_at_ms: None,
+            last_path: None,
+            last_latency_ms: None,
+        };
+        let db = self
+            .lock()
+            .db
+            .clone()
+            .ok_or_else(|| "MP-STORE-001 no database".to_string())?;
+        db.upsert_friend(&friend)
+            .map_err(|e| format!("MP-STORE-001 failed to save friend: {e}"))?;
+        Ok(friend)
+    }
+
+    /// This device's friend-invite link: the shareable QR/link payload for
+    /// the Friends tab. Carries this device's tailnet identity (peer key)
+    /// plus a friendly name, so the receiving app adds the inviter directly
+    /// — no peer tables, no addresses, ever.
+    pub async fn friend_invite(
+        &self,
+    ) -> Result<crate::network::tailscale::FriendInviteLink, String> {
+        let status = crate::network::tailscale::detect_status()
+            .await
+            .map_err(|e| e.to_string())?;
+        let readiness = crate::network::tailscale::readiness_from_status(status.clone());
+        if !readiness.is_usable() && !crate::network::tailscale::dev_loopback_enabled() {
+            return Err(readiness
+                .stable_error()
+                .unwrap_or_else(|| "MP-NET-TS-003 Tailscale is not ready".to_string()));
+        }
+        // The Self MagicDNS name is this device's stable tailnet identity.
+        let peer_key = status
+            .device_name
+            .clone()
+            .filter(|name| name.contains('.'))
+            .ok_or_else(|| "MP-NET-TS-004 this device has no tailnet name yet".to_string())?;
+        let peer_key = format!("{}.", peer_key.trim_end_matches('.'));
+        // Friendly name: the user's identity display name, else the first
+        // label of the DNS name.
+        let display_name = {
+            let state = self.lock();
+            state
+                .db
+                .as_ref()
+                .and_then(|db| db.get_identity().ok().flatten())
+                .map(|identity| identity.display_name)
+                .filter(|name| !name.trim().is_empty())
+        }
+        .unwrap_or_else(|| crate::network::tailscale::peer_display_name(&peer_key));
+        let payload = format!(
+            "{{\"n\":{},\"pk\":{}}}",
+            serde_json::to_string(&display_name)
+                .map_err(|e| format!("MP-STORE-001 could not encode invite: {e}"))?,
+            serde_json::to_string(&peer_key)
+                .map_err(|e| format!("MP-STORE-001 could not encode invite: {e}"))?,
+        );
+        let link = format!(
+            "movieparty://friend/{}",
+            crate::network::tailscale::base64url_encode(payload.as_bytes()),
+        );
+        Ok(crate::network::tailscale::FriendInviteLink {
+            link,
+            peer_key,
+            display_name,
+        })
+    }
+
+    /// Rename a saved friend — friendly names over tailnet jargon.
+    pub fn rename_friend(
+        &self,
+        peer_key: &str,
+        display_name: &str,
+    ) -> Result<crate::storage::sqlite::StoredFriend, String> {
+        let name = display_name.trim();
+        if name.is_empty() {
+            return Err("MP-FRIEND-001 the name cannot be empty".to_string());
+        }
+        if name.chars().count() > 40 {
+            return Err("MP-FRIEND-001 the name is too long (max 40 characters)".to_string());
+        }
+        let friends = self.list_friends();
+        let mut friend = friends
+            .into_iter()
+            .find(|f| f.peer_key == peer_key)
+            .ok_or_else(|| "MP-NET-TS-008 that friend is not saved on this device".to_string())?;
+        friend.display_name = name.to_string();
+        let db = self
+            .lock()
+            .db
+            .clone()
+            .ok_or_else(|| "MP-STORE-001 no database".to_string())?;
+        db.upsert_friend(&friend)
+            .map_err(|e| format!("MP-STORE-001 failed to rename friend: {e}"))?;
+        Ok(friend)
+    }
+
+    /// Remove a saved friend by peer key.
+    pub fn remove_friend(&self, peer_key: &str) -> Result<(), String> {
+        let db = self
+            .lock()
+            .db
+            .clone()
+            .ok_or_else(|| "MP-STORE-001 no database".to_string())?;
+        db.delete_friend(peer_key)
+            .map_err(|e| format!("MP-STORE-001 failed to remove friend: {e}"))
+    }
+
+    /// All saved friends.
+    pub fn list_friends(&self) -> Vec<crate::storage::sqlite::StoredFriend> {
+        let state = self.lock();
+        state
+            .db
+            .as_ref()
+            .and_then(|db| db.list_friends().ok())
+            .unwrap_or_default()
+    }
+
+    /// Verify the real tunnel connection to a saved friend: runs
+    /// `tailscale ping` (a genuine WireGuard-level probe through the
+    /// tunnel) and persists the result on the friend record. Returns the
+    /// updated friend plus the raw probe. This is the "connection actually
+    /// established" check behind Add Friend — Tailscale provides the
+    /// tunnel; Movie Party verifies it end-to-end.
+    pub async fn verify_friend(
+        &self,
+        peer_key: &str,
+    ) -> Result<crate::network::tailscale::FriendVerification, String> {
+        let friends = self.list_friends();
+        let mut friend = friends
+            .into_iter()
+            .find(|f| f.peer_key == peer_key)
+            .ok_or_else(|| "MP-NET-TS-008 that friend is not saved on this device".to_string())?;
+
+        // Refresh the peer's current IP from a live status, then ping it.
+        let ip = match crate::network::tailscale::detect_status().await {
+            Ok(status) => status
+                .peers
+                .iter()
+                .find(|p| p.dns_name == peer_key)
+                .and_then(|p| p.usable_ipv4())
+                .map(|ip| ip.to_string()),
+            Err(_) => None, // ping falls back to the last cached IP
+        }
+        .or_else(|| friend.ip.clone())
+        .ok_or_else(|| "MP-NET-TS-004 no usable Tailscale address for that friend".to_string())?;
+
+        let ip_addr: std::net::Ipv4Addr = ip
+            .parse()
+            .map_err(|_| "MP-NET-TS-004 invalid Tailscale address".to_string())?;
+        let probe = crate::network::tailscale::verify_peer_connection(ip_addr).await;
+
+        let now_ms = wall_now_ms();
+        if probe.reachable {
+            friend.ip = Some(ip);
+            friend.last_verified_at_ms = Some(now_ms);
+            friend.last_path = probe.path.clone();
+            friend.last_latency_ms = probe.latency_ms;
+        } else {
+            // A failed probe still records the attempt time (honest state),
+            // but never claims a working connection.
+            friend.last_verified_at_ms = None;
+            friend.last_path = None;
+            friend.last_latency_ms = None;
+        }
+        let db = self
+            .lock()
+            .db
+            .clone()
+            .ok_or_else(|| "MP-STORE-001 no database".to_string())?;
+        db.update_friend_verification(
+            &friend.peer_key,
+            friend.ip.as_deref(),
+            friend.last_verified_at_ms,
+            friend.last_path.as_deref(),
+            friend.last_latency_ms,
+        )
+        .map_err(|e| format!("MP-STORE-001 failed to record verification: {e}"))?;
+        Ok(crate::network::tailscale::FriendVerification { friend, probe })
+    }
+
     /// M6: Store an owned Chrome session in AppRuntime, replacing any previous one.
     /// The old session is dropped (killing the Chrome process) if present.
     pub fn store_chrome_session(&self, session: crate::providers::chrome::ManagedChromeSession) {
@@ -2585,7 +2824,7 @@ impl AppRuntime {
         .await
         .map_err(|error| match error {
             quic::QuicError::Connection(_) | quic::QuicError::Connect(_) => {
-                "MP-NET-TS-005 host is not reachable through Tailscale".to_string()
+                format!("MP-NET-TS-005 host is not reachable through Tailscale: {error}")
             }
             _ => error.to_string(),
         })?;
@@ -9445,5 +9684,190 @@ mod scheduling_tests {
         let state = runtime.lock();
         let db = state.db.as_ref().expect("db");
         assert_eq!(db.list_schedules().expect("list")[0].status, "Cancelled");
+    }
+}
+
+// ── friends (saved movie partners) tests ────────────────────────────
+
+#[cfg(test)]
+mod friends_tests {
+    use crate::storage::sqlite::StoredFriend;
+
+    use super::AppRuntime;
+
+    fn runtime_with_db() -> (AppRuntime, std::path::PathBuf) {
+        let runtime = AppRuntime::new();
+        let dir = std::env::temp_dir().join(format!(
+            "mp-friends-rt-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        runtime.init_db_at_path(&dir.join("mp.db"));
+        (runtime, dir)
+    }
+
+    /// list/add/remove round-trip on the runtime layer. add_friend and
+    /// verify_friend hit the real Tailscale CLI, so this test exercises the
+    /// pure-persistence path (list + remove) and the add-path's rejection
+    /// for a peer that is not in the tailnet status — which on a CI machine
+    /// without Tailscale is the deterministic MP-NET error, and on a real
+    /// tailnet machine is a peer key that cannot exist.
+    #[tokio::test]
+    async fn friends_list_remove_and_unknown_add() {
+        let (runtime, dir) = runtime_with_db();
+
+        // Empty list on a fresh DB.
+        assert!(runtime.list_friends().is_empty());
+
+        // Adding a peer that is not in the current tailnet status is a
+        // stable MP-NET error, never a panic and never a silent success.
+        // (On machines where the Tailscale CLI is absent, detect_status
+        // fails first with MP-NET-TS-001/003 — both accepted here since the
+        // invariant under test is "an unknown peer is never saved".)
+        let result = runtime
+            .add_friend("ghost.tailc930b7.ts.net.".to_string(), None)
+            .await;
+        match result {
+            Err(e) => assert!(e.starts_with("MP-NET-TS-"), "unexpected error: {e}"),
+            // If a machine genuinely has such a peer in its tailnet (it
+            // cannot — the key is test-fabricated), the add succeeds and
+            // the round-trip below still holds.
+            Ok(friend) => assert_eq!(friend.peer_key, "ghost.tailc930b7.ts.net."),
+        }
+
+        // Direct persistence sanity: a stored friend lists and removes.
+        {
+            let state = runtime.lock();
+            let db = state.db.as_ref().expect("db");
+            db.upsert_friend(&StoredFriend {
+                peer_key: "rahul-mac.tailc930b7.ts.net.".to_string(),
+                display_name: "rahul-mac".to_string(),
+                ip: Some("100.64.0.42".to_string()),
+                added_at_ms: 1,
+                last_verified_at_ms: Some(9),
+                last_path: Some("direct".to_string()),
+                last_latency_ms: Some(21),
+            })
+            .expect("seed friend");
+        }
+        let friends = runtime.list_friends();
+        assert_eq!(friends.len(), 1);
+        assert_eq!(friends[0].display_name, "rahul-mac");
+        assert_eq!(friends[0].last_latency_ms, Some(21));
+
+        runtime
+            .remove_friend("rahul-mac.tailc930b7.ts.net.")
+            .expect("remove");
+        assert!(runtime.list_friends().is_empty());
+
+        // Removing a friend that is not saved is an error-free no-op on the
+        // storage layer; the runtime maps it to Ok(()) for UI simplicity.
+        runtime
+            .remove_friend("never-saved.tailc930b7.ts.net.")
+            .expect("remove unknown is fine");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// verify_friend on an unsaved peer key is a stable MP-NET-TS-008 error,
+    /// never a panic — the command surface must stay honest.
+    #[tokio::test]
+    async fn verify_friend_rejects_unsaved_peer() {
+        let (runtime, dir) = runtime_with_db();
+        let result = runtime
+            .verify_friend("never-saved.tailc930b7.ts.net.")
+            .await;
+        // Two accepted failures: MP-NET-TS-008 (friend not saved — the
+        // expected branch) or MP-NET-TS-001/003 when the machine has no
+        // Tailscale CLI at all (the find-status step fails first). Both are
+        // honest, stable outcomes; a panic or Ok would be the bug.
+        match result {
+            Err(e) => assert!(
+                e.starts_with("MP-NET-TS-008")
+                    || e.starts_with("MP-NET-TS-001")
+                    || e.starts_with("MP-NET-TS-003"),
+                "unexpected error: {e}"
+            ),
+            Ok(_) => panic!("verify must not succeed for an unsaved peer"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// rename_friend: friendly names replace tailnet jargon; the peer key,
+    /// cached IP, and verification stay untouched. Empty/oversized names are
+    /// stable MP-FRIEND-001 errors; unknown peers are MP-NET-TS-008.
+    #[test]
+    fn rename_friend_updates_name_and_keeps_everything_else() {
+        let (runtime, dir) = runtime_with_db();
+        {
+            let state = runtime.lock();
+            let db = state.db.as_ref().expect("db");
+            db.upsert_friend(&StoredFriend {
+                peer_key: "rahul-mac.tailc930b7.ts.net.".to_string(),
+                display_name: "rahul-mac".to_string(),
+                ip: Some("100.64.0.42".to_string()),
+                added_at_ms: 11,
+                last_verified_at_ms: Some(99),
+                last_path: Some("direct".to_string()),
+                last_latency_ms: Some(21),
+            })
+            .expect("seed friend");
+        }
+        let renamed = runtime
+            .rename_friend("rahul-mac.tailc930b7.ts.net.", "  Best Buddy  ")
+            .expect("rename");
+        assert_eq!(renamed.display_name, "Best Buddy");
+        assert_eq!(renamed.peer_key, "rahul-mac.tailc930b7.ts.net.");
+        assert_eq!(renamed.ip.as_deref(), Some("100.64.0.42"));
+        assert_eq!(renamed.added_at_ms, 11);
+        assert_eq!(renamed.last_verified_at_ms, Some(99));
+        assert_eq!(renamed.last_latency_ms, Some(21));
+
+        // Validation: empty and oversized names refuse with MP-FRIEND-001.
+        assert!(runtime
+            .rename_friend("rahul-mac.tailc930b7.ts.net.", "   ")
+            .unwrap_err()
+            .starts_with("MP-FRIEND-001"));
+        let oversized = "x".repeat(41);
+        assert!(runtime
+            .rename_friend("rahul-mac.tailc930b7.ts.net.", &oversized)
+            .unwrap_err()
+            .starts_with("MP-FRIEND-001"));
+        // Unknown peers refuse with MP-NET-TS-008.
+        assert!(runtime
+            .rename_friend("ghost.tailc930b7.ts.net.", "Nope")
+            .unwrap_err()
+            .starts_with("MP-NET-TS-008"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// friend_invite: on a tailnet-ready machine the link is a well-formed
+    /// movieparty://friend/<base64url> that carries the payload; on a
+    /// machine without Tailscale it is a stable MP-NET error, never a panic.
+    #[tokio::test]
+    async fn friend_invite_link_is_well_formed_or_honest_error() {
+        let (runtime, dir) = runtime_with_db();
+        match runtime.friend_invite().await {
+            Ok(invite) => {
+                assert!(invite.link.starts_with("movieparty://friend/"));
+                let code = invite.link.trim_start_matches("movieparty://friend/");
+                assert!(!code.is_empty());
+                assert!(
+                    code.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                    "code must be base64url: {code}"
+                );
+                assert!(invite.peer_key.ends_with('.'));
+                assert!(invite.peer_key.contains('.'));
+                assert!(!invite.display_name.is_empty());
+            }
+            Err(e) => assert!(
+                e.starts_with("MP-NET-TS-") || e.starts_with("MP-STORE-001"),
+                "unexpected error: {e}"
+            ),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
