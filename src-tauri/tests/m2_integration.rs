@@ -968,13 +968,55 @@ mod env_tests {
         r2.leave_party();
     }
 
+    /// Honest environment gate for the real-Tailscale self-join: the macOS
+    /// application firewall can silently drop hairpin UDP (a device sending
+    /// to its own CGNAT address through utun) for binaries it has not
+    /// allowlisted. Cargo test binaries live at hash-suffixed paths, so an
+    /// earlier "Allow" never carries over to a rebuilt binary — the join
+    /// below then times out for no code reason (and the same binary passes
+    /// on loopback, which the firewall exempts). Probe the exact path
+    /// first; when the probe fails, skip with a clear message instead of
+    /// reporting a false regression. Mirrors the readiness gate above.
+    fn hairpin_udp_probe(tailscale_ip: &str) -> bool {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+        use std::time::Duration;
+
+        let Ok(ip) = tailscale_ip.parse::<Ipv4Addr>() else {
+            return false;
+        };
+        let probe_addr = SocketAddr::new(IpAddr::V4(ip), 47831);
+        let host = match UdpSocket::bind(probe_addr) {
+            Ok(socket) => socket,
+            Err(_) => return false,
+        };
+        let client = match UdpSocket::bind("0.0.0.0:0") {
+            Ok(socket) => socket,
+            Err(_) => return false,
+        };
+        if host.set_read_timeout(Some(Duration::from_secs(2))).is_err() {
+            return false;
+        }
+        // QUIC-initial-sized datagram: 1200 bytes is what quinn sends, and
+        // the drop this probe detects is size-independent (verified 14B
+        // through 1400B locally), so one probe at the real size suffices.
+        if client.send_to(&[0x41u8; 1200], probe_addr).is_err() {
+            return false;
+        }
+        let mut buf = [0u8; 1500];
+        match host.recv_from(&mut buf) {
+            Ok((_len, peer)) => host.send_to(&[0x42u8; 1200], peer).is_ok(),
+            Err(_) => false,
+        }
+    }
+
     /// Real Tailscale validation: when the development machine is Running/
     /// Online on a Tailscale network with a usable CGNAT IPv4, the host
     /// server must bind to the real Tailscale address (never localhost) and a
     /// guest runtime must be able to join over that real Tailscale endpoint.
     ///
-    /// When Tailscale is not usable, the test skips with a clear message — it
-    /// never manufactures a fake pass.
+    /// When the environment blocks the hairpin (local firewall) or Tailscale
+    /// is not usable, the test skips with a clear message — it never
+    /// manufactures a fake pass.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn real_tailscale_party_binds_cgnat_and_guest_joins() {
         let _env_guard = env_lock().lock().await;
@@ -994,6 +1036,15 @@ mod env_tests {
             tailscale_ip.starts_with("100."),
             "Tailscale IPv4 must be in CGNAT range, got: {tailscale_ip}"
         );
+        if !hairpin_udp_probe(&tailscale_ip) {
+            eprintln!(
+                "SKIP real_tailscale_party_binds_cgnat_and_guest_joins: the \
+                 local application firewall drops hairpin UDP to this \
+                 hash-suffixed test binary — allow the binary in the macOS \
+                 firewall to run the full self-join assertion"
+            );
+            return;
+        }
 
         // Now test the full AppRuntime create+join over the real Tailscale IP.
         let host = AppRuntime::new();
