@@ -35,24 +35,37 @@ permissions:
   contents: write
 
 jobs:
+  # Resolve which matrix legs to build. Dispatch can target a single OS
+  # (e.g. rebuild just macOS after a staging fix without paying for the
+  # Windows build again); tag pushes always build everything. Computed
+  # here because `matrix` is not available in a job-level `if`.
+  resolve-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      legs: ${{ steps.pick.outputs.legs }}
+    steps:
+      - id: pick
+        shell: bash
+        run: |
+          MACOS='{"os":"macos-latest","args":"--target aarch64-apple-darwin","rust_target":"aarch64-apple-darwin"}'
+          WINDOWS='{"os":"windows-latest","args":"","rust_target":"x86_64-pc-windows-msvc"}'
+          ONLY="${{ github.event_name == 'workflow_dispatch' && inputs.only || 'all' }}"
+          case "$ONLY" in
+            macos)   LEGS="[$MACOS]" ;;
+            windows) LEGS="[$WINDOWS]" ;;
+            *)       LEGS="[$MACOS,$WINDOWS]" ;;
+          esac
+          echo "legs=$LEGS" >> "$GITHUB_OUTPUT"
+          echo "Building legs: $LEGS"
+
   publish-tauri:
     name: Release ${{ matrix.os }}
+    needs: resolve-matrix
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-latest # Apple Silicon runner
-            args: "--target aarch64-apple-darwin"
-            rust_target: aarch64-apple-darwin
-            leg: macos
-          - os: windows-latest
-            args: "" # default host target (x86_64), NSIS bundle
-            rust_target: x86_64-pc-windows-msvc
-            leg: windows
+        include: ${{ fromJSON(needs.resolve-matrix.outputs.legs) }}
     runs-on: ${{ matrix.os }}
-    # Dispatch can target a single leg (e.g. rebuild just macOS after a
-    # staging fix without paying for the Windows build again).
-    if: github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == matrix.leg
     steps:
       - uses: actions/checkout@v4
 
