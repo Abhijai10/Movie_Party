@@ -10,6 +10,17 @@ on:
   push:
     tags:
       - "v*"
+  # Manual dispatch: releases the code at the selected ref. Used when a
+  # tag's workflow needed a fix after the tag was pushed (tags are never
+  # re-created); dispatch against the same code on main and the artifacts
+  # attach to the same tagName. tauri-action appends to an existing
+  # release, so re-dispatching never duplicates artifacts.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.9.4)"
+        required: true
+        default: "v0.9.4"
 
 permissions:
   contents: write
@@ -62,10 +73,15 @@ jobs:
         shell: bash
         run: |
           brew install meson ninja pkg-config freetype fribidi libpng \
-            glad2 jinja2 markupsafe brotli gettext pcre2 glib
-          # glad2's python modules land in the brew python site-packages;
-          # point meson at them explicitly (overridable, see script).
-          export MPV_PYTHONPATH="$(brew --prefix)/lib/python3.13/site-packages"
+            brotli gettext pcre2 glib
+          # glad2 (+ jinja2/markupsafe, needed by libplacebo's OpenGL
+          # loader generation) are pip packages, not brew formulae. They
+          # go into a venv; build-libmpv-macos.sh points meson at them
+          # via MPV_PYTHONPATH (a venv site-packages dir works for that).
+          python3 -m venv /tmp/mpv-venv
+          /tmp/mpv-venv/bin/pip install --quiet glad2 jinja2 markupsafe
+          export MPV_PYTHONPATH="$(/tmp/mpv-venv/bin/python -c 'import glad; import os; print(os.path.dirname(os.path.dirname(glad.__file__)))')"
+          echo "MPV_PYTHONPATH=$MPV_PYTHONPATH"
           ./scripts/build-libmpv-macos.sh
           ls -la src-tauri/mpv_runtime/
 
@@ -99,8 +115,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Movie Party ${{ github.ref_name }}"
+          # On a tag push the tag is the ref name; on a manual dispatch
+          # the operator names the release tag (must already exist so
+          # the artifacts land on the intended release).
+          tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          releaseName: "Movie Party ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
           releaseBody: "See RELEASE_NOTES.md in the repository for what changed. Highlights: live TMDB trending posters on Home (opt-in via your own TMDB key), fully self-contained Schedule, honest Tailscale friend onboarding, and the Ready Check 'Back to lobby' escape hatch. The experimental Shared Movie Experience remains experimental — not complete."
           releaseDraft: false
           prerelease: false
