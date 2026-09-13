@@ -271,7 +271,19 @@ export type StoredFriend = {
   lastVerifiedAtMs: number | null;
   lastPath: string | null;
   lastLatencyMs: number | null;
+  /**
+   * Persisted stage of the Tailscale friend architecture:
+   * INVITED (accepted from a link, device not yet in this tailnet) →
+   * TAILSCALE_JOINED (the friend's device joined with their own
+   * Tailscale identity and appears in the live status) →
+   * MOVIE_PARTY_VERIFIED (a real tailscale ping answered).
+   * ONLINE/OFFLINE is derived live, never persisted.
+   */
+  connectionState: FriendConnectionState;
 };
+
+/** The persisted friend-flow states (see StoredFriend.connectionState). */
+export type FriendConnectionState = "INVITED" | "TAILSCALE_JOINED" | "MOVIE_PARTY_VERIFIED";
 
 /** Result of a real `tailscale ping` verification through the tunnel. */
 export type PeerConnectionProbe = {
@@ -287,24 +299,53 @@ export type TailnetPeersView = {
   saved: StoredFriend[];
 };
 
-/** Candidate → friend shape (display copy for the UI). */
+/** Candidate → friend shape (display copy for the UI).
+ *
+ * The friend architecture's explicit states:
+ *   INVITED → TAILSCALE_PENDING → TAILSCALE_JOINED →
+ *   MOVIE_PARTY_VERIFIED → ONLINE/OFFLINE.
+ *
+ * INVITED/TAILSCALE_PENDING/TAILSCALE_JOINED/MOVIE_PARTY_VERIFIED are
+ * persisted stages of the invitation flow; ONLINE/OFFLINE is a live
+ * observation derived from the current tailnet status. TAILSCALE_PENDING
+ * is the transient reading of INVITED (the friend's device hasn't been
+ * observed in the tailnet yet), surfaced as its own label so the UI can
+ * show "waiting for their device to join" rather than a flat offline.
+ */
+export type FriendFlowStatus =
+  | "INVITED"
+  | "TAILSCALE_PENDING"
+  | "MOVIE_PARTY_VERIFIED"
+  | "ONLINE"
+  | "OFFLINE";
+
 export function friendStatusFor(
   friend: StoredFriend,
   candidateOnline: boolean | undefined,
-): "connected" | "online" | "offline" {
-  if (friend.lastVerifiedAtMs != null) return "connected";
-  if (candidateOnline != null) return candidateOnline ? "online" : "offline";
-  return "offline";
+): FriendFlowStatus {
+  // Verification is sticky: a real ping through the tunnel outranks a
+  // momentary offline reading of the peer table.
+  if (friend.lastVerifiedAtMs != null) return "MOVIE_PARTY_VERIFIED";
+  // INVITED friends show the pending state until the tailnet observes
+  // their device (they must join through Tailscale's external-user
+  // invitation with their own identity — never via an auth key in the
+  // invite link).
+  if (friend.connectionState === "INVITED") return "TAILSCALE_PENDING";
+  if (candidateOnline != null) return candidateOnline ? "ONLINE" : "OFFLINE";
+  return "OFFLINE";
 }
 
 /** Human copy for a friend's connection state. */
-export function friendStatusCopy(friend: StoredFriend, status: ReturnType<typeof friendStatusFor>): string {
-  if (status === "connected") {
+export function friendStatusCopy(friend: StoredFriend, status: FriendFlowStatus): string {
+  if (status === "MOVIE_PARTY_VERIFIED") {
     const via = friend.lastPath ? ` · ${summarizePath(friend.lastPath)}` : "";
     const ms = friend.lastLatencyMs != null ? ` · ${String(friend.lastLatencyMs)} ms` : "";
     return `Connection verified${via}${ms}`;
   }
-  if (status === "online") return "Online — not verified yet";
+  if (status === "TAILSCALE_PENDING") {
+    return "Invite accepted — waiting for their device to join your Tailscale network";
+  }
+  if (status === "ONLINE") return "Online — not verified yet";
   return "Offline";
 }
 
@@ -343,11 +384,29 @@ export type FriendInviteLink = {
   displayName: string;
 };
 
-/** Your friend-invite link — the QR/link friends scan to add you. */
+/** Your friend-invite link — the QR/link friends scan to add you.
+ * The link is identity-only: it never carries a Tailscale auth key or
+ * any credential. The friend joins your tailnet through Tailscale's own
+ * external-user invitation with THEIR identity; Movie Party observes
+ * and verifies the result. */
 export async function friendInviteLink(): Promise<FriendInviteLink> {
   return invoke<FriendInviteLink>("friend_invite_link");
 }
 
+/** Accept a movieparty://friend/ invite — the receiving side of the
+ * friend architecture. Saves the inviter as INVITED (or
+ * TAILSCALE_JOINED when their device is already in the live tailnet
+ * status); verification happens later via verifyFriend. */
+export async function acceptFriendInvite(inviteLink: string): Promise<StoredFriend> {
+  return invoke<StoredFriend>("accept_friend_invite", { inviteLink });
+}
+
+/** Refresh saved friends against the live tailnet status: INVITED
+ * friends whose device has since joined the tailnet are promoted to
+ * TAILSCALE_JOINED; MOVIE_PARTY_VERIFIED is never demoted. */
+export async function refreshFriendStates(): Promise<StoredFriend[]> {
+  return invoke<StoredFriend[]>("refresh_friend_states");
+}
 /** Rename a saved friend — friendly names instead of tailnet jargon. */
 export async function renameFriend(peerKey: string, displayName: string): Promise<StoredFriend> {
   return invoke<StoredFriend>("rename_friend", { peerKey, displayName });
@@ -392,7 +451,7 @@ export function friendErrorCopy(error: unknown, fallback: string): string {
     return "Movie Party couldn't save that on this device.";
   }
   if (detail.includes("MP-FRIEND-001")) {
-    return "Pick a name between 1 and 40 characters.";
+    return "That friend link or name isn't valid — check it and try again.";
   }
   return fallback;
 }

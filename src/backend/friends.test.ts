@@ -5,6 +5,7 @@ import {
   friendStatusFor,
   summarizePath,
   type FriendCandidate,
+  type FriendConnectionState,
   type PeerConnectionProbe,
   type StoredFriend,
   type TailnetPeersView,
@@ -20,6 +21,7 @@ function savedFriend(overrides: Partial<StoredFriend> = {}): StoredFriend {
     lastVerifiedAtMs: null,
     lastPath: null,
     lastLatencyMs: null,
+    connectionState: "TAILSCALE_JOINED",
     ...overrides,
   };
 }
@@ -36,51 +38,70 @@ function candidate(overrides: Partial<FriendCandidate> = {}): FriendCandidate {
   };
 }
 
-describe("friendStatusFor", () => {
-  it("marks a verified friend as connected", () => {
+describe("friendStatusFor (friend-flow states)", () => {
+  it("marks a ping-verified friend as MOVIE_PARTY_VERIFIED", () => {
     const friend = savedFriend({ lastVerifiedAtMs: Date.now() - 60_000 });
-    expect(friendStatusFor(friend, false)).toBe("connected");
+    expect(friendStatusFor(friend, false)).toBe("MOVIE_PARTY_VERIFIED");
   });
 
-  it("falls back to the tailnet online flag when unverified", () => {
-    const friend = savedFriend();
-    expect(friendStatusFor(friend, true)).toBe("online");
-    expect(friendStatusFor(friend, false)).toBe("offline");
+  it("shows an INVITED friend as TAILSCALE_PENDING regardless of the online flag", () => {
+    // INVITED means the friend accepted the link but their device has
+    // not been observed in this tailnet yet — even a stray "online"
+    // reading must not upgrade that to a join claim.
+    const friend = savedFriend({ connectionState: "INVITED" });
+    expect(friendStatusFor(friend, true)).toBe("TAILSCALE_PENDING");
+    expect(friendStatusFor(friend, false)).toBe("TAILSCALE_PENDING");
+    expect(friendStatusFor(friend, undefined)).toBe("TAILSCALE_PENDING");
+  });
+
+  it("derives ONLINE/OFFLINE for a TAILSCALE_JOINED friend from the live flag", () => {
+    const friend = savedFriend({ connectionState: "TAILSCALE_JOINED" });
+    expect(friendStatusFor(friend, true)).toBe("ONLINE");
+    expect(friendStatusFor(friend, false)).toBe("OFFLINE");
   });
 
   it("treats an unknown online state as offline (honest default)", () => {
     const friend = savedFriend();
-    expect(friendStatusFor(friend, undefined)).toBe("offline");
+    expect(friendStatusFor(friend, undefined)).toBe("OFFLINE");
   });
 
-  it("prefers verification over the online flag — verified stays connected", () => {
+  it("prefers verification over the online flag — verified stays verified", () => {
     // A stale-but-real verification beats "the peer table says online":
     // the tunnel was PROVEN, not inferred.
     const friend = savedFriend({ lastVerifiedAtMs: 1 });
-    expect(friendStatusFor(friend, true)).toBe("connected");
+    expect(friendStatusFor(friend, true)).toBe("MOVIE_PARTY_VERIFIED");
   });
 });
 
 describe("friendStatusCopy", () => {
   it("describes a verified friend with path and latency", () => {
     const friend = savedFriend({ lastVerifiedAtMs: 9, lastPath: "direct", lastLatencyMs: 23 });
-    expect(friendStatusCopy(friend, "connected")).toContain("Connection verified");
-    expect(friendStatusCopy(friend, "connected")).toContain("direct");
-    expect(friendStatusCopy(friend, "connected")).toContain("23 ms");
+    expect(friendStatusCopy(friend, "MOVIE_PARTY_VERIFIED")).toContain("Connection verified");
+    expect(friendStatusCopy(friend, "MOVIE_PARTY_VERIFIED")).toContain("direct");
+    expect(friendStatusCopy(friend, "MOVIE_PARTY_VERIFIED")).toContain("23 ms");
+  });
+
+  it("explains the pending state for an INVITED friend honestly", () => {
+    const friend = savedFriend({ connectionState: "INVITED" });
+    const copy = friendStatusCopy(friend, "TAILSCALE_PENDING");
+    expect(copy).toContain("waiting for their device to join");
+    // The pending copy never claims a connection exists.
+    expect(copy).not.toContain("Connection verified");
+    expect(copy).not.toContain("Online");
   });
 
   it("never claims a connection for an unverified friend", () => {
     const friend = savedFriend();
-    expect(friendStatusCopy(friend, "online")).toBe("Online — not verified yet");
-    expect(friendStatusCopy(friend, "offline")).toBe("Offline");
+    expect(friendStatusCopy(friend, "ONLINE")).toBe("Online — not verified yet");
+    expect(friendStatusCopy(friend, "OFFLINE")).toBe("Offline");
     // The honest distinction: only a REAL verified probe says "Connection
     // verified"; the online flag never upgrades to that claim.
-    expect(friendStatusCopy(friend, "online")).not.toContain("Connection verified");
+    expect(friendStatusCopy(friend, "ONLINE")).not.toContain("Connection verified");
   });
 
   it("omits the path segment when the probe had none", () => {
     const friend = savedFriend({ lastVerifiedAtMs: 9, lastPath: null, lastLatencyMs: null });
-    expect(friendStatusCopy(friend, "connected")).toBe("Connection verified");
+    expect(friendStatusCopy(friend, "MOVIE_PARTY_VERIFIED")).toBe("Connection verified");
   });
 });
 
@@ -108,6 +129,7 @@ describe("friendErrorCopy", () => {
       ["MP-NET-TS-007 no answer", /No answer through the tunnel/],
       ["MP-NET-TS-008 not in network", /isn't in your Tailscale network/],
       ["MP-STORE-001 db locked", /couldn't save/],
+      ["MP-FRIEND-001 bad invite", /link|invite/i],
     ];
     for (const [detail, pattern] of cases) {
       expect(friendErrorCopy(detail, "fallback")).toMatch(pattern);
@@ -157,5 +179,20 @@ describe("friend probe shapes", () => {
     const offline = candidate({ online: false, path: "offline", ip: null });
     expect(offline.online).toBe(false);
     expect(offline.ip).toBeNull();
+  });
+
+  it("persisted friend states enumerate the invitation flow", () => {
+    const states: FriendConnectionState[] = [
+      "INVITED",
+      "TAILSCALE_JOINED",
+      "MOVIE_PARTY_VERIFIED",
+    ];
+    // A friend saved straight from a link starts at INVITED; the tailnet
+    // observation promotes to TAILSCALE_JOINED; only a real ping marks
+    // MOVIE_PARTY_VERIFIED. ONLINE/OFFLINE is live, never persisted.
+    for (const state of states) {
+      const friend = savedFriend({ connectionState: state });
+      expect(friend.connectionState).toBe(state);
+    }
   });
 });

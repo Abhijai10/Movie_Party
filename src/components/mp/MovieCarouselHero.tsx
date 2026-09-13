@@ -205,6 +205,31 @@ export function MovieCarouselHero() {
       <p className="mt-6 text-sm italic text-white/40 font-light" aria-hidden="true">
         a double feature, every night
       </p>
+
+      {/* Constantly-drifting banner strip — the wall crossfades once per
+          rotation while this strip keeps moving between rotations, so the
+          hero is always in motion. Decorative atmosphere: the title list is
+          duplicated for the seamless -50% translate loop, and CSS pauses
+          the drift entirely under prefers-reduced-motion. */}
+      <div className="mp-marquee-mask mt-6 w-full" aria-hidden="true">
+        <div className="mp-marquee">
+          {[...FEATURES, ...FEATURES].map((item, chipIndex) => (
+            <div
+              key={`${item.title}-${String(chipIndex)}`}
+              className="w-28 h-16 rounded-lg border border-white/10 flex flex-col items-center justify-center shrink-0 mr-3"
+              style={{ background: `linear-gradient(140deg, ${item.from} 0%, ${item.to} 100%)` }}
+            >
+              <span className="font-serif-display text-[11px] text-white/90">{item.title}</span>
+              <span
+                className="text-[8px] tracking-[0.22em] uppercase"
+                style={{ color: item.accent }}
+              >
+                {item.year}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

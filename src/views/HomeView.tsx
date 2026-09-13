@@ -77,7 +77,7 @@ export function HomeView({
     return percent != null ? String(Math.round(percent * 100)) : "0";
   };
   return (
-    <div className="relative w-screen min-h-screen overflow-x-hidden" data-testid="home-screen">
+    <div className="relative w-full min-h-screen" data-testid="home-screen">
       <div className="fixed inset-0 pointer-events-none">
         <SilkBackground />
       </div>
@@ -126,7 +126,7 @@ export function HomeView({
           initial={{ opacity: 0, y: 24 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.9, ease: [0.22, 1, 0.36, 1] }}
-          className="col-span-12 lg:col-span-6 flex flex-col"
+          className="col-span-12 lg:col-span-6 flex flex-col pt-4"
         >
           <span className="text-[11px] tracking-[0.32em] uppercase text-white/50 mb-6">
             ● Welcome back

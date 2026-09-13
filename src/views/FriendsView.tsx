@@ -17,12 +17,12 @@ import { InviteCard } from "../components/mp/InviteCard";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
 import {
-  addFriend,
+  acceptFriendInvite,
   friendErrorCopy,
   friendInviteLink,
   friendStatusCopy,
   friendStatusFor,
-  listFriends,
+  refreshFriendStates,
   removeFriend,
   renameFriend,
   verifyFriend,
@@ -32,11 +32,19 @@ import {
 import { parseFriendInvite } from "../invites/deepLinks";
 
 /**
- * Friends — the invite-link surface. No tailnet jargon, no peer tables:
- * you share a link/QR, your friend opens it, and they land in this list
- * under an editable name. The app handles the lookup (the link carries
- * the inviter's tailnet identity), verification (tailscale ping), and
- * honest offline states.
+ * Friends — the invite-link surface of the Tailscale friend architecture:
+ *
+ *   Movie Party friend invite (identity-only link — NEVER an auth key)
+ *   → friend accepts it here (INVITED)
+ *   → their device joins the tailnet through Tailscale's own
+ *     external-user invitation with THEIR Tailscale identity
+ *   → Movie Party refreshes the tailnet status (TAILSCALE_JOINED)
+ *   → Movie Party verifies the expected peer with a real ping
+ *     (MOVIE_PARTY_VERIFIED → ONLINE/OFFLINE as a live observation).
+ *
+ * No tailnet jargon on the surface: share a link/QR, your friend opens
+ * it, and they land in this list under an editable name with honest
+ * states.
  */
 type FriendsViewProps = {
   onBack: () => void;
@@ -69,7 +77,10 @@ export function FriendsView({
 
   const refresh = useCallback(async () => {
     try {
-      onFriendsChanged(await listFriends());
+      // refresh_friend_states promotes INVITED friends whose device has
+      // since joined the tailnet (TAILSCALE_JOINED) and never demotes a
+      // verified friend — the observation step of the friend flow.
+      onFriendsChanged(await refreshFriendStates());
     } catch {
       // list_friends never throws in Rust — keep the last known list.
     }
@@ -107,10 +118,10 @@ export function FriendsView({
       setPasteError(null);
       setBusyAction("add");
       try {
-        await addFriend(parsed.peerKey, parsed.displayName);
+        const friend = await acceptFriendInvite(raw);
         await refresh();
         setPasteValue("");
-        setNotice(`${parsed.displayName} is now in your friends.`);
+        setNotice(`${friend.displayName} is now in your friends.`);
         return true;
       } catch (error) {
         setPasteError(friendErrorCopy(error, "Movie Party couldn't add that friend."));
@@ -185,7 +196,7 @@ export function FriendsView({
   };
 
   return (
-    <div className="relative w-screen min-h-screen overflow-y-auto" data-testid="friends-screen">
+    <div className="relative w-full min-h-screen" data-testid="friends-screen">
       <div className="fixed inset-0 pointer-events-none">
         <SilkBackground variant="calm" />
       </div>
@@ -225,10 +236,17 @@ export function FriendsView({
             </p>
           ) : null}
 
-          <div className="mt-8 grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+          <div className="mt-8 friends-layout" data-testid="friends-grid">
             <div className="space-y-6">
               {invite != null ? (
-                <InviteCard inviteCode={invite.link} title="Your friend link" qrHint="Scan to add you" />
+                <div className="space-y-3 min-w-0 friends-card" data-testid="friends-invite-block">
+                  <InviteCard inviteCode={invite.link} title="Your friend link" qrHint="Scan to add you" />
+                  <p className="text-xs text-white/45 leading-relaxed">
+                    The link carries only your name — never a network key. Your friend joins
+                    your Tailscale network on their device (Tailscale asks them to sign in
+                    with their own account), then Movie Party sees and verifies them here.
+                  </p>
+                </div>
               ) : inviteError != null ? (
                 <div
                   className="rounded-2xl border border-amber-400/25 bg-amber-400/[0.06] p-5"
@@ -246,13 +264,13 @@ export function FriendsView({
               )}
 
               <div
-                className="rounded-2xl border border-white/10 bg-white/[0.03] p-5"
+                className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 friends-card"
                 data-testid="friends-add-from-link"
               >
                 <span className="flex items-center gap-2 text-[11px] tracking-[0.28em] uppercase text-white/50">
-                  <UserPlus className="w-3.5 h-3.5" /> Have a friend's link?
+                  <UserPlus className="w-3.5 h-3.5 shrink-0" /> Have a friend's link?
                 </span>
-                <div className="mt-3 flex gap-3">
+                <div className="mt-3 flex flex-wrap gap-3 min-w-0">
                   <input
                     value={pasteValue}
                     onChange={(event) => {
@@ -260,7 +278,9 @@ export function FriendsView({
                     }}
                     placeholder="Paste movieparty://friend/…"
                     data-testid="friends-paste-input"
-                    className="min-w-0 flex-1 bg-white/[0.05] border border-white/15 rounded-lg px-3.5 py-2.5 text-sm text-white/90 placeholder:text-white/35 focus:outline-none focus:border-sky-400/50 font-mono-mp"
+                    className={`mp-input font-mono-mp${
+                      pasteValue.trim().length > 0 ? " mp-input--filled" : ""
+                    }`}
                   />
                   <CinemaButton
                     onClick={() => {
@@ -282,7 +302,7 @@ export function FriendsView({
             </div>
 
             <div
-              className="rounded-2xl border border-white/10 bg-white/[0.03] p-5"
+              className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 friends-card"
               data-testid="friends-list-card"
             >
               <div className="flex items-center justify-between">
@@ -300,7 +320,7 @@ export function FriendsView({
                   with a name you can edit.
                 </p>
               ) : (
-                <ul className="mt-4 space-y-3 max-h-[420px] overflow-y-auto pr-1">
+                <ul className="mt-4 space-y-3 friends-scroll">
                   {friends.map((friend) => {
                     const status = friendStatusFor(friend, undefined);
                     const renaming = renamingKey === friend.peerKey;
@@ -320,7 +340,7 @@ export function FriendsView({
                               }}
                               aria-label="Friend name"
                               data-testid={`friend-rename-input-${friend.peerKey}`}
-                              className="min-w-0 flex-1 bg-white/[0.05] border border-white/15 rounded-lg px-3 py-2 text-sm text-white/90 focus:outline-none focus:border-sky-400/50"
+                              className="mp-input font-mono-mp"
                             />
                             <button
                               type="button"
@@ -350,9 +370,9 @@ export function FriendsView({
                             </button>
                           </div>
                         ) : (
-                          <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center justify-between gap-3 min-w-0">
                             <div className="min-w-0">
-                              <div className="flex items-center gap-2">
+                              <div className="flex items-center gap-2 min-w-0">
                                 <p className="text-sm text-white/85 truncate">{friend.displayName}</p>
                                 <button
                                   type="button"
@@ -370,9 +390,8 @@ export function FriendsView({
                               </div>
                               <p className="mt-1 text-[11px] text-white/45">
                                 {friendStatusCopy(friend, status)}
-                              </p>
-                            </div>
-                            <div className="flex items-center gap-2 shrink-0">
+                              </p>                            </div>
+                            <div className="flex items-center gap-2 shrink-0 friends-row-actions">
                               <button
                                 type="button"
                                 disabled={busy}
@@ -390,9 +409,9 @@ export function FriendsView({
                                 )}
                                 {busy && busyAction === "verify"
                                   ? "Pinging"
-                                  : status === "connected"
+                                  : status === "MOVIE_PARTY_VERIFIED"
                                     ? "Re-verify"
-                                    : "Connect"}
+                                    : "Verify"}
                               </button>
                               <button
                                 type="button"

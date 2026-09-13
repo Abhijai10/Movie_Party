@@ -223,7 +223,7 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
   };
 
   return (
-    <div className="relative w-screen min-h-screen overflow-y-auto" data-testid="settings">
+    <div className="relative w-full min-h-screen" data-testid="settings">
       <div className="fixed inset-0 pointer-events-none">
         <SilkBackground variant="calm" />
       </div>
@@ -239,8 +239,8 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
         <StatusIndicator state="sync" label="Strict Sync" />
       </header>
 
-      <main className="relative z-10 max-w-[1300px] mx-auto px-12 mt-6 pb-20 grid grid-cols-12 gap-10 items-start">
-        <nav aria-label="Settings sections" className="col-span-12 lg:col-span-3 lg:sticky lg:top-6 self-start">
+      <main className="relative z-10 max-w-[1300px] w-full mx-auto px-12 mt-6 pb-20 settings-layout">
+        <nav aria-label="Settings sections" className="settings-nav">
           <h1 className="font-serif-display text-white text-4xl tracking-[-0.02em]">Settings</h1>
           <div className="mt-8 rounded-2xl border border-white/10 bg-white/[0.03] p-2.5">
             <ul className="space-y-1">
@@ -266,12 +266,15 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
           </div>
         </nav>
 
+        {/* Vertical partition between the nav and the content pane. */}
+        <div className="settings-divider" aria-hidden="true" />
+
         <motion.section
           key={section}
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.25 }}
-          className="col-span-12 lg:col-span-9 max-w-2xl"
+          className="settings-content max-w-2xl"
         >
           <h2
             className="font-serif-display text-2xl text-white/90 tracking-tight"

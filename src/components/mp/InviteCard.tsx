@@ -59,7 +59,7 @@ export function InviteCard({
 
   return (
     <div
-      className="rounded-2xl p-5"
+      className="rounded-2xl p-5 min-w-0 max-w-full"
       style={{
         background: "rgba(13, 11, 20, 0.7)",
         border: "1px solid rgba(159,122,234,0.18)",
@@ -108,10 +108,10 @@ export function InviteCard({
           </button>
         </div>
       ) : (
-        <div className="mt-4 flex flex-col items-center gap-3">
-          <div className="rounded-xl bg-white p-4 w-fit" data-testid="invite-qr">
+        <div className="mt-3 flex flex-col items-center gap-2.5">
+          <div className="rounded-xl bg-white p-3" data-testid="invite-qr">
             {qr == null ? (
-              <div className="w-48 h-48 flex items-center justify-center">
+              <div className="w-40 h-40 flex items-center justify-center">
                 {isFullLink ? (
                   <span className="text-xs text-black/50">Rendering…</span>
                 ) : (
@@ -122,7 +122,7 @@ export function InviteCard({
               </div>
             ) : (
               <div
-                className="w-48 h-48 [&>svg]:w-full [&>svg]:h-full"
+                className="w-40 h-40 invite-qr-box"
                 // The SVG is generated locally from the invite link by our
                 // own Rust command (invite_qr_svg) — trusted content, no
                 // remote origin. SVG injection via innerHTML is scoped to

@@ -116,6 +116,8 @@ pub fn run() {
             list_friends,
             verify_friend,
             friend_invite_link,
+            accept_friend_invite,
+            refresh_friend_states,
             rename_friend,
             show_home,
             show_join_party,
@@ -270,6 +272,30 @@ async fn friend_invite_link(
     runtime: tauri::State<'_, app_runtime::AppRuntime>,
 ) -> Result<crate::network::tailscale::FriendInviteLink, String> {
     runtime.friend_invite().await
+}
+
+/// Accept a movieparty://friend/ invite (the receiving side of the
+/// friend architecture). The link carries ONLY the inviter's identity —
+/// never a Tailscale auth key; the friend's own device joins the tailnet
+/// through Tailscale's external-user invitation with their identity,
+/// and Movie Party observes + verifies the result (INVITED →
+/// TAILSCALE_JOINED → MOVIE_PARTY_VERIFIED).
+#[tauri::command]
+async fn accept_friend_invite(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    invite_link: String,
+) -> Result<crate::storage::sqlite::StoredFriend, String> {
+    runtime.accept_friend_invite(invite_link).await
+}
+
+/// Refresh saved friends against the live tailnet status: INVITED
+/// friends whose device has since joined the tailnet are promoted to
+/// TAILSCALE_JOINED (never demoting MOVIE_PARTY_VERIFIED).
+#[tauri::command]
+async fn refresh_friend_states(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<Vec<crate::storage::sqlite::StoredFriend>, String> {
+    Ok(runtime.refresh_friend_states().await)
 }
 
 /// Rename a saved friend (friendly names over tailnet jargon).

@@ -4478,3 +4478,431 @@ input[type=range].mp-range::-webkit-slider-thumb {
     animation: none;
   }
 }
+
+/* ── App-window scroll model ──────────────────────────────────────────
+   html/body stay overflow:hidden (the Tauri window never scrolls
+   natively and the boot splash is fixed). #root becomes the single
+   vertical scroll container: views are full-window surfaces whose
+   content can exceed the window height (Home, Friends, Settings,
+   Schedule) — before this rule that content was silently clipped.
+   overflow-x:hidden also neutralizes the 100vw (w-screen) overshoot
+   that appears once a vertical scrollbar exists. */
+#root {
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+/* ── Home hero: continuously-drifting poster strip ────────────────────
+   The poster wall crossfades once per rotation; this strip drifts
+   constantly so the hero is always in motion between crossfades.
+   Doubled content + -50% translate = a seamless loop. */
+@keyframes mp-marquee {
+    from { transform: translateX(0); }
+    to   { transform: translateX(-50%); }
+}
+.mp-marquee {
+    display: flex;
+    /* No flex gap: each chip carries its own trailing margin so the
+       doubled content is exactly 2× one set — translateX(-50%) wraps
+       at precisely the start of the second copy (seamless loop). */
+    width: max-content;
+    animation: mp-marquee 38s linear infinite;
+}
+.mp-marquee-mask {
+    overflow: hidden;
+    mask-image: linear-gradient(90deg, transparent, #000 14%, #000 86%, transparent);
+    -webkit-mask-image: linear-gradient(90deg, transparent, #000 14%, #000 86%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+    .mp-marquee {
+        animation: none;
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   v0.9.x hand-written layer — utilities + components the views rely on.
+   styles.css is a frozen compiled artifact (Tailwind is NOT part of the
+   Vite build), so every utility the v0.9.x views reference must exist
+   here explicitly. Each block mirrors Tailwind v3 semantics so the
+   markup keeps working without a build-time compiler.
+
+   Order: color tokens → spacing/layout → typography → breakpoints →
+   shared form/QR components → view layouts (settings/friends/schedule).
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── white/black alpha backgrounds & borders ─────────────────────────── */
+.bg-white\/4 { background-color: rgb(255 255 255 / 0.04); }
+.bg-white\/6 { background-color: rgb(255 255 255 / 0.06); }
+.bg-white\/7 { background-color: rgb(255 255 255 / 0.07); }
+.bg-white\/10 { background-color: rgb(255 255 255 / 0.1); }
+.bg-white\/12 { background-color: rgb(255 255 255 / 0.12); }
+.bg-white\/\[0\.04\] { background-color: rgb(255 255 255 / 0.04); }
+.bg-white\/\[0\.06\] { background-color: rgb(255 255 255 / 0.06); }
+.bg-white\/\[0\.09\] { background-color: rgb(255 255 255 / 0.09); }
+.bg-black\/40 { background-color: rgb(0 0 0 / 0.4); }
+.bg-black\/45 { background-color: rgb(0 0 0 / 0.45); }
+.bg-black\/55 { background-color: rgb(0 0 0 / 0.55); }
+.bg-black\/60 { background-color: rgb(0 0 0 / 0.6); }
+.bg-black\/70 { background-color: rgb(0 0 0 / 0.7); }
+.border-white\/12 { border-color: rgb(255 255 255 / 0.12); }
+.border-white\/25 { border-color: rgb(255 255 255 / 0.25); }
+.border-white\/\[0\.06\] { border-color: rgb(255 255 255 / 0.06); }
+.border-white\/\[0\.08\] { border-color: rgb(255 255 255 / 0.08); }
+
+/* ── brand hex utilities ─────────────────────────────────────────────── */
+.bg-\[\#0D0B14\] { background-color: rgb(13 11 20 / 1); }
+.bg-\[\#0D0B14\]\/92 { background-color: rgb(13 11 20 / 0.92); }
+.bg-\[\#05050B\] { background-color: rgb(5 5 11 / 1); }
+.bg-\[\#6B46C1\]\/20 { background-color: rgb(107 70 193 / 0.2); }
+.bg-\[\#6B46C1\]\/30 { background-color: rgb(107 70 193 / 0.3); }
+.bg-\[\#9F7AEA\] { background-color: rgb(159 122 234 / 1); }
+.bg-\[\#9F7AEA\]\/25 { background-color: rgb(159 122 234 / 0.25); }
+.border-\[\#9F7AEA\]\/35 { border-color: rgb(159 122 234 / 0.35); }
+.border-\[\#9F7AEA\]\/40 { border-color: rgb(159 122 234 / 0.4); }
+.text-\[\#C4B5FD\] { color: rgb(196 181 253 / 1); }
+.text-\[\#FCA5A5\] { color: rgb(252 165 165 / 1); }
+
+/* ── sky (info) ─────────────────────────────────────────────────────── */
+.text-sky-100 { color: rgb(224 242 254 / 1); }
+.text-sky-200\/80 { color: rgb(186 230 253 / 0.8); }
+.text-sky-300\/80 { color: rgb(125 211 252 / 0.8); }
+.border-sky-400\/30 { border-color: rgb(56 189 248 / 0.3); }
+.border-sky-400\/50 { border-color: rgb(56 189 248 / 0.5); }
+.bg-sky-400\/10 { background-color: rgb(56 189 248 / 0.1); }
+.focus\:border-sky-400\/50:focus { border-color: rgb(56 189 248 / 0.5); }
+.accent-sky-400 { accent-color: rgb(56 189 248 / 1); }
+
+/* ── amber (warning) ─────────────────────────────────────────────────── */
+.text-amber-100\/90 { color: rgb(254 243 199 / 0.9); }
+.text-amber-200\/90 { color: rgb(253 230 138 / 0.9); }
+.text-amber-300\/90 { color: rgb(252 211 77 / 0.9); }
+.border-amber-400\/25 { border-color: rgb(251 191 36 / 0.25); }
+.border-amber-400\/30 { border-color: rgb(251 191 36 / 0.3); }
+.border-amber-400\/40 { border-color: rgb(251 191 36 / 0.4); }
+.bg-amber-400\/10 { background-color: rgb(251 191 36 / 0.1); }
+.bg-amber-400\/\[0\.06\] { background-color: rgb(251 191 36 / 0.06); }
+
+/* ── emerald (success) ───────────────────────────────────────────────── */
+.text-emerald-200\/90 { color: rgb(110 231 183 / 0.9); }
+.text-emerald-300 { color: rgb(52 211 153 / 1); }
+.text-emerald-300\/80 { color: rgb(52 211 153 / 0.8); }
+.text-emerald-300\/85 { color: rgb(52 211 153 / 0.85); }
+.border-emerald-400\/30 { border-color: rgb(52 211 153 / 0.3); }
+.bg-emerald-400\/10 { background-color: rgb(52 211 153 / 0.1); }
+
+/* ── rose (destructive) ───────────────────────────────────────────────── */
+.text-rose-300 { color: rgb(253 164 175 / 1); }
+.text-rose-300\/90 { color: rgb(253 164 175 / 0.9); }
+
+/* ── white alpha text ────────────────────────────────────────────────── */
+.text-white\/35 { color: rgb(255 255 255 / 0.35); }
+.text-white\/65 { color: rgb(255 255 255 / 0.65); }
+.text-white\/75 { color: rgb(255 255 255 / 0.75); }
+.text-white\/95 { color: rgb(255 255 255 / 0.95); }
+.text-white\/\[0\.06\] { color: rgb(255 255 255 / 0.06); }
+.text-black\/50 { color: rgb(0 0 0 / 0.5); }
+.text-black\/60 { color: rgb(0 0 0 / 0.6); }
+
+/* ── hover/disabled states ───────────────────────────────────────────── */
+.hover\:bg-white\/\[0\.04\]:hover { background-color: rgb(255 255 255 / 0.04); }
+.hover\:bg-white\/\[0\.06\]:hover { background-color: rgb(255 255 255 / 0.06); }
+.hover\:bg-white\/\[0\.07\]:hover { background-color: rgb(255 255 255 / 0.07); }
+.hover\:bg-white\/\[0\.12\]:hover { background-color: rgb(255 255 255 / 0.12); }
+.hover\:bg-\[\#9F7AEA\]\/40:hover { background-color: rgb(159 122 234 / 0.4); }
+.hover\:border-white\/25:hover { border-color: rgb(255 255 255 / 0.25); }
+.hover\:text-\[\#FCA5A5\]:hover { color: rgb(252 165 165 / 1); }
+.hover\:text-white\/70:hover { color: rgb(255 255 255 / 0.7); }
+.disabled\:opacity-45:disabled { opacity: 0.45; }
+.disabled\:opacity-60:disabled { opacity: 0.6; }
+.disabled\:hover\:text-white\/60:disabled:hover { color: rgb(255 255 255 / 0.6); }
+
+/* ── spacing ─────────────────────────────────────────────────────────── */
+.gap-7 { gap: 1.75rem; }
+.mt-0\.5 { margin-top: 0.125rem; }
+.mt-2\.5 { margin-top: 0.625rem; }
+.mr-3 { margin-right: 0.75rem; }
+.pt-2 { padding-top: 0.5rem; }
+.pb-2 { padding-bottom: 0.5rem; }
+.pb-20 { padding-bottom: 5rem; }
+.py-5 { padding-top: 1.25rem; padding-bottom: 1.25rem; }
+.py-10 { padding-top: 2.5rem; padding-bottom: 2.5rem; }
+.py-12 { padding-top: 3rem; padding-bottom: 3rem; }
+.py-16 { padding-top: 4rem; padding-bottom: 4rem; }
+.px-6 { padding-left: 1.5rem; padding-right: 1.5rem; }
+.p-2\.5 { padding: 0.625rem; }
+.pl-3\.5 { padding-left: 0.875rem; }
+.pl-3 { padding-left: 0.75rem; }
+.pr-1 { padding-right: 0.25rem; }
+
+/* ── sizing ──────────────────────────────────────────────────────────── */
+.h-6 { height: 1.5rem; }
+.h-11 { height: 2.75rem; }
+.h-28 { height: 7rem; }
+.w-11 { width: 2.75rem; }
+.w-28 { width: 7rem; }
+.w-\[300px\] { width: 300px; }
+.w-fit { width: fit-content; }
+.min-w-\[220px\] { min-width: 220px; }
+.max-w-2xl { max-width: 42rem; }
+.max-w-3xl { max-width: 48rem; }
+.max-w-5xl { max-width: 64rem; }
+.max-w-\[1100px\] { max-width: 1100px; }
+.max-w-\[260px\] { max-width: 260px; }
+.max-h-48 { max-height: 12rem; }
+.max-h-\[420px\] { max-height: 420px; }
+.h-\[420px\] { height: 420px; }
+.w-\[min\(560px\,70vw\)\] { width: min(560px, 70vw); }
+.max-w-\[min\(560px\,70vw\)\] { max-width: min(560px, 70vw); }
+.max-w-\[min\(560px\,92vw\)\] { max-width: min(560px, 92vw); }
+.w-\[min\(620px\,75vw\)\] { width: min(620px, 75vw); }
+.h-\[min\(560px\,70vh\)\] { height: min(560px, 70vh); }
+
+/* ── positioning ──────────────────────────────────────────────────────── */
+.-right-3 { right: -0.75rem; }
+.bottom-4 { bottom: 1rem; }
+.bottom-6 { bottom: 1.5rem; }
+.bottom-\[132px\] { bottom: 132px; }
+.z-\[65\] { z-index: 65; }
+.z-\[70\] { z-index: 70; }
+
+/* ── typography ──────────────────────────────────────────────────────── */
+.font-light { font-weight: 300; }
+.text-4xl { font-size: 2.25rem; line-height: 2.5rem; }
+.text-5xl { font-size: 3rem; line-height: 1; }
+.leading-\[1\.05\] { line-height: 1.05; }
+.leading-\[1\.1\] { line-height: 1.1; }
+.text-\[8px\] { font-size: 8px; }
+.text-\[34px\] { font-size: 34px; }
+.text-\[38px\] { font-size: 38px; }
+.text-\[44px\] { font-size: 44px; }
+.text-\[52px\] { font-size: 52px; }
+.text-\[60px\] { font-size: 60px; }
+.text-\[190px\] { font-size: 190px; }
+.tracking-\[0\.04em\] { letter-spacing: 0.04em; }
+.tracking-\[0\.12em\] { letter-spacing: 0.12em; }
+.tracking-\[0\.14em\] { letter-spacing: 0.14em; }
+.tracking-\[0\.18em\] { letter-spacing: 0.18em; }
+.tracking-\[0\.26em\] { letter-spacing: 0.26em; }
+.tracking-\[0\.3em\] { letter-spacing: 0.3em; }
+.tracking-\[0\.34em\] { letter-spacing: 0.34em; }
+.text-right { text-align: right; }
+.whitespace-pre-line { white-space: pre-line; }
+.whitespace-pre-wrap { white-space: pre-wrap; }
+.items-baseline { align-items: baseline; }
+.space-y-6 > :not([hidden]) ~ :not([hidden]) { margin-top: 1.5rem; }
+.space-y-1 > :not([hidden]) ~ :not([hidden]) { margin-top: 0.25rem; }
+.space-y-1\.5 > :not([hidden]) ~ :not([hidden]) { margin-top: 0.375rem; }
+.space-y-2 > :not([hidden]) ~ :not([hidden]) { margin-top: 0.5rem; }
+.space-y-3 > :not([hidden]) ~ :not([hidden]) { margin-top: 0.75rem; }
+.space-y-4 > :not([hidden]) ~ :not([hidden]) { margin-top: 1rem; }
+.border-b-0 { border-bottom-width: 0px; }
+.last\:border-b-0:last-child { border-bottom-width: 0px; }
+
+/* ── effects ─────────────────────────────────────────────────────────── */
+.backdrop-blur-\[2px\] { backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); }
+.backdrop-blur-md { backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+.backdrop-blur-xl { backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); }
+.shadow-2xl { box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); }
+.shadow-\[0_0_12px_rgba\(159\,122\,234\,0\.9\)\] { box-shadow: 0 0 12px rgba(159, 122, 234, 0.9); }
+.shadow-\[inset_2px_0_0_0_\#9F7AEA\] { box-shadow: inset 2px 0 0 0 #9F7AEA; }
+.object-cover { object-fit: cover; }
+.appearance-none { appearance: none; -webkit-appearance: none; }
+.rounded-\[2px\] { border-radius: 2px; }
+.min-h-screen { min-height: 100vh; }
+.max-w-full { max-width: 100%; }
+
+/* ── responsive breakpoints ──────────────────────────────────────────── */
+@media (min-width: 640px) {
+  .sm\:px-12 { padding-left: 3rem; padding-right: 3rem; }
+  .sm\:text-6xl { font-size: 3.75rem; line-height: 1; }
+  .sm\:text-lg { font-size: 1.125rem; line-height: 1.75rem; }
+  .sm\:flex-row { flex-direction: row; }
+  .sm\:grid-cols-\[minmax\(7\.75rem\,0\.72fr\)_minmax\(12rem\,1\.28fr\)\] {
+    grid-template-columns: minmax(7.75rem, 0.72fr) minmax(12rem, 1.28fr);
+  }
+}
+@media (min-width: 768px) {
+  .md\:flex { display: flex; }
+  .md\:w-auto { width: auto; }
+  .md\:absolute { position: absolute; }
+  .md\:text-sm { font-size: 0.875rem; line-height: 1.25rem; }
+  .md\:max-w-\[420px\] { max-width: 420px; }
+}
+@media (min-width: 1024px) {
+  .lg\:col-span-2 { grid-column: span 2 / span 2; }
+  .lg\:col-span-5 { grid-column: span 5 / span 5; }
+  .lg\:col-span-6 { grid-column: span 6 / span 6; }
+  .lg\:col-span-7 { grid-column: span 7 / span 7; }
+  .lg\:col-span-12 { grid-column: span 12 / span 12; }
+  .lg\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .lg\:flex { display: flex; }
+  .lg\:sticky { position: sticky; }
+  .lg\:top-8 { top: 2rem; }
+  .lg\:top-6 { top: 1.5rem; }
+}
+@media (min-width: 1280px) {
+  .xl\:text-\[56px\] { font-size: 56px; }
+  .xl\:text-\[76px\] { font-size: 76px; }
+  .xl\:text-\[84px\] { font-size: 84px; }
+  .xl\:text-\[112px\] { font-size: 112px; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Shared form + QR components (v0.9.x)
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* mp-input — the app-wide text input (Friends paste/rename, manual ids).
+   Readable text + visible caret are guaranteed: explicit light-on-dark
+   color, dark caret, real placeholder contrast, focus ring in the brand
+   violet. min-width:0 lets it shrink inside flex rows without overflow. */
+.mp-input {
+    min-width: 0;
+    flex: 1 1 12rem;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 10px;
+    padding: 0.625rem 0.875rem;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    color: rgb(242 242 245 / 0.95);
+    caret-color: #9F7AEA;
+    outline: none;
+    transition: border-color 150ms ease, background-color 150ms ease, box-shadow 150ms ease;
+}
+.mp-input::placeholder {
+    color: rgb(255 255 255 / 0.42);
+}
+.mp-input:hover:not(:disabled) {
+    border-color: rgba(159, 122, 234, 0.4);
+}
+.mp-input:focus {
+    border-color: rgba(159, 122, 234, 0.6);
+    background: rgba(255, 255, 255, 0.07);
+    box-shadow: 0 0 0 3px rgba(159, 122, 234, 0.18);
+}
+.mp-input--filled {
+    color: rgb(242 242 245 / 1);
+    background: rgba(255, 255, 255, 0.07);
+}
+
+/* invite-qr-box — the QR panel. The Rust renderer (invite_qr_svg) emits a
+   fixed 240×240 viewBox SVG; this box is the intended ~160px display size
+   that keeps the QR fully contained inside its white panel with quiet
+   room, so the matrix never touches or escapes the padding. */
+.invite-qr-box {
+    width: 160px;
+    height: 160px;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+}
+.invite-qr-box > svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+/* ── Settings: real two-pane layout ────────────────────────────────────
+   [ LEFT NAV | VERTICAL PARTITION | RIGHT CONTENT ]
+   A grid with an explicit 1px divider column; both panes occupy the
+   same Settings container at every width ≥ ~880px. Below that the nav
+   collapses to a compact horizontal scroll row so nothing ever stacks
+   full-width above the content. */
+.settings-layout {
+    display: grid;
+    grid-template-columns: 220px 1px minmax(0, 1fr);
+    gap: 0 2.5rem;
+    align-items: start;
+}
+.settings-nav {
+    grid-column: 1;
+    position: sticky;
+    top: 1.5rem;
+    min-width: 0;
+}
+.settings-divider {
+    grid-column: 2;
+    align-self: stretch;
+    width: 1px;
+    min-height: 320px;
+    background: linear-gradient(
+        180deg,
+        transparent,
+        rgba(255, 255, 255, 0.10) 12%,
+        rgba(255, 255, 255, 0.10) 88%,
+        transparent
+    );
+}
+.settings-content {
+    grid-column: 3;
+    min-width: 0;
+    overflow-wrap: break-word;
+}
+@media (max-width: 880px) {
+    .settings-layout {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 1.75rem 0;
+    }
+    .settings-divider {
+        display: none;
+    }
+    .settings-nav {
+        position: static;
+    }
+}
+
+/* ── Friends: containment helpers ──────────────────────────────────────
+   The page is a bounded grid; cards clamp their children with
+   min-width:0 chains so a long invite link can never push anything
+   outside the window. The friends list scrolls INSIDE its card. */
+.friends-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1.5rem;
+    align-items: start;
+    width: 100%;
+    max-width: 100%;
+}
+@media (min-width: 1024px) {
+    .friends-layout {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    }
+}
+.friends-card {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+}
+.friends-scroll {
+    max-height: 420px;
+    overflow-y: auto;
+    padding-right: 0.25rem;
+    min-width: 0;
+}
+.friends-row-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0;
+}
+
+/* ── Schedule: inner-scroll containment ────────────────────────────────
+   The form grid is bounded to the window width; cards never exceed the
+   available width, and #root (the single scroll container) handles the
+   page's vertical overflow so nothing is clipped below the window. */
+.schedule-form-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1.5rem;
+    align-items: start;
+    min-width: 0;
+    max-width: 100%;
+}
+@media (min-width: 1024px) {
+    .schedule-form-grid {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    }
+    .schedule-form-grid > .schedule-span-2 {
+        grid-column: 1 / -1;
+    }
+}

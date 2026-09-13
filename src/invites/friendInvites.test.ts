@@ -72,4 +72,41 @@ describe("friend invite round-trip", () => {
     const parsed = parseFriendInvite(`movieparty://friend/${"A".repeat(2000)}`);
     expect(parsed.ok).toBe(false);
   });
+
+  it("carries ONLY the inviter's identity — never a credential", () => {
+    // The friend architecture's core guarantee: the invite payload holds
+    // exactly {n, pk}. Any attempt to smuggle an auth key or token into
+    // the payload makes the link invalid rather than silently honored —
+    // a link that is safe to print on a QR and share anywhere.
+    const link = buildFriendInviteLink(PEER_KEY, "Rahul");
+    const code = link.slice("movieparty://friend/".length).split("#")[0] ?? "";
+    const normalized = code.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+    const decoded = atob(padded);
+    const payload = JSON.parse(decoded) as Record<string, unknown>;
+    expect(Object.keys(payload).sort()).toEqual(["n", "pk"]);
+    const lowered = decoded.toLowerCase();
+    for (const banned of [
+      "authkey",
+      "auth_key",
+      "apikey",
+      "api_key",
+      "token",
+      "secret",
+      "password",
+      "credential",
+    ]) {
+      expect(lowered).not.toContain(banned);
+    }
+  });
+
+  it("rejects payloads that smuggle extra credential fields", () => {
+    const payload = b64url(
+      JSON.stringify({ n: "Rahul", pk: PEER_KEY, authKey: "tskey-auth-XXXXX" }),
+    );
+    const parsed = parseFriendInvite(`movieparty://friend/${payload}`);
+    // Extra fields make the link invalid: an invite must never be able
+    // to authenticate another person's device as anyone.
+    expect(parsed.ok).toBe(false);
+  });
 });

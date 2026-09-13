@@ -12,7 +12,7 @@ use rusqlite::{params, Connection};
 
 use super::StorageError;
 
-const CURRENT_SCHEMA_VERSION: i32 = 4;
+const CURRENT_SCHEMA_VERSION: i32 = 5;
 
 /// Helper to lock a Mutex, converting PoisonError to StorageError.
 fn lock_mutex<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, StorageError> {
@@ -116,6 +116,53 @@ pub struct StoredFriend {
     pub last_path: Option<String>,
     /// Latency (ms) reported by the last verification.
     pub last_latency_ms: Option<u32>,
+    /// Where the friend is in the external-user invitation flow:
+    /// INVITED | TAILSCALE_JOINED | MOVIE_PARTY_VERIFIED. ONLINE/OFFLINE
+    /// is derived live from tailnet status, never stored.
+    pub connection_state: FriendConnectionState,
+}
+
+/// The persisted stage of the Tailscale friend architecture.
+/// Order: INVITED → TAILSCALE_JOINED → MOVIE_PARTY_VERIFIED; ONLINE and
+/// OFFLINE are transient observations derived from the live tailnet
+/// status and are intentionally NOT part of this persisted enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FriendConnectionState {
+    /// Accepted from a movieparty://friend invite; the friend's device
+    /// has not been observed in this device's tailnet status yet.
+    Invited,
+    /// The expected peer answered `tailscale status` with a usable
+    /// address — the friend authenticated with their own Tailscale
+    /// identity and the device joined the tailnet.
+    TailscaleJoined,
+    /// A real `tailscale ping` verified the tunnel end-to-end.
+    MoviePartyVerified,
+}
+
+impl FriendConnectionState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FriendConnectionState::Invited => "INVITED",
+            FriendConnectionState::TailscaleJoined => "TAILSCALE_JOINED",
+            FriendConnectionState::MoviePartyVerified => "MOVIE_PARTY_VERIFIED",
+        }
+    }
+
+    /// Parse the persisted label; unknown values fall back to INVITED
+    /// (the honest earliest state, never a fabricated later one).
+    pub fn from_persisted(value: &str) -> Self {
+        match value {
+            "TAILSCALE_JOINED" => FriendConnectionState::TailscaleJoined,
+            "MOVIE_PARTY_VERIFIED" => FriendConnectionState::MoviePartyVerified,
+            _ => FriendConnectionState::Invited,
+        }
+    }
+
+    /// True once the friend's device joined the tailnet (state ≥ JOINED).
+    pub fn joined(&self) -> bool {
+        !matches!(self, FriendConnectionState::Invited)
+    }
 }
 
 impl MoviePartyDb {
@@ -192,6 +239,11 @@ impl MoviePartyDb {
 
         if current < 4 {
             conn.execute_batch(MIGRATION_004)
+                .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        }
+
+        if current < 5 {
+            conn.execute_batch(MIGRATION_005)
                 .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         }
 
@@ -373,18 +425,21 @@ impl MoviePartyDb {
     // ── Friends (saved movie partners) ─────────────────────────────────────
 
     /// Upsert a friend. The peer key (full MagicDNS name) is the identity;
-    /// re-adding the same peer refreshes its cached observations.
+    /// re-adding the same peer refreshes its cached observations. The
+    /// persisted connection_state follows the incoming record (invites
+    /// write INVITED; a live tailnet observation writes TAILSCALE_JOINED).
     pub fn upsert_friend(&self, friend: &StoredFriend) -> Result<(), StorageError> {
         let conn = lock_mutex(&self.conn)?;
         conn.execute(
-            "INSERT INTO friends (peer_key, display_name, ip, added_at_ms, last_verified_at_ms, last_path, last_latency_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO friends (peer_key, display_name, ip, added_at_ms, last_verified_at_ms, last_path, last_latency_ms, connection_state)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(peer_key) DO UPDATE SET
                 display_name = excluded.display_name,
                 ip = excluded.ip,
                 last_verified_at_ms = excluded.last_verified_at_ms,
                 last_path = excluded.last_path,
-                last_latency_ms = excluded.last_latency_ms",
+                last_latency_ms = excluded.last_latency_ms,
+                connection_state = excluded.connection_state",
             rusqlite::params![
                 friend.peer_key,
                 friend.display_name,
@@ -393,6 +448,7 @@ impl MoviePartyDb {
                 friend.last_verified_at_ms,
                 friend.last_path,
                 friend.last_latency_ms.map(|v| v as i64),
+                friend.connection_state.as_str(),
             ],
         )
         .map_err(|e| StorageError::Sqlite(e.to_string()))?;
@@ -400,6 +456,9 @@ impl MoviePartyDb {
     }
 
     /// Update only the cached verification result of a saved friend.
+    /// A successful verification (verified_at_ms present) also promotes
+    /// the persisted state to MOVIE_PARTY_VERIFIED; a failed one keeps
+    /// TAILSCALE_JOINED (the peer joined, the tunnel just didn't answer).
     pub fn update_friend_verification(
         &self,
         peer_key: &str,
@@ -414,7 +473,11 @@ impl MoviePartyDb {
              SET ip = COALESCE(?2, ip),
                  last_verified_at_ms = ?3,
                  last_path = ?4,
-                 last_latency_ms = ?5
+                 last_latency_ms = ?5,
+                 connection_state = CASE
+                     WHEN ?3 IS NOT NULL THEN 'MOVIE_PARTY_VERIFIED'
+                     WHEN COALESCE(?2, ip) IS NOT NULL AND connection_state = 'INVITED' THEN 'TAILSCALE_JOINED'
+                     ELSE connection_state END
              WHERE peer_key = ?1",
             rusqlite::params![
                 peer_key,
@@ -428,13 +491,31 @@ impl MoviePartyDb {
         Ok(())
     }
 
+    /// Promote a friend's persisted state after a live tailnet
+    /// observation (the friend's device joined the tailnet). Never
+    /// demotes MOVIE_PARTY_VERIFIED and refreshes the cached IP.
+    pub fn mark_friend_joined(&self, peer_key: &str, ip: &str) -> Result<(), StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        conn.execute(
+            "UPDATE friends
+             SET ip = ?2,
+                 connection_state = CASE
+                     WHEN connection_state = 'MOVIE_PARTY_VERIFIED' THEN 'MOVIE_PARTY_VERIFIED'
+                     ELSE 'TAILSCALE_JOINED' END
+             WHERE peer_key = ?1",
+            rusqlite::params![peer_key, ip],
+        )
+        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(())
+    }
+
     /// All saved friends, ordered by display name.
     pub fn list_friends(&self) -> Result<Vec<StoredFriend>, StorageError> {
         let conn = lock_mutex(&self.conn)?;
         let mut stmt = conn
             .prepare(
                 "SELECT peer_key, display_name, ip, added_at_ms,
-                        last_verified_at_ms, last_path, last_latency_ms
+                        last_verified_at_ms, last_path, last_latency_ms, connection_state
                  FROM friends ORDER BY display_name",
             )
             .map_err(|e| StorageError::Sqlite(e.to_string()))?;
@@ -450,6 +531,9 @@ impl MoviePartyDb {
                     last_latency_ms: row
                         .get::<_, Option<i64>>(6)?
                         .map(|v| v.clamp(0, u32::MAX as i64) as u32),
+                    connection_state: row
+                        .get::<_, String>(7)
+                        .map(|value| FriendConnectionState::from_persisted(&value))?,
                 })
             })
             .map_err(|e| StorageError::Sqlite(e.to_string()))?;
@@ -886,6 +970,29 @@ CREATE TABLE IF NOT EXISTS friends (
 );
 ";
 
+/// v5: explicit friend connection states for the Tailscale friend
+/// architecture. The Movie Party friend identity (peer_key + editable
+/// display name) stays separate from the Tailnet node identity; this
+/// column records WHERE the friend is in the external-user invitation
+/// flow:
+///   INVITED            — accepted from a movieparty://friend link; the
+///                        friend's device has not been observed in this
+///                        device's tailnet status yet.
+///   TAILSCALE_JOINED   — the expected peer IS in the live tailnet
+///                        status with a usable address (the friend
+///                        authenticated with THEIR OWN Tailscale identity
+///                        and joined/authorized on the tailnet).
+///   MOVIE_PARTY_VERIFIED — a real `tailscale ping` answered through
+///                        the tunnel (Movie Party-level verification).
+/// ONLINE/OFFLINE is derived at read time from the live status and is
+/// never persisted — it is an observation, not an identity fact.
+/// `pending` is a transient label meaning "INVITED and not yet joined".
+const MIGRATION_005: &str = "
+ALTER TABLE friends ADD COLUMN connection_state TEXT NOT NULL DEFAULT 'INVITED';
+UPDATE friends SET connection_state = 'TAILSCALE_JOINED' WHERE ip IS NOT NULL;
+UPDATE friends SET connection_state = 'MOVIE_PARTY_VERIFIED' WHERE last_verified_at_ms IS NOT NULL;
+";
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -912,6 +1019,7 @@ mod tests {
             last_verified_at_ms: None,
             last_path: None,
             last_latency_ms: None,
+            connection_state: FriendConnectionState::TailscaleJoined,
         };
         db.upsert_friend(&friend).expect("insert");
 
@@ -932,6 +1040,11 @@ mod tests {
         assert_eq!(friends[0].last_verified_at_ms, Some(2_000));
         assert_eq!(friends[0].last_path.as_deref(), Some("direct"));
         assert_eq!(friends[0].last_latency_ms, Some(23));
+        assert_eq!(
+            friends[0].connection_state,
+            FriendConnectionState::MoviePartyVerified,
+            "a successful ping promotes the persisted state"
+        );
 
         db.delete_friend("rahul-mac.tailc930b7.ts.net.")
             .expect("delete");
@@ -951,6 +1064,7 @@ mod tests {
             last_verified_at_ms: Some(50),
             last_path: Some("direct".to_string()),
             last_latency_ms: Some(10),
+            connection_state: FriendConnectionState::MoviePartyVerified,
         })
         .expect("first add");
         // Second add of the same peer with no verification yet clears the
@@ -963,6 +1077,7 @@ mod tests {
             last_verified_at_ms: None,
             last_path: None,
             last_latency_ms: None,
+            connection_state: FriendConnectionState::Invited,
         })
         .expect("second add");
         let friends = db.list_friends().expect("list");
@@ -990,8 +1105,11 @@ mod tests {
             conn.execute_batch("PRAGMA user_version=3;")
                 .expect("set v3");
         }
-        let db = MoviePartyDb::open(&db_path).expect("migrate to v4");
-        assert_eq!(db.schema_version().expect("version"), 4);
+        let db = MoviePartyDb::open(&db_path).expect("migrate to v5");
+        assert_eq!(
+            db.schema_version().expect("version"),
+            CURRENT_SCHEMA_VERSION
+        );
         // The friends table is usable immediately after migration.
         db.upsert_friend(&StoredFriend {
             peer_key: "k".to_string(),
@@ -1001,11 +1119,115 @@ mod tests {
             last_verified_at_ms: None,
             last_path: None,
             last_latency_ms: None,
+            connection_state: FriendConnectionState::Invited,
         })
         .expect("insert post-migration");
         assert_eq!(db.list_friends().expect("list").len(), 1);
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn migration_v5_backfills_existing_friends_states() {
+        // Build a v4 friends database with one verified friend and one
+        // joined-but-unverified friend, then migrate to v5 and confirm
+        // the connection_state backfill preserves their progress.
+        let dir = std::env::temp_dir().join(format!("mp-friends-mig5-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let db_path = dir.join("friends.db");
+        {
+            let conn = Connection::open(&db_path).expect("open raw");
+            conn.execute_batch(MIGRATION_001).expect("v1 schema");
+            conn.execute_batch(MIGRATION_003).expect("v3 schema");
+            conn.execute_batch(MIGRATION_004).expect("v4 friends");
+            conn.execute_batch(
+                "INSERT INTO friends (peer_key, display_name, ip, added_at_ms, last_verified_at_ms, last_path, last_latency_ms)
+                 VALUES
+                    ('verified.tailnet.ts.net.', 'V', '100.64.0.1', 1, 500, 'direct', 12),
+                    ('joined.tailnet.ts.net.',   'J', '100.64.0.2', 2, NULL, NULL, NULL),
+                    ('bare.tailnet.ts.net.',     'B', NULL, 3, NULL, NULL, NULL);",
+            )
+            .expect("seed v4 friends");
+            conn.execute_batch("PRAGMA user_version=4;")
+                .expect("set v4");
+        }
+        let db = MoviePartyDb::open(&db_path).expect("migrate to v5");
+        let friends = db.list_friends().expect("list");
+        let by_key = |k: &str| {
+            friends
+                .iter()
+                .find(|f| f.peer_key == k)
+                .unwrap_or_else(|| panic!("missing {k}"))
+                .connection_state
+        };
+        assert_eq!(
+            by_key("verified.tailnet.ts.net."),
+            FriendConnectionState::MoviePartyVerified
+        );
+        assert_eq!(
+            by_key("joined.tailnet.ts.net."),
+            FriendConnectionState::TailscaleJoined
+        );
+        assert_eq!(
+            by_key("bare.tailnet.ts.net."),
+            FriendConnectionState::Invited
+        );
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn friend_state_transitions_never_demote_verification() {
+        let db = MoviePartyDb::open_in_memory().expect("open");
+        db.upsert_friend(&StoredFriend {
+            peer_key: "v.tailnet.ts.net.".to_string(),
+            display_name: "v".to_string(),
+            ip: None,
+            added_at_ms: 1,
+            last_verified_at_ms: None,
+            last_path: None,
+            last_latency_ms: None,
+            connection_state: FriendConnectionState::Invited,
+        })
+        .expect("insert invited");
+
+        // INVITED → TAILSCALE_JOINED via a live observation.
+        db.mark_friend_joined("v.tailnet.ts.net.", "100.64.0.5")
+            .expect("mark joined");
+        let friend = &db.list_friends().expect("list")[0];
+        assert_eq!(
+            friend.connection_state,
+            FriendConnectionState::TailscaleJoined
+        );
+        assert_eq!(friend.ip.as_deref(), Some("100.64.0.5"));
+
+        // JOINED → VERIFIED via a successful ping.
+        db.update_friend_verification(
+            "v.tailnet.ts.net.",
+            Some("100.64.0.5"),
+            Some(9_000),
+            Some("direct"),
+            Some(20),
+        )
+        .expect("verify");
+        let friend = &db.list_friends().expect("list")[0];
+        assert_eq!(
+            friend.connection_state,
+            FriendConnectionState::MoviePartyVerified
+        );
+
+        // A later joined-observation or failed ping must NOT demote.
+        db.mark_friend_joined("v.tailnet.ts.net.", "100.64.0.6")
+            .expect("observe again");
+        db.update_friend_verification("v.tailnet.ts.net.", Some("100.64.0.6"), None, None, None)
+            .expect("failed probe");
+        let friend = &db.list_friends().expect("list")[0];
+        assert_eq!(
+            friend.connection_state,
+            FriendConnectionState::MoviePartyVerified,
+            "verification is sticky across later observations"
+        );
+        assert_eq!(friend.ip.as_deref(), Some("100.64.0.6"));
     }
 
     #[test]

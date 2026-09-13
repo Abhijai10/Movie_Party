@@ -176,6 +176,15 @@ export function parseFriendInvite(input: string): FriendInviteParseResult {
     return { ok: false, message: "That friend invite is malformed." };
   }
 
+  // Identity-only contract: the payload must carry exactly {n, pk}.
+  // Extra fields (an attempted auth-key/token smuggle) invalidate the
+  // link rather than being silently honored — a friend invite must
+  // never be able to authenticate another person's device as anyone.
+  const keys = Object.keys(payload).sort();
+  if (keys.length !== 2 || !keys.includes("n") || !keys.includes("pk")) {
+    return { ok: false, message: "That friend invite is not a valid identity card." };
+  }
+
   if (typeof payload.pk !== "string" || typeof payload.n !== "string") {
     return { ok: false, message: "That friend invite is incomplete." };
   }

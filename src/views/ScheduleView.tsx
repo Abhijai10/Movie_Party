@@ -206,7 +206,7 @@ export function ScheduleView({ snapshot, onBack, onScheduled, friends }: Schedul
   };
 
   return (
-    <div className="relative w-screen min-h-screen overflow-y-auto" data-testid="schedule-screen">
+    <div className="relative w-full min-h-screen" data-testid="schedule-screen">
       <div className="fixed inset-0 pointer-events-none">
         <SilkBackground variant="calm" />
       </div>
@@ -222,7 +222,7 @@ export function ScheduleView({ snapshot, onBack, onScheduled, friends }: Schedul
         <StatusIndicator state="sync" label="Strict Sync" />
       </header>
 
-      <main className="relative z-10 max-w-2xl w-full mx-auto px-12 mt-8 pb-20">
+      <main className="relative z-10 max-w-4xl w-full mx-auto px-12 mt-8 pb-20">
         <motion.section
           initial={{ opacity: 0, y: 14 }}
           animate={{ opacity: 1, y: 0 }}
@@ -235,7 +235,7 @@ export function ScheduleView({ snapshot, onBack, onScheduled, friends }: Schedul
             Pick a time — Movie Party preloads the movie so the night starts perfectly in sync.
           </p>
 
-          <div className="mt-10 space-y-6" data-testid="schedule-form">
+          <div className="mt-10 schedule-form-grid" data-testid="schedule-form">
             <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
               <div className="grid grid-cols-2 gap-5">
                 <label className="block">
@@ -247,7 +247,8 @@ export function ScheduleView({ snapshot, onBack, onScheduled, friends }: Schedul
                       setDateValue(event.target.value);
                     }}
                     style={{ colorScheme: "dark" }}
-                    className="mt-2 w-full bg-[#0D0B14] border border-white/15 rounded-lg px-3.5 py-2.5 text-sm text-white/95 focus:outline-none focus:border-sky-400/50"
+                    className="mt-2 w-full bg-[#0D0B14] border border-white/15 rounded-lg pl-3.5 pr-8 py-2.5 text-sm text-white/95 focus:outline-none focus:border-sky-400/50"
+                    data-testid="schedule-date-input"
                   />
                 </label>
                 <label className="block">
@@ -259,7 +260,8 @@ export function ScheduleView({ snapshot, onBack, onScheduled, friends }: Schedul
                       setTimeValue(event.target.value);
                     }}
                     style={{ colorScheme: "dark" }}
-                    className="mt-2 w-full bg-[#0D0B14] border border-white/15 rounded-lg px-3.5 py-2.5 text-sm text-white/95 focus:outline-none focus:border-sky-400/50"
+                    className="mt-2 w-full bg-[#0D0B14] border border-white/15 rounded-lg pl-3.5 pr-8 py-2.5 text-sm text-white/95 focus:outline-none focus:border-sky-400/50"
+                    data-testid="schedule-time-input"
                   />
                 </label>
               </div>
@@ -272,7 +274,9 @@ export function ScheduleView({ snapshot, onBack, onScheduled, friends }: Schedul
                   {media ? media.filename : "No movie chosen yet — pick one in Create Party first"}
                 </p>
               </div>
+            </div>
 
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 space-y-6">
               <div>
                 <span className="text-xs tracking-[0.18em] uppercase text-white/50">Guest</span>
               {friends.length > 0 ? (
@@ -289,11 +293,13 @@ export function ScheduleView({ snapshot, onBack, onScheduled, friends }: Schedul
                         }}
                         aria-pressed={chosen}
                         title={
-                          status === "connected"
+                          status === "MOVIE_PARTY_VERIFIED"
                             ? `Connection verified · ${friend.lastPath ?? ""} · ${String(friend.lastLatencyMs ?? "?")} ms`
-                            : status === "online"
+                            : status === "ONLINE"
                               ? "Online — not verified yet"
-                              : "Offline"
+                              : status === "TAILSCALE_PENDING"
+                                ? "Invite accepted — their device hasn't joined the network yet"
+                                : "Offline"
                         }
                         className={`px-4 py-2 rounded-full text-xs tracking-[0.12em] uppercase border transition ${
                           chosen
@@ -303,7 +309,7 @@ export function ScheduleView({ snapshot, onBack, onScheduled, friends }: Schedul
                         data-testid={`schedule-guest-${friend.displayName}`}
                       >
                         {friend.displayName}
-                        {status === "connected" ? " ✓" : ""}
+                        {status === "MOVIE_PARTY_VERIFIED" ? " ✓" : ""}
                       </button>
                     );
                   })}
@@ -436,8 +442,21 @@ export function ScheduleView({ snapshot, onBack, onScheduled, friends }: Schedul
               </div>
             ) : null}
 
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 flex flex-wrap items-center gap-4 schedule-span-2">
+              <CinemaButton
+                onClick={scheduleNow}
+                disabled={submitting || scheduledUtcMs == null}
+                data-testid="schedule-create-btn"
+              >
+                {submitting ? "Saving…" : "Save Schedule"}
+              </CinemaButton>
+              <p className="text-xs text-white/40">
+                Your friend gets a reminder — even if they're offline right now.
+              </p>
+            </div>
+
             {scheduledUtcMs != null ? (
-              <p className="text-sm text-white/60">
+              <p className="text-sm text-white/60 schedule-span-2">
                 Scheduled movie:{" "}
                 <span className="text-white/90">{formatTimeLabel(scheduledUtcMs)}</span>
               </p>
@@ -445,7 +464,7 @@ export function ScheduleView({ snapshot, onBack, onScheduled, friends }: Schedul
 
             {!guestOnline ? (
               <div
-                className="rounded-xl border border-amber-400/25 bg-amber-400/[0.06] p-4"
+                className="rounded-xl border border-amber-400/25 bg-amber-400/[0.06] p-4 schedule-span-2"
                 data-testid="schedule-offline-warning"
                 role="status"
               >
@@ -464,23 +483,10 @@ export function ScheduleView({ snapshot, onBack, onScheduled, friends }: Schedul
             ) : null}
 
             {error ? (
-              <p className="text-sm text-rose-300/90" data-testid="schedule-error" role="alert">
+              <p className="text-sm text-rose-300/90 schedule-span-2" data-testid="schedule-error" role="alert">
                 {error}
               </p>
             ) : null}
-
-            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 flex flex-wrap items-center gap-4">
-              <CinemaButton
-                onClick={scheduleNow}
-                disabled={submitting || scheduledUtcMs == null}
-                data-testid="schedule-create-btn"
-              >
-                {submitting ? "Saving…" : "Save Schedule"}
-              </CinemaButton>
-              <p className="text-xs text-white/40">
-                Your friend gets a reminder — even if they're offline right now.
-              </p>
-            </div>
           </div>
         </motion.section>
       </main>

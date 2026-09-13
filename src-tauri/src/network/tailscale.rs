@@ -131,14 +131,101 @@ pub struct FriendVerification {
 }
 
 /// friend_invite_link payload: this device's shareable identity. The link
-/// carries the peer key + a friendly name so the receiving app adds the
-/// inviter directly — no peer-table browsing, no addresses.
+/// carries ONLY the inviter's tailnet identity (peer key) and a friendly
+/// name — deliberately NO Tailscale auth key, NO access token, and no
+/// credential of any kind. The receiving friend joins the tailnet through
+/// Tailscale's own external-user invitation model with THEIR identity;
+/// Movie Party only observes and verifies the result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FriendInviteLink {
     pub link: String,
     pub peer_key: String,
     pub display_name: String,
+}
+
+/// The decoded movieparty://friend/ payload: the inviter's identity.
+/// Mirrors the frontend's parseFriendInvite contract ({n, pk}).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FriendInvitePayload {
+    /// The inviter's display name (1–40 chars).
+    pub display_name: String,
+    /// The inviter's tailnet peer key (MagicDNS name).
+    pub peer_key: String,
+}
+
+pub const FRIEND_INVITE_PREFIX: &str = "movieparty://friend/";
+const MAX_FRIEND_INVITE_LENGTH: usize = 1024;
+
+/// Compact base64url (unpadded) decode — the inverse of
+/// `base64url_encode`, for parsing received friend invites.
+pub fn base64url_decode(input: &str) -> Option<Vec<u8>> {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    if input.is_empty() || input.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buffer: u32 = 0;
+    let mut bits: u32 = 0;
+    for ch in input.chars() {
+        let value = ALPHABET.iter().position(|&b| b as char == ch)? as u32;
+        buffer = (buffer << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buffer >> bits) & 0xFF) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// Parse a movieparty://friend/ invite link into the inviter's identity.
+/// Mirrors the frontend's parseFriendInvite validation rules so both
+/// sides accept exactly the same links. The payload is identity-only —
+/// any attempt to smuggle extra fields (e.g. an auth key) makes the
+/// link invalid rather than silently honored.
+pub fn parse_friend_invite(link: &str) -> Result<FriendInvitePayload, String> {
+    let value = link.trim();
+    if value.is_empty() {
+        return Err("MP-FRIEND-001 the invite link is empty".to_string());
+    }
+    if value.len() > MAX_FRIEND_INVITE_LENGTH {
+        return Err("MP-FRIEND-001 that invite link is too long".to_string());
+    }
+    if !value.to_ascii_lowercase().starts_with(FRIEND_INVITE_PREFIX) {
+        return Err("MP-FRIEND-001 friend invites start with movieparty://friend/".to_string());
+    }
+    let encoded = value[FRIEND_INVITE_PREFIX.len()..]
+        .split('#')
+        .next()
+        .unwrap_or("");
+    if encoded.is_empty() {
+        return Err("MP-FRIEND-001 that invite is missing its code".to_string());
+    }
+    let bytes = base64url_decode(encoded)
+        .ok_or_else(|| "MP-FRIEND-001 that invite code is not valid".to_string())?;
+    let decoded = String::from_utf8(bytes)
+        .map_err(|_| "MP-FRIEND-001 that invite could not be read".to_string())?;
+    let payload: serde_json::Value = serde_json::from_str(&decoded)
+        .map_err(|_| "MP-FRIEND-001 that invite is malformed".to_string())?;
+    let peer_key = payload
+        .get("pk")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "MP-FRIEND-001 that invite is incomplete".to_string())?;
+    let display_name = payload
+        .get("n")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "MP-FRIEND-001 that invite is incomplete".to_string())?;
+    if !peer_key.contains('.') || peer_key.len() < 4 || peer_key.len() > 128 {
+        return Err("MP-FRIEND-001 that invite has an invalid device identity".to_string());
+    }
+    if display_name.is_empty() || display_name.chars().count() > 40 {
+        return Err("MP-FRIEND-001 that invite has an invalid name".to_string());
+    }
+    Ok(FriendInvitePayload {
+        display_name: display_name.to_string(),
+        peer_key: peer_key.to_string(),
+    })
 }
 
 /// Compact base64url (unpadded) — the friend-invite payload codec. Matches
