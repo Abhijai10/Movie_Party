@@ -82,7 +82,7 @@ jobs:
           /tmp/mpv-venv/bin/pip install --quiet glad2 jinja2 markupsafe
           export MPV_PYTHONPATH="$(/tmp/mpv-venv/bin/python -c 'import glad; import os; print(os.path.dirname(os.path.dirname(glad.__file__)))')"
           echo "MPV_PYTHONPATH=$MPV_PYTHONPATH"
-          ./scripts/build-libmpv-macos.sh
+          bash ./scripts/build-libmpv-macos.sh
           ls -la src-tauri/mpv_runtime/
 
       # Windows: mpv-winbuild-cmake's dev archive ships a fully
