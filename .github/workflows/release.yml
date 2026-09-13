@@ -21,6 +21,15 @@ on:
         description: "Release tag (e.g. v0.9.4)"
         required: true
         default: "v0.9.4"
+      only:
+        description: "Build only this OS leg (macos / windows / all)"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - macos
+          - windows
 
 permissions:
   contents: write
@@ -35,10 +44,15 @@ jobs:
           - os: macos-latest # Apple Silicon runner
             args: "--target aarch64-apple-darwin"
             rust_target: aarch64-apple-darwin
+            leg: macos
           - os: windows-latest
             args: "" # default host target (x86_64), NSIS bundle
             rust_target: x86_64-pc-windows-msvc
+            leg: windows
     runs-on: ${{ matrix.os }}
+    # Dispatch can target a single leg (e.g. rebuild just macOS after a
+    # staging fix without paying for the Windows build again).
+    if: github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == matrix.leg
     steps:
       - uses: actions/checkout@v4
 
