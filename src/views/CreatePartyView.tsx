@@ -496,7 +496,9 @@ export function CreatePartyView({
                               icon={providerBusy ? Loader2 : Play}
                               className={`w-full ${providerBusy ? "[&_svg]:animate-spin" : ""}`}
                             >
-                              {providerBusy ? "Opening..." : "Open title in " + (selectedProvider?.displayName ?? "provider")}
+                              {providerBusy
+                                ? "Opening…"
+                                : `Open in ${selectedProvider?.displayName ?? "provider"}`}
                             </CinemaButton>
                           </div>
                         )}

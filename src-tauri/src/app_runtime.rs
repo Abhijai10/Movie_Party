@@ -4176,6 +4176,18 @@ impl AppRuntime {
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .room_state;
                     state.room_state = room_state;
+                    // Ready Check retreat: when the host rewinds the room to
+                    // LOBBY (Back to lobby), a guest sitting on the Ready
+                    // Check screen follows back — neither side may be left
+                    // stranded on the waiting-room screen. This only
+                    // lowers READY_CHECK → LOBBY, never invents a new room.
+                    if room_state == RoomState::Lobby && state.screen == "READY_CHECK" {
+                        state.screen = "LOBBY".to_string();
+                        state.local_participant.media_ready = false;
+                        state.pending_operation_id = None;
+                        state.pending_operation_kind = None;
+                        state.pending_operations.clear();
+                    }
                     if state.sync.position_ms == 0 {
                         let host_pos = state
                             .sync_coordinator
@@ -5655,6 +5667,35 @@ impl AppRuntime {
         state.shared_controls_flag.store(enabled, Ordering::SeqCst);
         sync_room_snapshot(&mut state);
         snapshot_from_state(&state)
+    }
+
+    /// Ready Check "Back to lobby": retract the readiness votes, drop any
+    /// not-yet-fired countdown, and return the screen to the LOBBY. The
+    /// party, media, and connection stay intact — only the readiness
+    /// state is rewound (see LocalSyncCoordinator::retract_readiness).
+    pub fn back_to_lobby(&self) -> AppSnapshot {
+        let snapshot = {
+            let mut state = self.lock();
+            state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .retract_readiness();
+            state.local_participant.media_ready = false;
+            // Drop any not-yet-fired countdown at the state level too —
+            // a scheduled PLAY that survives the retreat would fire in
+            // the lobby and strand the room in PLAYING with nobody in it.
+            state.pending_operation_id = None;
+            state.pending_operation_kind = None;
+            state.pending_operations.clear();
+            state.room_state = RoomState::Lobby;
+            state.screen = "LOBBY".to_string();
+            state.error = None;
+            sync_room_snapshot(&mut state);
+            snapshot_from_state(&state)
+        };
+        self.inner.emit(snapshot.clone());
+        snapshot
     }
 
     pub fn enter_cinema(&self) -> AppSnapshot {
@@ -8663,6 +8704,99 @@ mod tests {
 
         assert!(snapshot.participants[0].media_ready);
         assert!(snapshot.error.is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn back_to_lobby_retracts_readiness_and_returns_to_lobby() {
+        use crate::media::player::{LibMpvPlayer, LocalPlayer};
+        let runtime = AppRuntime::new();
+        let path = std::env::temp_dir().join(format!("mp_back_{}", uuid::Uuid::now_v7()));
+        std::fs::write(&path, b"movie").expect("write");
+        {
+            let mut state = runtime.lock();
+            state.media = Some(crate::media::manifest::MediaManifest {
+                media_id: "m".to_string(),
+                filename: "movie.mkv".to_string(),
+                file_size: 5,
+                container: Some("mkv".to_string()),
+                full_hash: "h".to_string(),
+                quick_fingerprint: crate::media::manifest::QuickFingerprint {
+                    file_size: 5,
+                    first_hash: "a".to_string(),
+                    last_hash: "b".to_string(),
+                },
+                chunk_size: 5,
+                chunk_count: 1,
+            });
+            let mut player = LibMpvPlayer::with_availability(true);
+            player.open(&path).expect("open");
+            state.player_snapshot = super::PlayerSnapshot::from_player(&player);
+            state.player = Some(Arc::new(std::sync::Mutex::new(player)));
+        }
+
+        let ready = runtime.set_ready();
+        assert_eq!(ready.screen, "READY_CHECK");
+        assert!(ready.participants[0].media_ready);
+
+        let back = runtime.back_to_lobby();
+        assert_eq!(back.screen, "LOBBY");
+        assert!(!back.participants[0].media_ready);
+        assert!(back.error.is_none());
+        // The room rewinds to the pre-ready-check state: no consensus, so
+        // neither side can be stuck on the waiting-room screen.
+        assert_eq!(back.sync.room_state, "LOBBY");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn back_to_lobby_drops_a_pending_countdown() {
+        use crate::media::player::{LibMpvPlayer, LocalPlayer};
+        use crate::sync::consensus::ParticipantReadiness;
+        let runtime = AppRuntime::new();
+        let path = std::env::temp_dir().join(format!("mp_back_cd_{}", uuid::Uuid::now_v7()));
+        std::fs::write(&path, b"movie").expect("write");
+        {
+            let mut state = runtime.lock();
+            state.media = Some(crate::media::manifest::MediaManifest {
+                media_id: "m".to_string(),
+                filename: "movie.mkv".to_string(),
+                file_size: 5,
+                container: Some("mkv".to_string()),
+                full_hash: "h".to_string(),
+                quick_fingerprint: crate::media::manifest::QuickFingerprint {
+                    file_size: 5,
+                    first_hash: "a".to_string(),
+                    last_hash: "b".to_string(),
+                },
+                chunk_size: 5,
+                chunk_count: 1,
+            });
+            let mut player = LibMpvPlayer::with_availability(true);
+            player.open(&path).expect("open");
+            state.player_snapshot = super::PlayerSnapshot::from_player(&player);
+            state.player = Some(Arc::new(std::sync::Mutex::new(player)));
+        }
+
+        runtime.set_ready();
+        // Simulate a ready guest so the countdown can actually be prepared.
+        {
+            let state = runtime.lock();
+            state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .guest_ready(ParticipantReadiness::ready(5_000));
+        }
+
+        // Host schedules the countdown, then immediately regrets it and
+        // goes Back — the pending operation must not survive.
+        let with_countdown = runtime.request_play_countdown();
+        assert!(with_countdown.sync.pending_operation.is_some());
+
+        let back = runtime.back_to_lobby();
+        assert!(back.sync.pending_operation.is_none());
+        assert_eq!(back.screen, "LOBBY");
         let _ = std::fs::remove_file(&path);
     }
 

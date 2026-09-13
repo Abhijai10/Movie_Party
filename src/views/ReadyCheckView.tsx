@@ -16,6 +16,8 @@ type ReadyCheckViewProps = {
   onRequestCountdown: () => void;
   /** §25: called when the countdown completes so the shell enters cinema. */
   onStarted: () => void;
+  /** Leave Ready Check and return to the lobby (cleanup is backend-owned). */
+  onBack: () => void;
   callTileSession: CallTileSessionState;
   onCallTileSessionChange: (next: CallTileSessionState) => void;
 };
@@ -24,6 +26,7 @@ export function ReadyCheckView({
   snapshot,
   onRequestCountdown,
   onStarted,
+  onBack,
   callTileSession,
   onCallTileSessionChange,
 }: ReadyCheckViewProps) {
@@ -96,7 +99,10 @@ export function ReadyCheckView({
           disabled={transitionActive}
           onClick={() => {
             // §25: once the countdown is scheduled the commit is in
-            // flight; Back is disabled until it completes.
+            // flight; Back is disabled until it completes. Otherwise Back
+            // genuinely returns to the lobby — the backend clears the
+            // readiness votes so neither side is stuck on this screen.
+            onBack();
           }}
           className="flex items-center gap-2 text-white/60 hover:text-white transition text-sm tracking-wider disabled:opacity-30 disabled:hover:text-white/60"
           data-testid="ready-back-btn"
@@ -194,7 +200,8 @@ export function ReadyCheckView({
       </main>
 
       {/* The call tile stays reachable above the Ready Check content —
-          it must never disappear behind this "Dim the Lights" screen. */}
+          it must never disappear behind this "Dim the Lights" screen,
+          and (reservedBottomPx) never cover the Enter Cinema button. */}
       <CallTile
         peerName={peerName}
         remoteCameraEnabled={peer?.cameraEnabled ?? false}
@@ -204,6 +211,7 @@ export function ReadyCheckView({
         localStream={null}
         session={callTileSession}
         onSessionChange={onCallTileSessionChange}
+        reservedBottomPx={150}
       />
 
       {transitionActive && (

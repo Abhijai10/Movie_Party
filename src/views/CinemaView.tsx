@@ -68,6 +68,13 @@ const privacyNoticeMs = 2_200;
 const ghostNoticeMs = 800;
 /** camera-degradation notice duration (movie-first policy). */
 const cameraNoticeMs = 3_200;
+/**
+ * The floating call/chat tile must never cover the control dock's final
+ * action row (Leave / play / chat buttons at the bottom of the screen).
+ * The dock occupies ~112px (progress + buttons + paddings); 132px adds
+ * the dock's breathing room so a dropped tile always lands above it.
+ */
+const CINEMA_DOCK_RESERVED_BOTTOM_PX = 132;
 
 /**
  * the production call path is the real cross-device session.
@@ -737,6 +744,7 @@ export function CinemaView({
           localStream={callLocalStream}
           session={callTileSession}
           onSessionChange={onCallTileSessionChange}
+          reservedBottomPx={CINEMA_DOCK_RESERVED_BOTTOM_PX}
         />
         <ChatBubbles
           queue={bubbleQueue}

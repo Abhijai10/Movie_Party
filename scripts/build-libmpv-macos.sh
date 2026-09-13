@@ -58,12 +58,12 @@ if [ ! -f "$STAGE/lib/libplacebo.dylib" ]; then
     curl -sL --max-time 60 -o vk-headers.tar.gz "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.4.318.tar.gz"
     mkdir -p 3rdparty/Vulkan-Headers
     tar xzf vk-headers.tar.gz -C 3rdparty/Vulkan-Headers --strip-components=1
-    PYTHONPATH=/opt/homebrew/lib/python3.12/site-packages meson setup build-gl \
+    PYTHONPATH="${MPV_PYTHONPATH:-/opt/homebrew/lib/python3.12/site-packages}" meson setup build-gl \
         --prefix="$STAGE" -Dvulkan=disabled -Dopengl=enabled -Dgl-proc-addr=enabled \
         -Dshaderc=disabled -Dlcms=disabled -Ddemos=false -Dtests=false -Dbench=false \
         -Ddovi=disabled -Dunwind=disabled -Dxxhash=disabled
-    PYTHONPATH=/opt/homebrew/lib/python3.12/site-packages meson compile -C build-gl
-    PYTHONPATH=/opt/homebrew/lib/python3.12/site-packages meson install -C build-gl
+    PYTHONPATH="${MPV_PYTHONPATH:-/opt/homebrew/lib/python3.12/site-packages}" meson compile -C build-gl
+    PYTHONPATH="${MPV_PYTHONPATH:-/opt/homebrew/lib/python3.12/site-packages}" meson install -C build-gl
 fi
 
 # ---------- 3. harfbuzz (MIT) ----------

@@ -1,30 +1,39 @@
 import { useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { ArrowLeft, CalendarClock, TriangleAlert } from "lucide-react";
+import { ArrowLeft, CalendarClock, FolderOpen, TriangleAlert } from "lucide-react";
 import { CinemaButton } from "../components/mp/CinemaButton";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
 import {
   createAndBroadcastSchedule,
   friendStatusFor,
+  pickMediaFile,
   type AppSnapshot,
   type StoredFriend,
 } from "../backend/appRuntime";
+import { listRecentMedia, localStorageOrNull, rememberMedia, type RecentMedia } from "../schedule/recentMedia";
 import type { CallMode } from "../call/webrtc";
 
 /**
  * UI_UX_SPEC §18 + §19 — the Schedule screen.
  *
- * Fields: date/time, media (the party's chosen movie), guest, call mode.
- * For local media it shows the estimated transfer + the recommended
- * preload start, allows moving preload EARLIER only (§18: "Allow user to
- * move preload earlier. Do not allow moving it later than estimated safe
- * point without warning") — moving later than the safe point shows the
- * explicit warning and still refuses the unsafe value.
+ * SELF-CONTAINED (v0.9.4): DATE, TIME, MOVIE and FRIEND are all chosen
+ * right here. The movie is picked from this screen (a local file — the
+ * file picker or one of your recent picks) or, when a party is already
+ * prepared, its already-chosen movie. Scheduling no longer depends on
+ * first creating a party in Create Party; Create Party remains the
+ * immediate-party surface only.
+ *
+ * Fields: date/time, media, guest, call mode. For local media it shows
+ * the estimated transfer + the recommended preload start, allows moving
+ * preload EARLIER only (§18: "Allow user to move preload earlier. Do
+ * not allow moving it later than estimated safe point without warning")
+ * — moving later than the safe point shows the explicit warning and
+ * still refuses the unsafe value.
  * §19: if the guest is currently offline the schedule still saves, with
  * the honest offline notice.
  *
- * Guests are picked from saved friends (Add Friend on Home) — the schedule
+ * Guests are picked from saved friends (the Friends page) — the schedule
  * targets the verified friend by default and falls back to the connected
  * participant or a manual id.
  */
@@ -32,7 +41,7 @@ type ScheduleViewProps = {
   snapshot: AppSnapshot;
   onBack: () => void;
   onScheduled: () => void;
-  /** Saved friends (Add Friend surface) for the guest picker. */
+  /** Saved friends (Friends page) for the guest picker. */
   friends: StoredFriend[];
 };
 
@@ -98,10 +107,9 @@ function summarizeFriendWhen(friend: StoredFriend): string {
 }
 
 export function ScheduleView({ snapshot, onBack, onScheduled, friends }: ScheduleViewProps) {
-  const media = snapshot.media;
+  const activeMedia = snapshot.media;
   const guest = snapshot.participants.find((participant) => participant.role !== snapshot.room.role);
   const roomId = snapshot.room.roomId ?? "";
-  const mediaId = media?.mediaId ?? "";
 
   const [dateValue, setDateValue] = useState("");
   const [timeValue, setTimeValue] = useState("");
@@ -113,28 +121,66 @@ export function ScheduleView({ snapshot, onBack, onScheduled, friends }: Schedul
    * participant), or "manual" (type a device id). */
   const [guestChoice, setGuestChoice] = useState<string>("connected");
   const [manualGuestId, setManualGuestId] = useState("");
+  /** Self-contained movie selection: the active party's movie, a recent
+   * pick, or a freshly picked local file (no Create Party step needed). */
+  const [recent, setRecent] = useState<RecentMedia[]>(() => listRecentMedia(localStorageOrNull()));
+  const [pickedPath, setPickedPath] = useState<string | null>(null);
+  const [picking, setPicking] = useState(false);
 
   const scheduledUtcMs = localInputToUtcMs(dateValue, timeValue);
 
+  /** The chosen movie reference: the active party media id, else the
+   * picked local file path, else nothing. */
+  const movieSource: { ref: string; label: string; fromActiveParty: boolean } | null =
+    activeMedia != null
+      ? { ref: activeMedia.mediaId, label: activeMedia.filename, fromActiveParty: true }
+      : pickedPath != null
+        ? {
+            ref: pickedPath,
+            label: recent.find((entry) => entry.path === pickedPath)?.name ?? pickedPath,
+            fromActiveParty: false,
+          }
+        : null;
+  const movieRef = movieSource?.ref ?? "";
+  const movieLabel = movieSource?.label ?? "";
+
+  const chooseFile = () => {
+    if (picking) return;
+    setPicking(true);
+    void pickMediaFile()
+      .then((path) => {
+        if (path != null) {
+          setRecent(rememberMedia(localStorageOrNull(), path));
+          setPickedPath(path);
+        }
+      })
+      .finally(() => {
+        setPicking(false);
+      });
+  };
+
   /**
-   * §18 estimated transfer: remaining bytes at the measured goodput with the
-   * same 1.4 safety + 15-min margin the backend's canonical
+   * §18 estimated transfer: remaining bytes at the measured goodput with
+   * the same 1.4 safety the backend's canonical
    * scheduling::calculate_preload_start applies (bits-correct).
-   * Computed for display; the backend recomputes authoritatively on create.
+   * Computed for display when the active media is known; the backend
+   * recomputes authoritatively on create.
    */
   const transferEstimate = useMemo(() => {
-    if (!media) return null;
+    if (!activeMedia) return null;
     return transferEstimateFrom({
       remainingBytes: Math.max(
-        media.fileSize - (snapshot.transfer?.bytesAvailable ?? 0),
+        activeMedia.fileSize - (snapshot.transfer?.bytesAvailable ?? 0),
         0,
       ),
       goodputBps: snapshot.network.goodputBps || 0,
     });
-  }, [media, snapshot.network.goodputBps, snapshot.transfer]);
+  }, [activeMedia, snapshot.network.goodputBps, snapshot.transfer]);
 
   const recommendedPreloadUtcMs = useMemo(() => {
     if (scheduledUtcMs == null) return null;
+    // §18 default: transfer estimate when known, else the fixed 15-min
+    // preparation margin (the backend recomputes with real goodput).
     const transferMinutes = transferEstimate?.minutes ?? 0;
     return scheduledUtcMs - (transferMinutes + 15) * 60_000;
   }, [scheduledUtcMs, transferEstimate]);
@@ -162,11 +208,11 @@ export function ScheduleView({ snapshot, onBack, onScheduled, friends }: Schedul
       return;
     }
     if (plannedPreloadUtcMs == null) {
-      setError("Preload start could not be calculated — is the movie chosen?");
+      setError("Pick a date and time for the movie.");
       return;
     }
-    if (!roomId || !mediaId) {
-      setError("Create the party and choose the movie first.");
+    if (!movieRef) {
+      setError("Pick the movie for this screening (or create the party first).");
       return;
     }
     if (guestChoice === "manual" && manualGuestId.trim().length === 0) {
@@ -179,8 +225,10 @@ export function ScheduleView({ snapshot, onBack, onScheduled, friends }: Schedul
     setSubmitting(true);
     void (async () => {
       const scheduleId = await createAndBroadcastSchedule({
-        roomId,
-        mediaId,
+        // A schedule made outside a party uses a stable local placeholder
+        // room id — the party created at show time owns the real room.
+        roomId: roomId || `local-${String(Date.now())}`,
+        mediaId: movieRef,
         scheduledStartUtcMs: scheduledUtcMs,
         plannedPreloadUtcMs: plannedPreloadUtcMs,
         guestDeviceId: resolvedGuestDeviceId,
@@ -267,13 +315,78 @@ export function ScheduleView({ snapshot, onBack, onScheduled, friends }: Schedul
               </div>
             </div>
 
-            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 space-y-6">
+            {/* SELF-CONTAINED MOVIE PICKER — date, time, movie and friend
+                are all chosen on this screen. */}
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 space-y-4">
               <div>
                 <span className="text-xs tracking-[0.18em] uppercase text-white/50">Movie</span>
-                <p className="mt-2 text-sm text-white/80">
-                  {media ? media.filename : "No movie chosen yet — pick one in Create Party first"}
-                </p>
+                {movieSource ? (
+                  <div className="mt-2.5 flex items-center justify-between gap-3 flex-wrap">
+                    <p className="text-sm text-white/80" data-testid="schedule-movie-name">
+                      {movieLabel}
+                      {movieSource.fromActiveParty ? (
+                        <span className="text-white/40"> · already prepared for tonight</span>
+                      ) : null}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={chooseFile}
+                      disabled={picking}
+                      className="px-4 py-2 rounded-full text-[11px] tracking-[0.12em] uppercase border border-white/15 text-white/55 hover:text-white transition disabled:opacity-40"
+                      data-testid="schedule-movie-change-btn"
+                    >
+                      {picking ? "Choosing…" : "Change movie"}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="mt-2.5 space-y-3" data-testid="schedule-movie-empty">
+                    <CinemaButton
+                      variant="neutral"
+                      icon={FolderOpen}
+                      iconPos="left"
+                      onClick={chooseFile}
+                      disabled={picking}
+                      className="w-full"
+                      data-testid="schedule-pick-movie-btn"
+                    >
+                      {picking ? "Choosing…" : "Choose movie file"}
+                    </CinemaButton>
+                    {recent.length > 0 ? (
+                      <div className="flex flex-wrap gap-2.5" data-testid="schedule-recent-movies">
+                        {recent.map((entry) => (
+                          <button
+                            key={entry.path}
+                            type="button"
+                            aria-pressed={pickedPath === entry.path}
+                            onClick={() => {
+                              setPickedPath(entry.path);
+                            }}
+                            title={entry.path}
+                            className={`max-w-full truncate px-4 py-2 rounded-full text-xs tracking-[0.12em] uppercase border transition ${
+                              pickedPath === entry.path
+                                ? "border-sky-400/50 bg-sky-400/10 text-sky-100"
+                                : "border-white/15 text-white/55 hover:text-white"
+                            }`}
+                            data-testid={`schedule-recent-${entry.name}`}
+                          >
+                            {entry.name}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                    <p className="text-xs text-white/40 leading-relaxed">
+                      Or create the party first in Create Party — its chosen movie appears here
+                      automatically. Picking a movie here never starts a party.
+                    </p>
+                  </div>
+                )}
               </div>
+              {movieSource && !movieSource.fromActiveParty ? (
+                <p className="text-xs text-white/40 leading-relaxed" data-testid="schedule-movie-note">
+                  Saved as a plan for this time — Movie Party asks for the file again if it moves.
+                  Preload starts when both devices are online at the scheduled time.
+                </p>
+              ) : null}
             </div>
 
             <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 space-y-6">
@@ -349,7 +462,7 @@ export function ScheduleView({ snapshot, onBack, onScheduled, friends }: Schedul
               ) : (
                 <p className="mt-2 text-sm text-white/80" data-testid="schedule-guest-name">
                   {guestName}
-                  {guest ? "" : " — add a friend on Home to schedule directly"}
+                  {guest ? "" : " — add a friend on the Friends page to schedule directly"}
                 </p>
               )}
               {guestChoice === "manual" ? (
@@ -399,7 +512,7 @@ export function ScheduleView({ snapshot, onBack, onScheduled, friends }: Schedul
               </div>
             </fieldset>
 
-            {media && transferEstimate ? (
+            {activeMedia && transferEstimate ? (
               <div
                 className="rounded-xl border border-white/10 bg-white/[0.03] p-4 space-y-2"
                 data-testid="schedule-estimate"
@@ -440,7 +553,22 @@ export function ScheduleView({ snapshot, onBack, onScheduled, friends }: Schedul
                   §18: preload can only move earlier than the recommended safe point — never later.
                 </p>
               </div>
-            ) : null}
+            ) : (
+              <div
+                className="rounded-xl border border-white/10 bg-white/[0.03] p-4 space-y-2"
+                data-testid="schedule-estimate"
+              >
+                <p className="text-sm text-white/80">
+                  Transfer estimate: measured when both devices are online.
+                </p>
+                {recommendedPreloadUtcMs != null ? (
+                  <p className="text-sm text-white/60 flex items-center gap-2">
+                    <CalendarClock className="w-4 h-4 text-white/40" strokeWidth={1.6} />
+                    Preload begins 15 minutes before show time at the latest.
+                  </p>
+                ) : null}
+              </div>
+            )}
 
             <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 flex flex-wrap items-center gap-4 schedule-span-2">
               <CinemaButton

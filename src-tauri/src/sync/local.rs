@@ -186,6 +186,22 @@ impl LocalSyncCoordinator {
         self.guest_ready = readiness;
     }
 
+    /// "Back to lobby": retract the readiness votes and return the room
+    /// to Lobby. This is a user-initiated retreat BEFORE any play commit
+    /// (Back is disabled once the countdown commit is in flight), so the
+    /// strict-sync state machine has no natural event for it — the same
+    /// explicit-user-override reasoning as `abandon_guest` (§40). Any
+    /// not-yet-fired countdown (pending_scheduled) is dropped so nothing
+    /// starts playback after the users left Ready Check.
+    pub fn retract_readiness(&mut self) {
+        self.host_ready = ParticipantReadiness::not_ready("back-to-lobby");
+        self.guest_ready = ParticipantReadiness::not_ready("back-to-lobby");
+        self.pending_scheduled = None;
+        self.paused_by_strict_sync = false;
+        self.room_state = RoomState::Lobby;
+        self.fire_coordinator_cb(RoomState::Lobby);
+    }
+
     pub fn all_ready(&self, minimum_buffer_ms: u64) -> bool {
         if self.guest_abandoned {
             // §40 Continue Without Guest: the host explicitly chose to

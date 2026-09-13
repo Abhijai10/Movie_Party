@@ -22,6 +22,7 @@ import {
   friendInviteLink,
   friendStatusCopy,
   friendStatusFor,
+  openTailscaleSetup,
   refreshFriendStates,
   removeFriend,
   renameFriend,
@@ -121,7 +122,9 @@ export function FriendsView({
         const friend = await acceptFriendInvite(raw);
         await refresh();
         setPasteValue("");
-        setNotice(`${friend.displayName} is now in your friends.`);
+        setNotice(
+          `${friend.displayName} is now in your friends. Next: join their private network in the Tailscale app (their Tailscale invite) — then come back and Connect.`,
+        );
         return true;
       } catch (error) {
         setPasteError(friendErrorCopy(error, "Movie Party couldn't add that friend."));
@@ -370,8 +373,8 @@ export function FriendsView({
                             </button>
                           </div>
                         ) : (
-                          <div className="flex items-center justify-between gap-3 min-w-0">
-                            <div className="min-w-0">
+                          <div className="min-w-0">
+                            <div className="flex items-center justify-between gap-3">
                               <div className="flex items-center gap-2 min-w-0">
                                 <p className="text-sm text-white/85 truncate">{friend.displayName}</p>
                                 <button
@@ -388,49 +391,80 @@ export function FriendsView({
                                   <Pencil className="w-3.5 h-3.5" />
                                 </button>
                               </div>
-                              <p className="mt-1 text-[11px] text-white/45">
-                                {friendStatusCopy(friend, status)}
-                              </p>                            </div>
-                            <div className="flex items-center gap-2 shrink-0 friends-row-actions">
-                              <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() => {
-                                  void doVerify(friend.peerKey);
-                                }}
-                                title="Verify the real tunnel connection"
-                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 transition text-[10px] tracking-widest uppercase text-white/70 disabled:opacity-40"
-                                data-testid={`friend-verify-btn-${friend.peerKey}`}
-                              >
-                                {busy && busyAction === "verify" ? (
-                                  <Loader2 className="w-3 h-3 animate-spin" />
-                                ) : (
-                                  <RefreshCw className="w-3 h-3" />
-                                )}
-                                {busy && busyAction === "verify"
-                                  ? "Pinging"
-                                  : status === "MOVIE_PARTY_VERIFIED"
-                                    ? "Re-verify"
-                                    : "Verify"}
-                              </button>
-                              <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() => {
-                                  void doRemove(friend.peerKey, friend.displayName);
-                                }}
-                                title="Remove friend"
-                                aria-label={`Remove ${friend.displayName}`}
-                                className="flex items-center px-2.5 py-1.5 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 transition text-white/40 hover:text-[#FCA5A5] disabled:opacity-40"
-                                data-testid={`friend-remove-btn-${friend.peerKey}`}
-                              >
-                                {busy && busyAction === "remove" ? (
-                                  <Loader2 className="w-3 h-3 animate-spin" />
-                                ) : (
-                                  <Trash2 className="w-3 h-3" />
-                                )}
-                              </button>
+                              <div className="flex items-center gap-2 shrink-0 friends-row-actions">
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => {
+                                    void doVerify(friend.peerKey);
+                                  }}
+                                  title="Verify the real tunnel connection"
+                                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 transition text-[10px] tracking-widest uppercase text-white/70 disabled:opacity-40"
+                                  data-testid={`friend-verify-btn-${friend.peerKey}`}
+                                >
+                                  {busy && busyAction === "verify" ? (
+                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                  ) : (
+                                    <RefreshCw className="w-3 h-3" />
+                                  )}
+                                  {busy && busyAction === "verify"
+                                    ? "Pinging"
+                                    : status === "MOVIE_PARTY_VERIFIED"
+                                      ? "Re-verify"
+                                      : "Verify"}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => {
+                                    void doRemove(friend.peerKey, friend.displayName);
+                                  }}
+                                  title="Remove friend"
+                                  aria-label={`Remove ${friend.displayName}`}
+                                  className="flex items-center px-2.5 py-1.5 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 transition text-white/40 hover:text-[#FCA5A5] disabled:opacity-40"
+                                  data-testid={`friend-remove-btn-${friend.peerKey}`}
+                                >
+                                  {busy && busyAction === "remove" ? (
+                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                  ) : (
+                                    <Trash2 className="w-3 h-3" />
+                                  )}
+                                </button>
+                              </div>
                             </div>
+                            <p className="mt-1 text-[11px] text-white/45">
+                              {friendStatusCopy(friend, status)}
+                            </p>
+                            {status === "TAILSCALE_PENDING" ? (
+                              <div
+                                className="mt-2.5 rounded-lg border border-amber-400/25 bg-amber-400/[0.05] px-3.5 py-3"
+                                data-testid={`friend-pending-help-${friend.peerKey}`}
+                              >
+                                <p className="text-[11px] leading-relaxed text-amber-100/80">
+                                  <strong className="text-amber-200/90">Two separate steps.</strong>{" "}
+                                  {friend.displayName} accepted your Movie Party invite. For
+                                  Movie Party to reach their device, they must also join your
+                                  private network themselves in the Tailscale app — using the
+                                  Tailscale invite your network sends them (email or invite link),
+                                  not this app. Movie Party cannot and will never join for them.
+                                </p>
+                                <div className="mt-2.5 flex flex-wrap items-center gap-2.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      void openTailscaleSetup("OPEN_APP");
+                                    }}
+                                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-amber-300/30 bg-amber-300/10 hover:bg-amber-300/20 transition text-[10px] tracking-widest uppercase text-amber-100/90"
+                                    data-testid={`friend-open-tailscale-${friend.peerKey}`}
+                                  >
+                                    Open Tailscale
+                                  </button>
+                                  <span className="text-[10px] text-white/40">
+                                    Then hit Verify to test the real connection.
+                                  </span>
+                                </div>
+                              </div>
+                            ) : null}
                           </div>
                         )}
                       </li>

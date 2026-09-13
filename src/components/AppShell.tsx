@@ -1,5 +1,6 @@
 import {
   BackendCommandError,
+  backToLobby,
   checkProviderStatus,
   commandErrorMessage,
   createLocalParty,
@@ -47,6 +48,7 @@ import { ReadyCheckView } from "../views/ReadyCheckView";
 import { PartnerConnectView } from "../views/PartnerConnectView";
 import { TailscaleSetupView } from "../views/TailscaleSetupView";
 import { createCallTileSessionState, type CallTileSessionState } from "../overlays/callTileState";
+import { listRecentMedia, localStorageOrNull } from "../schedule/recentMedia";
 import { LoadingState } from "./LoadingState";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { handleFailureEvent } from "../backend/appRuntime";
@@ -462,6 +464,11 @@ export function AppShell() {
     if (snapshot?.media?.mediaId === mediaId) {
       return snapshot.media.filename;
     }
+    // Self-contained schedules may reference a picked file path — show
+    // its readable remembered name instead of the raw path.
+    const recent = listRecentMedia(localStorageOrNull());
+    const hit = recent.find((entry) => entry.path === mediaId);
+    if (hit != null) return hit.name;
     return mediaNameCache.current[mediaId] ?? mediaId;
   };
 
@@ -857,6 +864,9 @@ export function AppShell() {
           void requestPlayCountdown().then(applySnapshot);
         }}
         onStarted={goCinema}
+        onBack={() => {
+          void backToLobby().then(applySnapshot);
+        }}
         callTileSession={callTileSession}
         onCallTileSessionChange={setCallTileSession}
       />

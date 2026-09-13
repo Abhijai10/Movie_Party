@@ -1,5 +1,71 @@
 # Movie Party — Release Notes
 
+## 0.9.4 (UX fixes: TMDB hero, self-contained Schedule, Ready Check escape hatch)
+
+### Home — live trending posters (opt-in, offline-first)
+- The "Now Showing" hero can now show real movie posters and backdrops
+  from TMDB's trending feed — **if** you paste your own free TMDB API
+  key in Settings → General → "Trending posters (TMDB)". The key is
+  stored only on this device (localStorage); it is never bundled with
+  the app and never leaves the app except directly to
+  `api.themoviedb.org`.
+- No key, no network, no problem: the bundled feature wall stays. The
+  same is true whenever TMDB is unreachable — the feed never blocks or
+  breaks the Home screen; posters fall back to their gradient cards.
+- Results are cached for an hour and re-checked at most every 30
+  minutes, so the app stays gentle on rate limits.
+- When live TMDB art is shown, the required attribution ("This product
+  uses the TMDB API but is not endorsed or certified by TMDB" + link)
+  appears with it.
+
+### Create Party — no more cut-off button labels
+- Buttons grow to fit their labels: text wraps inside the button
+  instead of being clipped. The provider action is now simply
+  "Open in <provider>".
+
+### Schedule — fully self-contained
+- Schedule no longer depends on picking a movie in Create Party first.
+  Pick a date, time, movie (from the active party's media, a file on
+  this machine, or your recent picks), and a friend (saved friends,
+  the connected participant, or a manual device ID) — all directly on
+  the Schedule screen.
+
+### Friends — honest Tailscale onboarding
+- A friend who accepted your invite but has not joined your tailnet yet
+  now shows a clear two-step explainer: accepting the Movie Party
+  invite is step one; joining the private network happens in the
+  Tailscale app (Tailscale's own invite) and is a separate, required
+  step. A one-click **Open Tailscale** button launches the Tailscale
+  app; then Verify runs the real `tailscale ping`.
+- The invite link still carries only your name and public key — never
+  an auth key or token.
+
+### Preview / Ready Check — the floating tile can't cover the action
+- The draggable call/chat tile is now clamped above the bottom control
+  dock in the cinema and above the final action buttons in the lobby
+  and Ready Check — it can never be dropped on top of Leave / Enter
+  Cinema / Ready check.
+- **Back to lobby now works.** It was a dead button: clicking it did
+  nothing. It now genuinely returns both sides to the lobby —
+  readiness votes are retracted, a pending countdown is dropped, and a
+  guest on the Ready Check screen follows the host back automatically.
+  Back stays disabled only while the start countdown is already
+  committing (the one window where retreat would desync the room).
+
+### Behind the scenes
+- New command: `back_to_lobby` (host- or guest-initiated retreat;
+  readiness + pending PLAY retracted at the coordinator and state
+  level, broadcast to the peer).
+- `clampCallTilePosition` gained a reserved-bottom parameter so each
+  screen can protect its own final action row.
+- CSP now allows exactly two extra hosts: `image.tmdb.org` (posters)
+  and `api.themoviedb.org` (the trending request) — pinned, no
+  wildcards.
+- Home "Up next" naming now resolves media picked straight from
+  Schedule via the recent-picks list.
+- The experimental Shared Movie Experience remains experimental; it is
+  not complete and is not claimed to be.
+
 ## 0.9.2 (UI overhaul: Friends page, Settings sidebar, movie hero)
 
 ### Friends (new page — replaces the Home panel)

@@ -7,10 +7,13 @@ import { describe, expect, it } from "vitest";
  * must allow exactly what the running app needs — 'self' for everything,
  * with the minimal documented exceptions:
  *   - style-src 'unsafe-inline' — Tailwind/JIT + framer-motion inline styles;
- *   - img-src data: blob:       — avatars, media posters, blob previews;
+ *   - img-src data: blob: https://image.tmdb.org — avatars, blob previews,
+ *     and the Home hero's TMDB poster/backdrop images;
  *   - media-src blob: mediastream: — the call's MediaStreams + local media;
- *   - connect-src ipc: http://ipc.localhost — Tauri IPC on all platforms.
- * Anything broader (unsafe-eval, http:, https:, ws:) must fail this test.
+ *   - connect-src ipc: http://ipc.localhost — Tauri IPC on all platforms;
+ *   - connect-src https://api.themoviedb.org — the Home hero's optional
+ *     trending feed (only used when a user-configured token is present).
+ * Anything broader (unsafe-eval, http:, ws:) must fail this test.
  */
 const config = JSON.parse(
   readFileSync(resolve(__dirname, "../../src-tauri/tauri.conf.json"), "utf8"),
@@ -30,11 +33,29 @@ describe("explicit CSP", () => {
     expect(csp).not.toContain("ws:");
   });
 
+  it("scopes the TMDB hero feed to exactly two pinned hosts", () => {
+    const imgSrc = csp
+      .split(";")
+      .map((directive) => directive.trim())
+      .find((directive) => directive.startsWith("img-src "));
+    const connectSrc = csp
+      .split(";")
+      .map((directive) => directive.trim())
+      .find((directive) => directive.startsWith("connect-src "));
+    expect(imgSrc).toContain("https://image.tmdb.org");
+    expect(connectSrc).toContain("https://api.themoviedb.org");
+    // No wildcard hosts anywhere — the TMDB exceptions are pinned, not open.
+    expect(csp).not.toContain("https://*");
+    expect(csp).not.toContain("*.");
+  });
+
   it("documents each exception the app genuinely needs", () => {
     expect(csp).toContain("script-src 'self'");
     expect(csp).toContain("style-src 'self' 'unsafe-inline'");
     expect(csp).toContain("media-src 'self' blob: mediastream:");
-    expect(csp).toContain("connect-src 'self' ipc: http://ipc.localhost");
+    expect(csp).toContain(
+      "connect-src 'self' ipc: http://ipc.localhost https://api.themoviedb.org",
+    );
     expect(csp).toContain("font-src 'self' data:");
   });
 });

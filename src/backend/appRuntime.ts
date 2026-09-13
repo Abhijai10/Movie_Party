@@ -343,7 +343,7 @@ export function friendStatusCopy(friend: StoredFriend, status: FriendFlowStatus)
     return `Connection verified${via}${ms}`;
   }
   if (status === "TAILSCALE_PENDING") {
-    return "Invite accepted — waiting for their device to join your Tailscale network";
+    return "Invite accepted — they still need to join your network in the Tailscale app (separate step)";
   }
   if (status === "ONLINE") return "Online — not verified yet";
   return "Offline";
@@ -618,6 +618,11 @@ export async function listenToDeepLinks(onDeepLink: (url: string) => void): Prom
 
 export async function markReady(): Promise<AppSnapshot | null> {
   return invokeSnapshot("mark_ready");
+}
+
+/** Ready Check "Back to lobby": retract readiness, return to the lobby. */
+export async function backToLobby(): Promise<AppSnapshot | null> {
+  return invokeSnapshot("back_to_lobby");
 }
 
 export async function enterCinema(): Promise<AppSnapshot | null> {

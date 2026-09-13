@@ -127,6 +127,7 @@ pub fn run() {
             get_provider_capabilities,
             join_party,
             mark_ready,
+            back_to_lobby,
             enter_cinema,
             request_play_countdown,
             continue_without_guest,
@@ -393,6 +394,11 @@ async fn join_party(
 #[tauri::command]
 fn mark_ready(runtime: tauri::State<'_, app_runtime::AppRuntime>) -> app_runtime::AppSnapshot {
     runtime.set_ready()
+}
+
+#[tauri::command]
+fn back_to_lobby(runtime: tauri::State<'_, app_runtime::AppRuntime>) -> app_runtime::AppSnapshot {
+    runtime.back_to_lobby()
 }
 
 #[tauri::command]

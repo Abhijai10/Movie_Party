@@ -84,7 +84,9 @@ describe("friendStatusCopy", () => {
   it("explains the pending state for an INVITED friend honestly", () => {
     const friend = savedFriend({ connectionState: "INVITED" });
     const copy = friendStatusCopy(friend, "TAILSCALE_PENDING");
-    expect(copy).toContain("waiting for their device to join");
+    // The pending copy says Tailscale joining is a separate required step.
+    expect(copy).toContain("separate step");
+    expect(copy).toContain("join your network in the Tailscale app");
     // The pending copy never claims a connection exists.
     expect(copy).not.toContain("Connection verified");
     expect(copy).not.toContain("Online");

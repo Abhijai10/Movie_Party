@@ -17,6 +17,11 @@ import {
   type ProviderCapability,
   type TailscaleReadiness,
 } from "../backend/appRuntime";
+import {
+  clearTmdbCache,
+  getTmdbToken,
+  setTmdbToken,
+} from "../home/tmdbFeed";
 
 /**
  * UI_UX_SPEC §55–§62 — Settings.
@@ -86,6 +91,12 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
   });
   const [confirmResetProvider, setConfirmResetProvider] = useState<string | null>(null);
   const [exportedBundle, setExportedBundle] = useState<string | null>(null);
+  // TMDB hero key: stored only in localStorage on this device.
+  const [tmdbTokenSaved, setTmdbTokenSaved] = useState<boolean>(() =>
+    getTmdbToken(window.localStorage).length > 0,
+  );
+  const [tmdbDialogOpen, setTmdbDialogOpen] = useState(false);
+  const [tmdbDraft, setTmdbDraft] = useState("");
   // Provider Shared diagnostic records + run state.
   const [diagnostics, setDiagnostics] = useState<Record<string, StoredProviderDiagnostic>>({});
   const [diagnosticRunning, setDiagnosticRunning] = useState<string | null>(null);
@@ -129,6 +140,20 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
           : record.sharedReason,
       );
     });
+  };
+
+  const saveTmdbToken = () => {
+    setTmdbToken(window.localStorage, tmdbDraft);
+    clearTmdbCache(window.localStorage);
+    setTmdbTokenSaved(tmdbDraft.trim().length > 0);
+    setTmdbDialogOpen(false);
+    setTmdbDraft("");
+  };
+
+  const clearTmdbToken = () => {
+    setTmdbToken(window.localStorage, "");
+    clearTmdbCache(window.localStorage);
+    setTmdbTokenSaved(false);
   };
 
   useEffect(() => {
@@ -292,6 +317,44 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
               <Row label="Notification preferences" hint="Reminders for scheduled preloads">
                 System-managed
               </Row>
+              <div className="pt-4 border-t border-white/[0.06]" data-testid="settings-tmdb">
+                <Row
+                  label="Trending posters (TMDB)"
+                  hint={
+                    tmdbTokenSaved
+                      ? "Your key is saved on this device only. The Home hero shows TMDB's trending week; the built-in wall shows when TMDB is unreachable."
+                      : "Optional: paste your own TMDB API key (v3) or read access token to light the Home hero with trending posters. Without it, the built-in wall shows. The key is stored on this device only."
+                  }
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTmdbDialogOpen(true);
+                    }}
+                    className="px-4 py-2 rounded-full text-[11px] tracking-[0.12em] uppercase border border-white/15 text-white/55 hover:text-white hover:border-white/30 transition"
+                    data-testid="settings-tmdb-edit-btn"
+                  >
+                    {tmdbTokenSaved ? "Change key" : "Add key"}
+                  </button>
+                </Row>
+                {tmdbTokenSaved ? (
+                  <div className="flex items-center gap-3 pb-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        clearTmdbToken();
+                      }}
+                      className="px-4 py-2 rounded-full text-[11px] tracking-[0.12em] uppercase border border-white/15 text-white/55 hover:text-white transition"
+                      data-testid="settings-tmdb-clear-btn"
+                    >
+                      Remove key
+                    </button>
+                    <span className="text-xs text-white/40">
+                      Falls back to the built-in wall — the app never requires TMDB.
+                    </span>
+                  </div>
+                ) : null}
+              </div>
             </div>
           ) : null}
 
@@ -570,6 +633,63 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
           </div>
         </motion.section>
       </main>
+
+      {tmdbDialogOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/45 backdrop-blur-[2px]"
+          role="dialog"
+          aria-label="TMDB key"
+          data-testid="settings-tmdb-dialog"
+        >
+          <div className="relative w-[min(560px,92vw)] rounded-2xl bg-[#0D0B14]/95 border border-white/10 shadow-2xl p-6">
+            <h3 className="font-serif-display text-xl text-white">Trending posters (TMDB)</h3>
+            <p className="mt-3 text-sm text-white/55 leading-relaxed">
+              Paste your own TMDB API key (v3) or read access token. Create a free one at
+              themoviedb.org → Settings → API. It is stored on this device only and never
+              included in invites or sync data.
+            </p>
+            <input
+              type="password"
+              value={tmdbDraft}
+              onChange={(event) => {
+                setTmdbDraft(event.target.value);
+              }}
+              placeholder="Your TMDB key or read access token"
+              className="mt-4 w-full bg-[#05050B] border border-white/15 rounded-lg px-3.5 py-2.5 text-sm text-white/95 placeholder:text-white/40 focus:outline-none focus:border-sky-400/50 font-mono-mp"
+              data-testid="settings-tmdb-input"
+              aria-label="TMDB key"
+            />
+            <p className="mt-3 text-xs text-white/40 leading-relaxed">
+              The Home hero shows trending titles with the required TMDB attribution. If TMDB is
+              unreachable, the built-in poster wall shows instead — the app never depends on it.
+            </p>
+            <div className="mt-5 flex items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setTmdbDialogOpen(false);
+                  setTmdbDraft("");
+                }}
+                className="px-4 py-2.5 rounded-full text-xs tracking-[0.12em] uppercase text-white/55 hover:text-white transition"
+                data-testid="settings-tmdb-cancel-btn"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={tmdbDraft.trim().length === 0}
+                onClick={() => {
+                  saveTmdbToken();
+                }}
+                className="px-5 py-2.5 rounded-full text-xs tracking-[0.12em] uppercase border border-[#9F7AEA]/50 bg-[#6B46C1]/30 text-white disabled:opacity-40 disabled:cursor-not-allowed transition"
+                data-testid="settings-tmdb-save-btn"
+              >
+                Save key
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

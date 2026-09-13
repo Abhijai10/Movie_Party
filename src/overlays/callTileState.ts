@@ -105,14 +105,30 @@ export function clampCameraCardSize(sizePx: number): number {
   return Math.min(CAMERA_CARD_MAX_PX, Math.max(CAMERA_CARD_MIN_PX, Math.round(sizePx)));
 }
 
+/**
+ * Clamp the tile into the viewport. `reservedBottomPx` keeps the tile out
+ * of a bottom strip that belongs to fixed UI — the cinema control dock's
+ * final action row — so the floating call/chat card can never be dropped
+ * on top of the final action button. Views without a bottom dock pass 0.
+ */
 export function clampCallTilePosition(
   position: CallTilePosition,
   viewport: { width: number; height: number },
   tile: { width: number; height: number },
+  reservedBottomPx = 0,
 ): CallTilePosition {
+  const reserved = Math.max(
+    0,
+    Math.min(reservedBottomPx, viewport.height - tile.height - tileMargin * 2),
+  );
+  const minY = tileMargin;
+  const maxY = viewport.height - tile.height - tileMargin - reserved;
   return {
-    x: Math.min(Math.max(tileMargin, position.x), Math.max(tileMargin, viewport.width - tile.width - tileMargin)),
-    y: Math.min(Math.max(tileMargin, position.y), Math.max(tileMargin, viewport.height - tile.height - tileMargin)),
+    x: Math.min(
+      Math.max(tileMargin, position.x),
+      Math.max(tileMargin, viewport.width - tile.width - tileMargin),
+    ),
+    y: Math.min(Math.max(minY, position.y), Math.max(minY, maxY)),
   };
 }
 

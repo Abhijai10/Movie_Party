@@ -335,6 +335,7 @@ export function LobbyView({
         localStream={null}
         session={callTileSession}
         onSessionChange={onCallTileSessionChange}
+        reservedBottomPx={90}
       />
     </div>
   );

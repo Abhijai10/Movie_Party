@@ -55,6 +55,43 @@ describe("call tile state", () => {
       clampCallTilePosition({ x: 500, y: 500 }, { width: 400, height: 300 }, { width: 600, height: 400 }),
     ).toEqual({ x: 12, y: 12 });
   });
+
+  it("keeps the tile out of the reserved bottom strip (final action button)", () => {
+    // The cinema control dock sits at the bottom; a tile dropped onto it
+    // must be pushed back above the reserved strip.
+    expect(
+      clampCallTilePosition(
+        { x: 300, y: 520 },
+        { width: 800, height: 600 },
+        { width: 220, height: 180 },
+        132,
+      ),
+    ).toEqual({ x: 300, y: 276 }); // 600 - 180 - 12 - 132
+  });
+
+  it("a zero reserved bottom keeps the previous behaviour", () => {
+    expect(
+      clampCallTilePosition(
+        { x: 300, y: 520 },
+        { width: 800, height: 600 },
+        { width: 220, height: 180 },
+        0,
+      ),
+    ).toEqual({ x: 300, y: 408 });
+  });
+
+  it("never lets a huge reservation strand the tile below the top margin", () => {
+    // If the reserved strip were bigger than the free space, the clamp
+    // must still leave the tile reachable at the top margin.
+    expect(
+      clampCallTilePosition(
+        { x: 300, y: 500 },
+        { width: 800, height: 400 },
+        { width: 220, height: 180 },
+        5_000,
+      ),
+    ).toEqual({ x: 300, y: 12 });
+  });
 });
 
 describe("call tile close semantics", () => {

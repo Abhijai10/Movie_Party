@@ -23,6 +23,11 @@ type CallTileProps = {
   localStream: MediaStream | null;
   session: CallTileSessionState;
   onSessionChange: (next: CallTileSessionState) => void;
+  /**
+   * Bottom strip the tile must never cover (the cinema control dock with
+   * the final action button). 0 = nothing reserved.
+   */
+  reservedBottomPx?: number;
 };
 
 export function CallTile({
@@ -34,6 +39,7 @@ export function CallTile({
   localStream,
   session,
   onSessionChange,
+  reservedBottomPx = 0,
 }: CallTileProps) {
   const tileRef = useRef<HTMLElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -103,17 +109,21 @@ export function CallTile({
     }
   }, [localStream]);
 
-  const clampPosition = useCallback((x: number, y: number) => {
-    const rect = tileRef.current?.getBoundingClientRect();
-    return clampCallTilePosition(
-      { x, y },
-      {
-        width: typeof window === "undefined" ? 1280 : window.innerWidth,
-        height: typeof window === "undefined" ? 720 : window.innerHeight,
-      },
-      { width: rect?.width ?? 260, height: rect?.height ?? 220 },
-    );
-  }, []);
+  const clampPosition = useCallback(
+    (x: number, y: number) => {
+      const rect = tileRef.current?.getBoundingClientRect();
+      return clampCallTilePosition(
+        { x, y },
+        {
+          width: typeof window === "undefined" ? 1280 : window.innerWidth,
+          height: typeof window === "undefined" ? 720 : window.innerHeight,
+        },
+        { width: rect?.width ?? 260, height: rect?.height ?? 220 },
+        reservedBottomPx,
+      );
+    },
+    [reservedBottomPx],
+  );
 
   const updateSession = useCallback(
     (next: Partial<CallTileSessionState>) => {

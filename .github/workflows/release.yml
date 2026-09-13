@@ -1,0 +1,107 @@
+name: Release
+
+# v0.9.4+: official tauri-action release workflow. Builds the macOS
+# Apple Silicon bundle and the Windows x64 NSIS installer on a version
+# tag and publishes them to a GitHub Release.
+#
+# Trigger: push a v* tag (never retag — create a new patch version
+# instead). The workflow does NOT run on branches or plain commits.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish-tauri:
+    name: Release ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest # Apple Silicon runner
+            args: "--target aarch64-apple-darwin"
+            rust_target: aarch64-apple-darwin
+          - os: windows-latest
+            args: "" # default host target (x86_64), NSIS bundle
+            rust_target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.10.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: pnpm
+
+      # Pinned toolchain — same rationale as ci.yml: never let the build
+      # toolchain drift from what the code was verified against.
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      # ── Stage the mpv runtime (NOT committed; LGPL distribution is
+      #    handled by the committed license texts) ──────────────────────
+      # macOS: the reproducible LGPL build. Homebrew's mpv is GPL and
+      # CANNOT be bundled in this proprietary app; build-libmpv-macos.sh
+      # compiles LGPL ffmpeg/libplacebo/harfbuzz/libass/libmpv from
+      # pinned sources with @loader_path-relative install names. Slow
+      # (~20-40 min) but license-correct and reproducible.
+      - name: Stage LGPL libmpv runtime (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install meson ninja pkg-config freetype fribidi libpng \
+            glad2 jinja2 markupsafe brotli gettext pcre2 glib
+          # glad2's python modules land in the brew python site-packages;
+          # point meson at them explicitly (overridable, see script).
+          export MPV_PYTHONPATH="$(brew --prefix)/lib/python3.13/site-packages"
+          ./scripts/build-libmpv-macos.sh
+          ls -la src-tauri/mpv_runtime/
+
+      # Windows: mpv-winbuild-cmake's dev archive ships a fully
+      # self-contained LGPL-build libmpv-2.dll. We rename it to
+      # mpv-2.dll, which is what src-tauri/src/media/player/mpv_backend.rs
+      # loads at runtime, and stage it into src-tauri/mpv_runtime/ so the
+      # NSIS bundle picks it up as a Tauri resource.
+      - name: Stage libmpv (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $mpvRelease = "20260830"
+          $mpvAsset = "mpv-dev-x86_64-20260830-git-e8673660ab.7z"
+          $mpvUrl = "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/$mpvRelease/$mpvAsset"
+          $archive = Join-Path $env:RUNNER_TEMP "mpv-dev.7z"
+          $extract = Join-Path $env:RUNNER_TEMP "mpv-dev"
+          Invoke-WebRequest -Uri $mpvUrl -OutFile $archive
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          & "C:\Program Files\7-Zip\7z.exe" x $archive "-o$extract" -y | Out-Null
+          $dll = Get-ChildItem -Path $extract -Recurse -Filter "libmpv-2.dll" | Select-Object -First 1
+          if (-not $dll) { throw "libmpv-2.dll was not found in the downloaded archive" }
+          $stageDir = "src-tauri/mpv_runtime"
+          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+          Copy-Item $dll.FullName (Join-Path $stageDir "mpv-2.dll") -Force
+          Get-Item (Join-Path $stageDir "mpv-2.dll") | Select-Object Name, Length
+
+      - run: pnpm install --frozen-lockfile
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Movie Party ${{ github.ref_name }}"
+          releaseBody: "See RELEASE_NOTES.md in the repository for what changed. Highlights: live TMDB trending posters on Home (opt-in via your own TMDB key), fully self-contained Schedule, honest Tailscale friend onboarding, and the Ready Check 'Back to lobby' escape hatch. The experimental Shared Movie Experience remains experimental — not complete."
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
