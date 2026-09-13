@@ -15,5 +15,13 @@
         </array>
       </dict>
     </array>
+    <!-- getUserMedia() for the WebRTC call feature: macOS WKWebView
+         denies camera/microphone without these usage-description keys
+         (surfaces as MP-CALL-011 NotAllowedError). Tauri merges this
+         file into the generated app bundle's Info.plist at build time. -->
+    <key>NSCameraUsageDescription</key>
+    <string>Movie Party uses the camera for the optional video call with your movie partner.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Movie Party uses the microphone for the call with your movie partner.</string>
   </dict>
 </plist>

@@ -102,6 +102,10 @@ const ACCENTS: Array<{ from: string; to: string; accent: string }> = [
 /** The user's own TMDB credential — localStorage only, never the repo. */
 export const TMDB_TOKEN_STORAGE_KEY = "mp_tmdb_token";
 const CACHE_KEY = "mp_tmdb_trending_v1";
+/** Outcome of the last live fetch attempt — surfaces in Settings so a
+ *  configured-but-unreachable TMDB (common: ISP DNS/packet blocking in
+ *  some regions) is visible instead of silently showing gradients. */
+const STATUS_KEY = "mp_tmdb_status_v1";
 const TRENDING_PATH = "https://api.themoviedb.org/3/trending/movie/week?language=en-US";
 const POSTER_BASE = "https://image.tmdb.org/t/p/w500";
 const BACKDROP_BASE = "https://image.tmdb.org/t/p/w780";
@@ -329,8 +333,22 @@ export function loadTmdbTrending(
   void fetchTrending(token, fetchImpl, controller.signal)
     .then((features) => {
       clearTimeout(timeout);
-      if (cancelled || features == null) return;
+      if (cancelled) return;
+      if (features == null) {
+        // Reached TMDB but the answer was unusable (non-200 or bad shape).
+        writeTmdbStatus(storage, {
+          lastSuccessAtMs: readTmdbStatus(storage)?.lastSuccessAtMs ?? null,
+          lastAttemptAtMs: now(),
+          lastError: "http",
+        });
+        return;
+      }
       deliver(features);
+      writeTmdbStatus(storage, {
+        lastSuccessAtMs: now(),
+        lastAttemptAtMs: now(),
+        lastError: null,
+      });
       if (storage != null) {
         try {
           const entry: CachedFeed = { at: now(), features };
@@ -343,6 +361,11 @@ export function loadTmdbTrending(
     .catch(() => {
       clearTimeout(timeout);
       /* offline / rejected: the cached or bundled wall is already shown */
+      writeTmdbStatus(storage, {
+        lastSuccessAtMs: readTmdbStatus(storage)?.lastSuccessAtMs ?? null,
+        lastAttemptAtMs: now(),
+        lastError: "network",
+      });
     });
 
   return () => {
@@ -358,11 +381,57 @@ export function cacheAgeMs(storage: TmdbStorage | null, now: () => number = () =
   return cached == null ? null : now() - cached.at;
 }
 
+export type TmdbFeedStatus = {
+  /** Unix ms of the last COMPLETED live fetch (null = never succeeded). */
+  lastSuccessAtMs: number | null;
+  /** Unix ms of the last FAILED live fetch attempt (null = never tried). */
+  lastAttemptAtMs: number | null;
+  /** The failed attempt's rough cause, when known. */
+  lastError: "network" | "http" | "parse" | null;
+};
+
+/** Read the persisted last-attempt outcome (Settings diagnostics). */
+export function readTmdbStatus(
+  storage: TmdbStorage | null = browserStorage(),
+): TmdbFeedStatus | null {
+  if (storage == null) return null;
+  try {
+    const raw = storage.getItem(STATUS_KEY);
+    if (raw == null) return null;
+    const parsed = JSON.parse(raw) as Partial<TmdbFeedStatus>;
+    if (typeof parsed.lastAttemptAtMs !== "number") return null;
+    return {
+      lastSuccessAtMs: typeof parsed.lastSuccessAtMs === "number" ? parsed.lastSuccessAtMs : null,
+      lastAttemptAtMs: parsed.lastAttemptAtMs,
+      lastError:
+        parsed.lastError === "network" || parsed.lastError === "http" || parsed.lastError === "parse"
+          ? parsed.lastError
+          : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Record a fetch attempt's outcome (best-effort; storage errors ignored). */
+function writeTmdbStatus(
+  storage: TmdbStorage | null,
+  status: TmdbFeedStatus,
+): void {
+  if (storage == null) return;
+  try {
+    storage.setItem(STATUS_KEY, JSON.stringify(status));
+  } catch {
+    /* ignore */
+  }
+}
+
 /** Clear the cached feed (used when the token changes/clears). */
 export function clearTmdbCache(storage: TmdbStorage | null): void {
   if (storage == null) return;
   try {
     storage.removeItem(CACHE_KEY);
+    storage.removeItem(STATUS_KEY);
   } catch {
     /* ignore */
   }

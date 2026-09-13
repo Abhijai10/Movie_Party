@@ -6,6 +6,7 @@ import {
   getTmdbToken,
   loadTmdbTrending,
   mapTrendingPayload,
+  readTmdbStatus,
   setTmdbToken,
   type TmdbStorage,
 } from "./tmdbFeed";
@@ -229,5 +230,58 @@ describe("loadTmdbTrending", () => {
     expect(cacheAgeMs(storage)).toBeNull();
     clearTmdbCache(storage);
     expect(storage.getItem("mp_tmdb_trending_v1")).toBeNull();
+  });
+
+  it("records a successful fetch in the status diagnostics", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(jsonOk({ results: [{ title: "Live Winner" }] }));
+    const storage = tokenStorage("tok");
+    loadTmdbTrending(() => undefined, { storage, fetchImpl: fetchImpl as unknown as typeof fetch });
+    await vi.waitFor(() => {
+      const status = readTmdbStatus(storage);
+      expect(status).not.toBeNull();
+      expect(status?.lastError).toBeNull();
+      expect(status?.lastSuccessAtMs).not.toBeNull();
+      expect(status?.lastAttemptAtMs).toBe(status?.lastSuccessAtMs);
+    });
+    clearTmdbCache(storage);
+    expect(readTmdbStatus(storage)).toBeNull();
+  });
+
+  it("records a network failure (unreachable TMDB) in the status diagnostics", async () => {
+    const fetchImpl = vi.fn().mockRejectedValueOnce(new TypeError("Connection reset"));
+    const storage = tokenStorage("tok");
+    loadTmdbTrending(() => undefined, { storage, fetchImpl: fetchImpl as unknown as typeof fetch });
+    await vi.waitFor(() => {
+      const status = readTmdbStatus(storage);
+      expect(status).not.toBeNull();
+      expect(status?.lastError).toBe("network");
+      expect(status?.lastSuccessAtMs).toBeNull();
+    });
+  });
+
+  it("records an unusable response (non-200) in the status diagnostics", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("nope", { status: 401 }));
+    const storage = tokenStorage("tok");
+    loadTmdbTrending(() => undefined, { storage, fetchImpl: fetchImpl as unknown as typeof fetch });
+    await vi.waitFor(() => {
+      const status = readTmdbStatus(storage);
+      expect(status).not.toBeNull();
+      expect(status?.lastError).toBe("http");
+      expect(status?.lastSuccessAtMs).toBeNull();
+    });
+  });
+
+  it("readTmdbStatus tolerates corrupt/absent records", () => {
+    const storage = memoryStorage();
+    expect(readTmdbStatus(storage)).toBeNull();
+    storage.setItem("mp_tmdb_status_v1", "{oops");
+    expect(readTmdbStatus(storage)).toBeNull();
+    storage.setItem("mp_tmdb_status_v1", JSON.stringify({ lastAttemptAtMs: 5, lastError: "weird" }));
+    expect(readTmdbStatus(storage)?.lastError).toBeNull();
+    expect(readTmdbStatus(null)).toBeNull();
   });
 });

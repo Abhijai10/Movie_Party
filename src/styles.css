@@ -882,6 +882,14 @@ video {
 .h-14{
   height: 3.5rem;
 }
+/* Missing utility restored (v0.9.4 button-label fix): the compact pill
+   keeps its 3.5rem floor while a genuinely long label wraps to a second
+   line instead of being truncated — the button grows, the label never
+   clips. Generated in the frozen hand-written layer because this file
+   is a compiled artifact (no Tailwind in the Vite build). */
+.min-h-14{
+  min-height: 3.5rem;
+}
 .h-16{
   height: 4rem;
 }

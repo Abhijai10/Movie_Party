@@ -612,14 +612,17 @@ export function CreatePartyView({
                     <span className="text-[11px] tracking-[0.24em] uppercase text-white/40 truncate">
                       Your screening is ready to open
                     </span>
-                    <div className="grid grid-cols-1 sm:grid-cols-[minmax(7.75rem,0.72fr)_minmax(12rem,1.28fr)] gap-3 min-w-0">
+                    {/* Same size language as the rest of the app: the two
+                        actions sit on one row, each at its natural single
+                        -line width — never stretched by a narrow grid
+                        column into a tall wrapped pill. */}
+                    <div className="flex flex-wrap items-center justify-center gap-3 min-w-0">
                       <CinemaButton
                         variant="ghost"
                         disabled={isCreating}
                         onClick={() => {
                           setPreparing(false);
                         }}
-                        className="w-full"
                       >
                         Change
                       </CinemaButton>
@@ -627,7 +630,7 @@ export function CreatePartyView({
                         onClick={create}
                         disabled={isCreating}
                         icon={isCreating ? Loader2 : ArrowRight}
-                        className={`w-full ${isCreating ? "[&_svg]:animate-spin" : ""}`}
+                        className={isCreating ? "[&_svg]:animate-spin" : ""}
                         data-testid="create-room-btn"
                       >
                       {isCreating

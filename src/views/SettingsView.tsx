@@ -20,6 +20,7 @@ import {
 import {
   clearTmdbCache,
   getTmdbToken,
+  readTmdbStatus,
   setTmdbToken,
 } from "../home/tmdbFeed";
 
@@ -95,6 +96,14 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
   const [tmdbTokenSaved, setTmdbTokenSaved] = useState<boolean>(() =>
     getTmdbToken(window.localStorage).length > 0,
   );
+  // Diagnostics for the last live fetch: distinguishes "key saved but
+  // TMDB unreachable" (common: some ISPs block themoviedb.org) from a
+  // working feed — read fresh whenever the row re-renders.
+  const tmdbStatus = readTmdbStatus(window.localStorage);
+  const tmdbLiveOk =
+    tmdbStatus != null &&
+    tmdbStatus.lastSuccessAtMs != null &&
+    tmdbStatus.lastAttemptAtMs === tmdbStatus.lastSuccessAtMs;
   const [tmdbDialogOpen, setTmdbDialogOpen] = useState(false);
   const [tmdbDraft, setTmdbDraft] = useState("");
   // Provider Shared diagnostic records + run state.
@@ -321,9 +330,13 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
                 <Row
                   label="Trending posters (TMDB)"
                   hint={
-                    tmdbTokenSaved
-                      ? "Your key is saved on this device only. The Home hero shows TMDB's trending week; the built-in wall shows when TMDB is unreachable."
-                      : "Optional: paste your own TMDB API key (v3) or read access token to light the Home hero with trending posters. Without it, the built-in wall shows. The key is stored on this device only."
+                    !tmdbTokenSaved
+                      ? "Optional: paste your own TMDB API key (v3) or read access token to light the Home hero with trending posters. Without it, the built-in gradient wall shows. The key is stored on this device only."
+                      : tmdbLiveOk
+                        ? "Live feed working — the Home hero is showing TMDB's trending week."
+                        : tmdbStatus?.lastError === "network"
+                          ? "Key saved, but this device could not reach TMDB (network blocked/unreachable). The built-in wall shows in the meantime; posters appear once TMDB is reachable."
+                          : "Key saved. The Home hero fetches trending posters when it can; the built-in wall shows otherwise."
                   }
                 >
                   <button
