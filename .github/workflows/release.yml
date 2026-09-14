@@ -138,9 +138,16 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # VITE_TMDB_TOKEN (repo secret, never committed): the SHARED key
+      # baked into every release build as the default TMDB credential.
+      # Vite inlines it into the frontend bundle via beforeBuildCommand,
+      # so both installs (owner + friend) get posters out of the box. A
+      # key pasted in Settings always overrides it per device, so a
+      # retired shared key never strands an install.
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VITE_TMDB_TOKEN: ${{ secrets.VITE_TMDB_TOKEN }}
         with:
           # On a tag push the tag is the ref name; on a manual dispatch
           # the operator names the release tag (must already exist so

@@ -18,6 +18,7 @@ import {
   type TailscaleReadiness,
 } from "../backend/appRuntime";
 import {
+  BUNDLED_TMDB_TOKEN,
   clearTmdbCache,
   getTmdbToken,
   readTmdbStatus,
@@ -331,12 +332,14 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
                   label="Trending posters (TMDB)"
                   hint={
                     !tmdbTokenSaved
-                      ? "Optional: paste your own TMDB API key (v3) or read access token to light the Home hero with trending posters. Without it, the built-in gradient wall shows. The key is stored on this device only."
+                      ? BUNDLED_TMDB_TOKEN.length > 0
+                        ? "A shared key ships with this build, so the Home hero fetches trending posters out of the box. Paste your own TMDB key (v3) or read access token only to override it on this device — for example if the shared key stops working."
+                        : "Optional: paste your own TMDB API key (v3) or read access token to light the Home hero with trending posters. Without it, the built-in gradient wall shows. The key is stored on this device only."
                       : tmdbLiveOk
                         ? "Live feed working — the Home hero is showing TMDB's trending week."
                         : tmdbStatus?.lastError === "network"
-                          ? "Key saved, but this device could not reach TMDB (network blocked/unreachable). The built-in wall shows in the meantime; posters appear once TMDB is reachable."
-                          : "Key saved. The Home hero fetches trending posters when it can; the built-in wall shows otherwise."
+                          ? "Your key is saved, but this device could not reach TMDB (network blocked/unreachable). The built-in wall shows in the meantime; posters appear once TMDB is reachable."
+                          : "Your key is saved. The Home hero fetches trending posters when it can; the built-in wall shows otherwise."
                   }
                 >
                   <button
@@ -657,9 +660,9 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
           <div className="relative w-[min(560px,92vw)] rounded-2xl bg-[#0D0B14]/95 border border-white/10 shadow-2xl p-6">
             <h3 className="font-serif-display text-xl text-white">Trending posters (TMDB)</h3>
             <p className="mt-3 text-sm text-white/55 leading-relaxed">
-              Paste your own TMDB API key (v3) or read access token. Create a free one at
-              themoviedb.org → Settings → API. It is stored on this device only and never
-              included in invites or sync data.
+              {BUNDLED_TMDB_TOKEN.length > 0
+                ? "This build already ships a shared key, so posters work out of the box. Paste a key ONLY to override the shared one on this device — e.g. if it stops working. Create a free one at themoviedb.org → Settings → API. Stored on this device only; never included in invites or sync data."
+                : "Paste your own TMDB API key (v3) or read access token. Create a free one at themoviedb.org → Settings → API. It is stored on this device only and never included in invites or sync data."}
             </p>
             <input
               type="password"

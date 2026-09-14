@@ -22,6 +22,24 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
 
+## Shared TMDB key (build-time)
+
+The Home hero's trending posters use TMDB. The **shared key** is baked into the app at
+build time so every install (yours and your friend's) shows posters out of the box,
+while **never being committed** to the repo:
+
+1. **Local builds**: create `.env` (git-ignored) with `VITE_TMDB_TOKEN=<your key>`.
+   See `.env.example`. Use either the v3 API key (32 chars) or the v4 read access
+   token (starts with `eyJ`).
+2. **Release builds**: add a repository secret named `VITE_TMDB_TOKEN`
+   (GitHub → Settings → Secrets and variables → Actions → New repository secret).
+   `.github/workflows/release.yml` passes it to the build.
+
+**If the shared key stops working**, any device can paste a replacement key in
+**Settings → General → "Trending posters (TMDB)"** — a pasted key always overrides the
+bundled one on that device, no rebuild needed. With no key at all the app falls back to
+the built-in gradient wall (no posters, no network).
+
 ## Release builds
 
 - **macOS**: `pnpm tauri build` produces a `.app` and `.dmg` (requires `mpv` available on the

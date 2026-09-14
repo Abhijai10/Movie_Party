@@ -4,9 +4,10 @@
  * Design rules (all enforced):
  *  - NEVER blocks the app: every failure resolves to the bundled fallback
  *    feature list, and the network call has a hard timeout + AbortController.
- *  - NEVER hard-codes a secret: the user's own TMDB API key / read access
- *    token lives ONLY in localStorage (pasted once in Settings → General);
- *    nothing sensitive ships in the repo, the invite link, or the database.
+ *  - NEVER hard-codes a secret: the user's own pasted TMDB key (Settings →
+ *    General) lives ONLY in localStorage, and the shared build-time default
+ *    comes from .env / a CI secret — nothing sensitive is committed; the
+ *    invite link and the database never carry either.
  *  - Local cache: the parsed feed is cached in localStorage with a
  *    timestamp; a fresh fetch runs at most once per TTL.
  *  - Attribution: the hero renders the required TMDB attribution line;
@@ -101,6 +102,24 @@ const ACCENTS: Array<{ from: string; to: string; accent: string }> = [
 
 /** The user's own TMDB credential — localStorage only, never the repo. */
 export const TMDB_TOKEN_STORAGE_KEY = "mp_tmdb_token";
+
+/**
+ * Build-time default credential — the SHARED key for the two-person app.
+ *
+ * Provided via `VITE_TMDB_TOKEN` in `.env` (local builds) or the GitHub
+ * Actions secret of the same name (release builds); Vite inlines the
+ * value into the app bundle at build time, so every install — yours and
+ * your friend's — carries it without either of you pasting anything.
+ * It is deliberately NOT committed: the repo is private but the bundle
+ * ships outside it, and a committed key would also leak into any fork or
+ * archive of the source. Resolution priority per device:
+ *   1. A key pasted in Settings → General (localStorage) — always wins,
+ *      so if the shared key dies it can be swapped per device without a
+ *      new build.
+ *   2. This bundled default (build-time .env / CI secret).
+ *   3. Nothing → the bundled gradient wall, zero network.
+ */
+export const BUNDLED_TMDB_TOKEN: string = import.meta.env.VITE_TMDB_TOKEN ?? "";
 const CACHE_KEY = "mp_tmdb_trending_v1";
 /** Outcome of the last live fetch attempt — surfaces in Settings so a
  *  configured-but-unreachable TMDB (common: ISP DNS/packet blocking in
@@ -155,6 +174,17 @@ export function getTmdbToken(storage: TmdbStorage | null): string {
   } catch {
     return "";
   }
+}
+
+/**
+ * The credential actually used for the next fetch: the user's pasted key
+ * (Settings → General) if present, else the build-time shared default.
+ * A per-device paste always wins, so a retired shared key can be
+ * replaced without shipping a new build.
+ */
+export function resolveTmdbToken(storage: TmdbStorage | null): string {
+  const pasted = getTmdbToken(storage);
+  return pasted.length > 0 ? pasted : BUNDLED_TMDB_TOKEN;
 }
 
 export function setTmdbToken(storage: TmdbStorage | null, token: string): void {
@@ -293,7 +323,7 @@ export function loadTmdbTrending(
   const storage = deps?.storage !== undefined ? deps.storage : browserStorage();
   const fetchImpl = deps?.fetchImpl ?? (typeof fetch === "function" ? fetch : undefined);
   const now = deps?.now ?? ((): number => new Date().getTime());
-  const token = getTmdbToken(storage);
+  const token = resolveTmdbToken(storage);
 
   const deliver = (features: TmdbFeature[]): void => {
     if (features.length > 0) {

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  BUNDLED_TMDB_TOKEN,
   FALLBACK_FEATURES,
   cacheAgeMs,
   clearTmdbCache,
@@ -7,6 +8,7 @@ import {
   loadTmdbTrending,
   mapTrendingPayload,
   readTmdbStatus,
+  resolveTmdbToken,
   setTmdbToken,
   type TmdbStorage,
 } from "./tmdbFeed";
@@ -93,6 +95,37 @@ describe("token storage", () => {
   it("tolerates absent storage", () => {
     setTmdbToken(null, "x");
     expect(getTmdbToken(null)).toBe("");
+  });
+});
+
+describe("shared build-time default (resolveTmdbToken)", () => {
+  it("uses the pasted key when present, the bundled default otherwise", () => {
+    // Pasted key (Settings → General) always beats the shared build-time key.
+    const pasted = memoryStorage({ mp_tmdb_token: "  my-own-key  " });
+    expect(resolveTmdbToken(pasted)).toBe("my-own-key");
+
+    // No pasted key → the build-time default from .env / the CI secret.
+    expect(resolveTmdbToken(memoryStorage())).toBe(BUNDLED_TMDB_TOKEN);
+
+    // Unreachable/absent storage still resolves to the bundled default
+    // when one ships with the build (empty in the test env, which is the
+    // no-secret-committed guarantee).
+    expect(resolveTmdbToken(null)).toBe(BUNDLED_TMDB_TOKEN);
+  });
+
+  it("falls back to the shipped wall only when neither exists", () => {
+    // In the test environment no VITE_TMDB_TOKEN is set, so with no
+    // pasted key the feed must deliver the bundled fallback wall without
+    // any network call — the same guarantee a build WITHOUT the secret
+    // keeps at runtime.
+    const seen: string[][] = [];
+    loadTmdbTrending((features) => seen.push(features.map((f) => f.title)), {
+      storage: memoryStorage(),
+      fetchImpl: (() => {
+        throw new Error("network must not be touched without a credential");
+      }) as unknown as typeof fetch,
+    });
+    expect(seen[0]).toEqual(FALLBACK_FEATURES.map((f) => f.title));
   });
 });
 
