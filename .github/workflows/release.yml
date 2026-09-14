@@ -154,7 +154,7 @@ jobs:
           # the artifacts land on the intended release).
           tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           releaseName: "Movie Party ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
-          releaseBody: "See RELEASE_NOTES.md in the repository for what changed. Highlights: live TMDB trending posters on Home (opt-in via your own TMDB key), fully self-contained Schedule, honest Tailscale friend onboarding, and the Ready Check 'Back to lobby' escape hatch. The experimental Shared Movie Experience remains experimental — not complete."
+          releaseBody: "See RELEASE_NOTES.md in the repository for what changed. Highlights: Home trending posters work out of the box (shared TMDB key baked in at build time, overridable per device in Settings), compact ready buttons in Create Party, and macOS camera/microphone permission strings for the experimental video call. The experimental Shared Movie Experience remains experimental — not complete."
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

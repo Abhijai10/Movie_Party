@@ -1,5 +1,38 @@
 # Movie Party — Release Notes
 
+## 0.9.5 (Shared TMDB key baked in, compact ready buttons, macOS call permissions)
+
+### Home — posters work out of the box now
+- This build ships with the shared TMDB key baked in (injected at build
+  time from the repo secret, never committed to the repo). The Home
+  hero's trending posters light up on every install — yours and your
+  friend's — with nothing to configure.
+- Still overridable per device: Settings → General →
+  "Trending posters (TMDB)" accepts your own key, which always wins over
+  the shared one — so if the shared key ever stops working, paste a
+  replacement there, no new build needed.
+- The feed now retries once on flaky network failures (some ISPs
+  intermittently reset TMDB connections) and still degrades gracefully
+  to the built-in wall when both attempts fail.
+- Settings shows the real state: "live feed working" vs "key saved but
+  TMDB unreachable from this device" vs no key.
+
+### Create Party — compact ready buttons
+- The buttons that appear after selecting a movie ("Change" /
+  "Create cinema room") had become oversized — a narrow two-column grid
+  stretched them into tall wrapped blocks. They now sit on one row at
+  their natural size, matching every other button in the app.
+
+### Calls — macOS camera/microphone permission strings
+- The macOS bundle now declares NSCameraUsageDescription and
+  NSMicrophoneUsageDescription, so macOS can present its camera/mic
+  permission prompt properly for the experimental video call. Previously
+  the webview could deny getUserMedia outright.
+
+### Bug fix
+- A transient vitest flake under a local .env is resolved: the bundled
+  token is read lazily and tests stub the environment explicitly.
+
 ## 0.9.4 (UX fixes: TMDB hero, self-contained Schedule, Ready Check escape hatch)
 
 ### Home — live trending posters (opt-in, offline-first)
