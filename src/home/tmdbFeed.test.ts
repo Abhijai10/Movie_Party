@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  BUNDLED_TMDB_TOKEN,
   FALLBACK_FEATURES,
   cacheAgeMs,
   clearTmdbCache,
@@ -105,19 +104,25 @@ describe("shared build-time default (resolveTmdbToken)", () => {
     expect(resolveTmdbToken(pasted)).toBe("my-own-key");
 
     // No pasted key → the build-time default from .env / the CI secret.
-    expect(resolveTmdbToken(memoryStorage())).toBe(BUNDLED_TMDB_TOKEN);
+    // (Stubbed empty here so the assertion holds regardless of the
+    // developer's local .env; a real build inlines the real value.)
+    vi.stubEnv("VITE_TMDB_TOKEN", "");
+    expect(resolveTmdbToken(memoryStorage())).toBe("");
+    expect(resolveTmdbToken(null)).toBe("");
+    vi.unstubAllEnvs();
 
-    // Unreachable/absent storage still resolves to the bundled default
-    // when one ships with the build (empty in the test env, which is the
-    // no-secret-committed guarantee).
-    expect(resolveTmdbToken(null)).toBe(BUNDLED_TMDB_TOKEN);
+    // And with a bundled default present, that default resolves.
+    vi.stubEnv("VITE_TMDB_TOKEN", "shared-key-from-build");
+    expect(resolveTmdbToken(memoryStorage())).toBe("shared-key-from-build");
+    expect(resolveTmdbToken(null)).toBe("shared-key-from-build");
+    vi.unstubAllEnvs();
   });
 
   it("falls back to the shipped wall only when neither exists", () => {
-    // In the test environment no VITE_TMDB_TOKEN is set, so with no
-    // pasted key the feed must deliver the bundled fallback wall without
-    // any network call — the same guarantee a build WITHOUT the secret
-    // keeps at runtime.
+    // No VITE_TMDB_TOKEN in this build + no pasted key → the feed must
+    // deliver the bundled fallback wall without any network call — the
+    // guarantee a build WITHOUT the secret keeps at runtime.
+    vi.stubEnv("VITE_TMDB_TOKEN", "");
     const seen: string[][] = [];
     loadTmdbTrending((features) => seen.push(features.map((f) => f.title)), {
       storage: memoryStorage(),
@@ -125,6 +130,7 @@ describe("shared build-time default (resolveTmdbToken)", () => {
         throw new Error("network must not be touched without a credential");
       }) as unknown as typeof fetch,
     });
+    vi.unstubAllEnvs();
     expect(seen[0]).toEqual(FALLBACK_FEATURES.map((f) => f.title));
   });
 });
@@ -133,12 +139,14 @@ describe("loadTmdbTrending", () => {
   const flush = () => new Promise((resolve) => setTimeout(resolve, 5));
 
   it("delivers the bundled fallback wall without a token and never fetches", async () => {
+    vi.stubEnv("VITE_TMDB_TOKEN", "");
     const fetchImpl = vi.fn();
     const seen: string[] = [];
     loadTmdbTrending((features) => seen.push(features[0]?.title ?? ""), {
       storage: memoryStorage(),
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
+    vi.unstubAllEnvs();
     expect(seen).toEqual([FALLBACK_FEATURES[0]?.title]);
     await flush();
     expect(fetchImpl).not.toHaveBeenCalled();

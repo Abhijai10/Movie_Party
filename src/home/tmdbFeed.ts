@@ -104,22 +104,26 @@ const ACCENTS: Array<{ from: string; to: string; accent: string }> = [
 export const TMDB_TOKEN_STORAGE_KEY = "mp_tmdb_token";
 
 /**
- * Build-time default credential — the SHARED key for the two-person app.
+ * The build-time default credential — the SHARED key for the two-person app.
  *
  * Provided via `VITE_TMDB_TOKEN` in `.env` (local builds) or the GitHub
- * Actions secret of the same name (release builds); Vite inlines the
- * value into the app bundle at build time, so every install — yours and
- * your friend's — carries it without either of you pasting anything.
- * It is deliberately NOT committed: the repo is private but the bundle
- * ships outside it, and a committed key would also leak into any fork or
- * archive of the source. Resolution priority per device:
+ * Actions secret of the same name (release builds); Vite statically
+ * inlines the value at build time, so every install — yours and your
+ * friend's — carries it without either of you pasting anything. Read at
+ * call time (not a module const) so tests can stub the env per-case; in
+ * a production build the call site is still replaced by the inlined
+ * literal. It is deliberately NOT committed: a key in the repo would
+ * leak into any fork or archive of the source. Resolution priority per
+ * device:
  *   1. A key pasted in Settings → General (localStorage) — always wins,
  *      so if the shared key dies it can be swapped per device without a
  *      new build.
  *   2. This bundled default (build-time .env / CI secret).
  *   3. Nothing → the bundled gradient wall, zero network.
  */
-export const BUNDLED_TMDB_TOKEN: string = import.meta.env.VITE_TMDB_TOKEN ?? "";
+export function bundledTmdbToken(): string {
+  return import.meta.env.VITE_TMDB_TOKEN ?? "";
+}
 const CACHE_KEY = "mp_tmdb_trending_v1";
 /** Outcome of the last live fetch attempt — surfaces in Settings so a
  *  configured-but-unreachable TMDB (common: ISP DNS/packet blocking in
@@ -184,7 +188,7 @@ export function getTmdbToken(storage: TmdbStorage | null): string {
  */
 export function resolveTmdbToken(storage: TmdbStorage | null): string {
   const pasted = getTmdbToken(storage);
-  return pasted.length > 0 ? pasted : BUNDLED_TMDB_TOKEN;
+  return pasted.length > 0 ? pasted : bundledTmdbToken();
 }
 
 export function setTmdbToken(storage: TmdbStorage | null, token: string): void {
@@ -359,8 +363,20 @@ export function loadTmdbTrending(
   const timeout = setTimeout(() => {
     controller.abort();
   }, FETCH_TIMEOUT_MS);
+  // One immediate retry on a network-level failure: flaky middleboxes
+  // (seen in the field: ISP packet filters resetting TMDB connections)
+  // often clear on the second attempt, and the hero degrades gracefully
+  // anyway, so a single cheap retry is a good trade.
+  const attemptWithRetry = async (): Promise<TmdbFeature[] | null> => {
+    try {
+      return await fetchTrending(token, fetchImpl, controller.signal);
+    } catch (error) {
+      if (cancelled || controller.signal.aborted) throw error;
+      return await fetchTrending(token, fetchImpl, controller.signal);
+    }
+  };
 
-  void fetchTrending(token, fetchImpl, controller.signal)
+  void attemptWithRetry()
     .then((features) => {
       clearTimeout(timeout);
       if (cancelled) return;
