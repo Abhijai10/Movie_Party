@@ -4,6 +4,7 @@ import {
   canInitiateDragFrom,
   clampCallTilePosition,
   clampCameraCardSize,
+  clampCameraCardHeight,
   saveCallTilePosition,
   closeCallTileLocally,
   deriveRemoteCallPresentation,
@@ -210,6 +211,7 @@ export function CallTile({
               left: session.position.x,
               top: session.position.y,
               width: `${String(session.sizePx)}px`,
+              height: `${String(session.heightPx)}px`,
             }
       }
       title={session.isMinimized ? `${peerName} — click to restore` : undefined}
@@ -231,15 +233,22 @@ export function CallTile({
           className="camera-card-resize"
           data-call-tile-control
           aria-label="Resize camera card"
-          title="Drag to resize (120–360 px)"
+          title="Drag to resize (width 120–360 px, height 150–480 px)"
           onPointerDown={(event) => {
             event.preventDefault();
             event.stopPropagation();
             const startX = event.clientX;
+            const startY = event.clientY;
             const startSize = session.sizePx;
+            const startHeight = session.heightPx;
+            // Both axes resize together from the bottom-right grip: dx
+            // drives width, dy drives height. Each is clamped in its own
+            // spec range so the header always stays visible.
             const onMove = (moveEvent: PointerEvent) => {
-              const next = startSize + (moveEvent.clientX - startX);
-              updateSession({ sizePx: clampCameraCardSize(next) });
+              updateSession({
+                sizePx: clampCameraCardSize(startSize + (moveEvent.clientX - startX)),
+                heightPx: clampCameraCardHeight(startHeight + (moveEvent.clientY - startY)),
+              });
             };
             const onUp = () => {
               window.removeEventListener("pointermove", onMove);

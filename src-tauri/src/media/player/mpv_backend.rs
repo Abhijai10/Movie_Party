@@ -605,6 +605,35 @@ impl LocalPlayer for MpvPlayer {
         self.render_h = 480;
     }
 
+    /// Detach from the native surface while REMEMBERING the media (see the
+    /// trait docs). The mpv/render contexts are destroyed so the surface's
+    /// NSView can be released; `loaded_path` and the snapshot (position,
+    /// paused/playing state) survive for a clean re-attach.
+    fn detach_native_surface(&mut self) {
+        if let (Some(handle), Some(fns)) = (self.handle, &self.fns) {
+            let stop_cmd = CString::new("stop").unwrap();
+            let null_term = ptr::null();
+            let args = [stop_cmd.as_ptr(), null_term];
+            unsafe {
+                (fns.mpv_command)(handle, args.as_ptr());
+            }
+        }
+        if let Some(ctx) = self.render_ctx.take() {
+            if let Some(fns) = &self.fns {
+                unsafe { (fns.mpv_render_context_free)(ctx) };
+            }
+        }
+        if let (Some(handle), Some(fns)) = (self.handle.take(), self.fns.take()) {
+            unsafe { (fns.mpv_terminate_destroy)(handle) };
+        }
+        self.surface_handle = None;
+        self.render_w = 640;
+        self.render_h = 480;
+        self.render_stride = 0;
+        self.render_buf.clear();
+        // loaded_path + snapshot intentionally survive.
+    }
+
     fn attach_native_surface(&mut self, surface_handle: usize) -> Result<(), PlayerError> {
         if surface_handle == 0 {
             return Err(PlayerError::NativeSurfaceUnavailable {
@@ -615,9 +644,13 @@ impl LocalPlayer for MpvPlayer {
             return Ok(());
         }
         if self.handle.is_some() {
-            return Err(PlayerError::NativeSurfaceUnavailable {
-                reason: "the active player cannot move to another native surface".to_string(),
-            });
+            // Move semantics: an attach to a NEW surface while mpv is live
+            // (React StrictMode remount racing the unmount detach, or a
+            // window rebuild) tears down the old contexts first and reattaches
+            // — the media reloads at the remembered position. The previous
+            // hard error here surfaced as a sticky "MP-MEDIA-003 playback
+            // command failed" the moment Cinema was entered twice.
+            self.detach_native_surface();
         }
         let desired = self.snapshot.clone();
         let (handle, fns, render_ctx) = match Self::load_library(surface_handle) {

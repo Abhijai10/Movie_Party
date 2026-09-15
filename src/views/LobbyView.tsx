@@ -1,8 +1,13 @@
 import { motion } from "framer-motion";
 import { ArrowLeft, ArrowRight, Film, MessageCircle, Users, Video } from "lucide-react";
-import { useMemo, useState, type SyntheticEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type SyntheticEvent } from "react";
 import type { AppSnapshot } from "../backend/appRuntime";
 import { sendChatMessage } from "../backend/appRuntime";
+import {
+  enqueueChatBubble,
+  emptyBubbleQueue,
+  type ChatBubbleQueue,
+} from "../chat/bubbleQueue";
 import { InviteCard } from "../components/mp/InviteCard";
 import { ChatCompose } from "../components/mp/ChatOverlay";
 import { CinemaButton } from "../components/mp/CinemaButton";
@@ -10,6 +15,7 @@ import { ParticipantCard } from "../components/mp/ParticipantCard";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
 import { CallTile } from "../overlays/CallTile";
+import { ChatBubbles } from "../overlays/ChatBubbles";
 import type { CallTileSessionState } from "../overlays/callTileState";
 
 type LobbyViewProps = {
@@ -73,16 +79,40 @@ export function LobbyView({
     (snapshot.media != null || snapshot.provider.url != null) &&
     snapshot.network.connected;
 
+  // §35 (lobby): sent messages must be VISIBLE somewhere. The lobby's
+  // compose bar has no history card, so both the sender's own words and
+  // the peer's arrivals render as the same lower-third ephemeral bubbles
+  // used in Cinema — the user never asks "where did my message go?".
+  const [lobbyBubbles, setLobbyBubbles] = useState<ChatBubbleQueue>(emptyBubbleQueue);
+  const previousLobbyChatLength = useRef(snapshot.chat.length);
+  useEffect(() => {
+    const nextLength = snapshot.chat.length;
+    const hasNewMessage = nextLength > previousLobbyChatLength.current;
+    previousLobbyChatLength.current = nextLength;
+    if (!hasNewMessage) {
+      return;
+    }
+    const lastMessage = snapshot.chat[snapshot.chat.length - 1];
+    if (lastMessage != null) {
+      setLobbyBubbles((current) => enqueueChatBubble(current, lastMessage, Date.now()));
+    }
+  }, [snapshot.chat]);
+
   const sendLobbyMessage = (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (draft.trim().length === 0 || isDraftTooLong) {
       return;
     }
 
-    void sendChatMessage(draft.trim()).then((next) => {
+    const sentBody = draft.trim();
+    void sendChatMessage(sentBody).then((next) => {
       if (next) {
         onSnapshot(next);
         setDraft("");
+        const lastMessage = next.chat[next.chat.length - 1];
+        if (lastMessage != null && lastMessage.body === sentBody) {
+          setLobbyBubbles((current) => enqueueChatBubble(current, lastMessage, Date.now()));
+        }
       }
     });
   };
@@ -325,6 +355,14 @@ export function LobbyView({
         />
       ) : null}
 
+      {/* §35 (lobby): ephemeral lower-third bubbles — sent and received
+          messages both surface here; the movie stays dominant. */}
+      <ChatBubbles
+        queue={lobbyBubbles}
+        movieHeightPx={0}
+        subtitlesActive={false}
+        onQueueChange={setLobbyBubbles}
+      />
 
       <CallTile
         peerName={peerName}

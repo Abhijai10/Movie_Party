@@ -464,9 +464,15 @@ fn resize_native_video_surface(
 #[tauri::command]
 fn detach_native_video_surface(
     app: tauri::AppHandle,
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
     surface: tauri::State<'_, media::player::native_surface::NativeVideoSurfaceState>,
-) -> Result<(), String> {
-    surface.detach(&app).map_err(|error| error.to_string())
+) -> Result<app_runtime::AppSnapshot, String> {
+    // Order matters: the player must drop its mpv/render contexts BEFORE
+    // the surface releases the NSView, and the runtime call also refreshes
+    // the snapshot the frontend receives.
+    runtime.detach_native_video_surface();
+    surface.detach(&app).map_err(|error| error.to_string())?;
+    Ok(runtime.snapshot())
 }
 
 #[tauri::command]

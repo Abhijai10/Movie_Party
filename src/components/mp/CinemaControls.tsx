@@ -27,6 +27,8 @@ type CinemaControlsProps = {
   chatOpen: boolean;
   onToggleChat: () => void;
   onSendReaction: () => void;
+  /** Whether the reaction tray is currently open (toggles the emoji button). */
+  reactionTrayOpen: boolean;
   hasUnreadChat: boolean;
   socialControlsHidden: boolean;
   callTileHidden: boolean;
@@ -62,6 +64,7 @@ export function CinemaControls({
   chatOpen,
   onToggleChat,
   onSendReaction,
+  reactionTrayOpen,
   hasUnreadChat,
   socialControlsHidden,
   callTileHidden,
@@ -190,7 +193,12 @@ export function CinemaControls({
                 <IconBtn onClick={onShowCallTile} label="Show call" active={!callTileHidden} testId="cinema-call-btn">
                   <Video className="w-4 h-4" strokeWidth={1.6} />
                 </IconBtn>
-                <IconBtn onClick={onSendReaction} label="Send reaction" testId="cinema-react-btn">
+                <IconBtn
+                  onClick={onSendReaction}
+                  label="Reactions"
+                  active={reactionTrayOpen}
+                  testId="cinema-react-btn"
+                >
                   <Smile className="w-4 h-4" strokeWidth={1.6} />
                 </IconBtn>
                 {isHost && (

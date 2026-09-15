@@ -113,6 +113,15 @@ pub trait LocalPlayer {
         })
     }
 
+    /// Detach from the platform-native video host WITHOUT forgetting the
+    /// loaded media: the mpv context and render context are torn down (the
+    /// next `attach_native_surface` recreates them and reloads the media at
+    /// the snapshot position), while `loaded_path` and the player snapshot
+    /// survive. This is what makes re-entering Cinema after leaving it (or
+    /// the React StrictMode double-mount in dev) a clean handoff instead of
+    /// a spurious "cannot move to another native surface" PLAYER_ERROR.
+    fn detach_native_surface(&mut self) {}
+
     /// Render the next available video frame into an RGBA buffer and return
     /// it together with its presentation metadata (surface handle, width,
     /// height, stride). Returns `None` when no new frame is available or the
@@ -180,6 +189,15 @@ pub(crate) fn candidate_libmpv_paths() -> Vec<PathBuf> {
             .and_then(|p| p.parent())
         {
             paths.push(bundled_libmpv_path(parent));
+            // Dev-tree fallbacks: the workspace target dir depends on where
+            // cargo was invoked. `pnpm tauri dev` from the workspace root
+            // puts the binary in `<root>/target/debug` (runtime then at
+            // `<root>/src-tauri/mpv_runtime`), while `cargo run` inside
+            // `src-tauri` uses `src-tauri/target/debug` (runtime directly
+            // at `src-tauri/mpv_runtime`). The packaged app never reaches
+            // either candidate (its bundle-relative path hits first).
+            paths.push(parent.join("../../src-tauri/mpv_runtime/libmpv.dylib"));
+            paths.push(parent.join("../../mpv_runtime/libmpv.dylib"));
         }
         // Developer-machine fallbacks (never required in a packaged app).
         paths.push(PathBuf::from("/opt/homebrew/lib/libmpv.dylib"));

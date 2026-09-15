@@ -680,24 +680,44 @@ export type NativeVideoBounds = {
   height: number;
 };
 
+/**
+ * Serialized surface-lifecycle queue. Tauri does not guarantee command
+ * ordering across IPC calls, and Cinema's attach effect races in dev
+ * (React StrictMode double-mount) and on fast view switches: without a
+ * queue, a stale detach can land AFTER a fresh attach and tear down the
+ * live player. Every attach/resize/detach is chained so the backend sees
+ * them in exactly the order the UI issued them.
+ */
+let surfaceOpQueue: Promise<unknown> = Promise.resolve();
+
+function enqueueSurfaceOp<T>(op: () => Promise<T>): Promise<T> {
+  const run = surfaceOpQueue.then(op, op);
+  // Keep the chain alive regardless of individual failures.
+  surfaceOpQueue = run.catch(() => undefined);
+  return run;
+}
+
 export async function attachNativeVideoSurface(
   bounds: NativeVideoBounds,
 ): Promise<AppSnapshot | null> {
-  return invokeSnapshot("attach_native_video_surface", { bounds });
+  return enqueueSurfaceOp(() => invokeSnapshot("attach_native_video_surface", { bounds }));
 }
 
 export async function resizeNativeVideoSurface(
   bounds: NativeVideoBounds,
 ): Promise<AppSnapshot | null> {
-  return invokeSnapshot("resize_native_video_surface", { bounds });
+  return enqueueSurfaceOp(() => invokeSnapshot("resize_native_video_surface", { bounds }));
 }
 
-export async function detachNativeVideoSurface(): Promise<void> {
-  try {
-    await invoke("detach_native_video_surface");
-  } catch (error) {
-    console.error("detach_native_video_surface failed", error);
-  }
+export async function detachNativeVideoSurface(): Promise<AppSnapshot | null> {
+  return enqueueSurfaceOp(async () => {
+    try {
+      return await invokeSnapshot("detach_native_video_surface");
+    } catch (error) {
+      console.error("detach_native_video_surface failed", error);
+      return null;
+    }
+  });
 }
 
 export async function pausePlayback(): Promise<AppSnapshot | null> {

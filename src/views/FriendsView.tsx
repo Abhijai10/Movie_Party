@@ -199,7 +199,10 @@ export function FriendsView({
   };
 
   return (
-    <div className="relative w-full min-h-screen" data-testid="friends-screen">
+    <div
+      className="relative w-full min-h-screen flex flex-col"
+      data-testid="friends-screen"
+    >
       <div className="fixed inset-0 pointer-events-none">
         <SilkBackground variant="calm" />
       </div>
@@ -216,11 +219,12 @@ export function FriendsView({
         <StatusIndicator state="sync" label="Strict Sync" />
       </header>
 
-      <main className="relative z-10 max-w-[1100px] w-full mx-auto px-12 mt-6 pb-20">
+      <main className="relative z-10 max-w-[1100px] w-full mx-auto px-12 mt-6 pb-20 flex-1 flex flex-col">
         <motion.section
           initial={{ opacity: 0, y: 14 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5 }}
+          className="my-auto"
         >
           <h1 className="font-serif-display text-white text-4xl tracking-[-0.02em]">Friends</h1>
           <p className="mt-3 text-white/50 text-sm max-w-lg leading-relaxed">

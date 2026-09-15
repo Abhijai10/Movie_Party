@@ -258,7 +258,10 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
   };
 
   return (
-    <div className="relative w-full min-h-screen" data-testid="settings">
+    <div
+      className="relative w-full min-h-screen flex flex-col"
+      data-testid="settings"
+    >
       <div className="fixed inset-0 pointer-events-none">
         <SilkBackground variant="calm" />
       </div>
@@ -274,7 +277,7 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
         <StatusIndicator state="sync" label="Strict Sync" />
       </header>
 
-      <main className="relative z-10 max-w-[1300px] w-full mx-auto px-12 mt-6 pb-20 settings-layout">
+      <main className="relative z-10 max-w-[1300px] w-full mx-auto px-12 mt-6 pb-20 flex-1 settings-layout">
         <nav aria-label="Settings sections" className="settings-nav">
           <h1 className="font-serif-display text-white text-4xl tracking-[-0.02em]">Settings</h1>
           <div className="mt-8 rounded-2xl border border-white/10 bg-white/[0.03] p-2.5">

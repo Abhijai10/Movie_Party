@@ -5,9 +5,14 @@ type ReactionTrayProps = {
   onSendReaction: (reaction: string) => void;
 };
 
+/**
+ * §Reactions: the tray renders ONLY while open — the dock emoji button
+ * owns the toggle and the parent auto-hides it 5s after opening, so the
+ * movie surface never carries a permanent reaction palette.
+ */
 export function ReactionTray({ warning, onSendReaction }: ReactionTrayProps) {
   return (
-    <div className="reaction-tray" aria-label="Reactions">
+    <div className="reaction-tray" aria-label="Reactions" data-testid="reaction-tray">
       {reactions.map((reaction) => (
         <button
           key={reaction}

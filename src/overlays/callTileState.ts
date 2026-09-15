@@ -12,6 +12,12 @@ export type CallTileSessionState = {
    * the 120–360 clamp. The minimized circle (§29) ignores this value.
    */
   sizePx: number;
+  /**
+   * Card HEIGHT in px — the resize grip drags both axes; the video stage
+   * keeps its aspect via object-fit so any height within the clamp stays
+   * presentable. The minimized circle ignores this value.
+   */
+  heightPx: number;
 };
 
 /** §28: default card width. */
@@ -19,6 +25,12 @@ export const CAMERA_CARD_DEFAULT_PX = 220;
 /** §28: resizable clamp. */
 export const CAMERA_CARD_MIN_PX = 120;
 export const CAMERA_CARD_MAX_PX = 360;
+/** Default card height: 16:9 stage for the default width plus the header. */
+export const CAMERA_CARD_DEFAULT_HEIGHT_PX = 190;
+/** Height clamp: the header row must stay visible and the card stays
+ * meaningfully smaller than the movie surface. */
+export const CAMERA_CARD_MIN_HEIGHT_PX = 150;
+export const CAMERA_CARD_MAX_HEIGHT_PX = 480;
 /** §28: "Persist location locally" — the localStorage key. */
 const CAMERA_CARD_POSITION_KEY = "mp_camera_card_position";
 
@@ -39,6 +51,7 @@ export function createCallTileSessionState(): CallTileSessionState {
     isMinimized: false,
     isHidden: false,
     sizePx: CAMERA_CARD_DEFAULT_PX,
+    heightPx: CAMERA_CARD_DEFAULT_HEIGHT_PX,
   };
 }
 
@@ -103,6 +116,14 @@ export function clampCameraCardSize(sizePx: number): number {
     return CAMERA_CARD_DEFAULT_PX;
   }
   return Math.min(CAMERA_CARD_MAX_PX, Math.max(CAMERA_CARD_MIN_PX, Math.round(sizePx)));
+}
+
+/** Clamp a user height resize to the vertical spec range. */
+export function clampCameraCardHeight(heightPx: number): number {
+  if (!Number.isFinite(heightPx)) {
+    return CAMERA_CARD_DEFAULT_HEIGHT_PX;
+  }
+  return Math.min(CAMERA_CARD_MAX_HEIGHT_PX, Math.max(CAMERA_CARD_MIN_HEIGHT_PX, Math.round(heightPx)));
 }
 
 /**

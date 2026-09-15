@@ -120,6 +120,10 @@ export function CinemaView({
   const [draft, setDraft] = useState("");
   const [chatVisibility, setChatVisibility] = useState<ChatOverlayVisibility>(closedChatOverlay);
   const [reactionWarning, setReactionWarning] = useState("");
+  // §Reactions: the tray is CLOSED by default. The dock's emoji button
+  // toggles it; an open tray auto-hides after 5s of no interaction so the
+  // movie surface stays clean (Movie-first, PRD §1).
+  const [reactionTrayOpen, setReactionTrayOpen] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [privacyNotice, setPrivacyNotice] = useState("");
   const [hasUnreadChat, setHasUnreadChat] = useState(false);
@@ -204,7 +208,15 @@ export function CinemaView({
     observer.observe(frame);
     return () => {
       observer.disconnect();
-      void detachNativeVideoSurface();
+      // The detach resets the player's mpv contexts (the media is
+      // remembered); the returned snapshot keeps AppShell in sync so a
+      // later re-attach — StrictMode remount, re-entering Cinema — is a
+      // clean handoff instead of "cannot move to another native surface".
+      void detachNativeVideoSurface().then((next) => {
+        if (next) {
+          onSnapshot(next);
+        }
+      });
     };
   }, [localMediaId, onSnapshot, snapshot.provider.mode]);
 
@@ -289,6 +301,26 @@ export function CinemaView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isSocialHiddenMode]);
 
+  // §Reactions: an open tray auto-hides after 5s so the movie stays
+  // visually dominant, and Ghost/Privacy close it outright — the modes
+  // hide every social affordance (PRD §4), and the floating reactions
+  // layer is already suppressed by `social-hidden`.
+  useEffect(() => {
+    if (!reactionTrayOpen) {
+      return undefined;
+    }
+    if (isSocialHiddenMode) {
+      setReactionTrayOpen(false);
+      return undefined;
+    }
+    const timer = window.setTimeout(() => {
+      setReactionTrayOpen(false);
+    }, 5_000);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [reactionTrayOpen, isSocialHiddenMode]);
+
   const revealControls = (event?: MouseEvent<HTMLElement>) => {
     setControlsVisible(true);
     if (event && !prefersReducedMotion) {
@@ -318,7 +350,13 @@ export function CinemaView({
   // through the session module; this effect only owns create/teardown.
   useEffect(() => {
     const nextKey = `${callMode}:${isHost ? "HOST" : "GUEST"}:${String(isPrivacyMode)}`;
-    if (callMode === "OFF" || isPrivacyMode) {
+    // A call session needs someone to call. Solo preview (no peer in the
+    // room yet) must not acquire camera/mic or publish an offer — the
+    // acquisition failure would surface a scary "Call unavailable" toast
+    // over a preview that is about the MOVIE, not the call. The CallTile
+    // keeps its honest "Peer / Away" placeholder; the real session starts
+    // the moment the peer actually joins (participants gains the peer).
+    if (callMode === "OFF" || isPrivacyMode || peer == null) {
       callSessionKey.current = "";
       callSessionRef.current?.close();
       callSessionRef.current = null;
@@ -444,7 +482,7 @@ export function CinemaView({
     // identity. localCameraEnabled/localMicrophoneEnabled are read at
     // session start (initial track.enabled), then toggles stay local.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [callMode, isHost, isPrivacyMode]);
+  }, [callMode, isHost, isPrivacyMode, peer != null]);
 
   // Signal cursor effect: applies peer-originated signals from the
   // snapshot to the live session. The cursor is snapshot-index-based —
@@ -651,11 +689,23 @@ export function CinemaView({
       return;
     }
 
-    void sendChatMessage(draft.trim()).then((next) => {
+    const sentBody = draft.trim();
+    void sendChatMessage(sentBody).then((next) => {
       if (next) {
         previousChatLength.current = next.chat.length;
         onSnapshot(next);
         setDraft("");
+        // §34/§35: the sender must SEE where the message went. The
+        // incoming-message effect skips while the compose bar is open
+        // (manualOpen), so the sender's own words would otherwise vanish
+        // until they opened history. Echo the sent message as a lower-third
+        // ephemeral bubble — same surface the peer's messages use.
+        const lastMessage = next.chat[next.chat.length - 1];
+        if (lastMessage != null && lastMessage.body === sentBody) {
+          setBubbleQueue((current) =>
+            enqueueChatBubble(current, lastMessage, Date.now()),
+          );
+        }
       }
     });
   };
@@ -832,7 +882,9 @@ export function CinemaView({
             {privacyNotice}
           </div>
         ) : null}
-        <ReactionTray warning={reactionWarning} onSendReaction={sendReaction} />
+        {reactionTrayOpen ? (
+          <ReactionTray warning={reactionWarning} onSendReaction={sendReaction} />
+        ) : null}
         <CinemaControls
           visible={controlsVisible}
           isPlaying={snapshot.sync.roomState === "PLAYING"}
@@ -890,8 +942,12 @@ export function CinemaView({
             setChatVisibility(openChatManually());
           }}
           onSendReaction={() => {
-            sendReaction("👏");
+            // The dock emoji TOGGLES the tray (it no longer fires a
+            // blind 👏): open → pick a reaction, close → movie surface
+            // is clean. The tray auto-hides 5s after opening.
+            setReactionTrayOpen((current) => !current);
           }}
+          reactionTrayOpen={reactionTrayOpen}
           isHost={isHost}
           socialControlsHidden={isGhostMode || isPrivacyMode}
           callTileHidden={callTileSession.isHidden}

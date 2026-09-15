@@ -11,6 +11,7 @@ pub const DEFAULT_CHUNK_SIZE_BYTES: u64 = 1_048_576;
 pub const FINGERPRINT_EDGE_BYTES: u64 = 4 * 1_048_576;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct QuickFingerprint {
     pub file_size: u64,
     pub first_hash: String,
@@ -18,6 +19,7 @@ pub struct QuickFingerprint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MediaManifest {
     pub media_id: String,
     pub filename: String,

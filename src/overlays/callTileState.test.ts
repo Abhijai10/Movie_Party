@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CAMERA_CARD_DEFAULT_PX,
   clampCallTilePosition,
+  clampCameraCardHeight,
   clampCameraCardSize,
   closeCallTileLocally,
   deriveRemoteCallPresentation,
@@ -18,6 +19,7 @@ const liveSession: CallTileSessionState = {
   isMinimized: false,
   isHidden: false,
   sizePx: 220,
+  heightPx: 190,
 };
 
 describe("call tile state", () => {
@@ -116,12 +118,14 @@ describe("call tile close semantics", () => {
       isMinimized: true,
       isHidden: true,
       sizePx: 220,
+      heightPx: 190,
     };
     expect(showCallTile(minimizedElsewhere)).toEqual({
       position: { x: 64, y: 400 },
       isMinimized: true,
       isHidden: false,
       sizePx: 220,
+      heightPx: 190,
     });
   });
 });
@@ -161,6 +165,15 @@ describe("camera card size + persistence (UI_UX_SPEC §28)", () => {
     expect(clampCameraCardSize(500)).toBe(360);
     expect(clampCameraCardSize(240.6)).toBe(241);
     expect(clampCameraCardSize(Number.NaN)).toBe(220);
+  });
+
+  it("clamps vertical resizes to 150–480 with the same default recovery", () => {
+    expect(clampCameraCardHeight(190)).toBe(190);
+    expect(clampCameraCardHeight(90)).toBe(150);
+    expect(clampCameraCardHeight(900)).toBe(480);
+    expect(clampCameraCardHeight(220.4)).toBe(220);
+    expect(clampCameraCardHeight(Number.NaN)).toBe(190);
+    expect(clampCameraCardHeight(Number.POSITIVE_INFINITY)).toBe(190);
   });
 
   it("persists the position to localStorage and restores it (§28)", () => {

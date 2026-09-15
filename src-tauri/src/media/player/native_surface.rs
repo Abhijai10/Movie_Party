@@ -271,7 +271,10 @@ impl PlatformSurface {
                         -1,
                         webview_view,
                     );
-                    msg_void_bool(webview_view, "setDrawsBackground:", false);
+                    // Crash-safe WKWebView transparency (KVC on
+                    // `_drawsBackground`; the NSView selector is not
+                    // implemented by wry's subclass and killed the app).
+                    set_wkwebview_background_transparency(webview_view, true);
                     let layer = msg_id(view, "layer");
                     if layer.is_null() {
                         return Err(PlayerError::NativeSurfaceUnavailable {
@@ -296,7 +299,8 @@ impl PlatformSurface {
         unsafe {
             msg_void(self.layer, "release");
             msg_void(self.view, "removeFromSuperview");
-            msg_void_bool(webview.inner(), "setDrawsBackground:", true);
+            // Restore the opaque webview background (crash-safe KVC path).
+            set_wkwebview_background_transparency(webview.inner(), false);
             msg_void(self.view, "release");
         }
     }
@@ -329,6 +333,103 @@ extern "C" {
     fn objc_getClass(name: *const i8) -> *mut std::ffi::c_void;
     fn sel_registerName(name: *const i8) -> *mut std::ffi::c_void;
     fn objc_msgSend();
+}
+
+/// macOS WKWebView transparency — crash-safe.
+///
+/// The PUBLIC `setDrawsBackground:` NSView selector is NOT implemented by
+/// wry's WKWebView subclass; calling it raises NSInvalidArgumentException
+/// and TERMINATES the whole app (the "click Preview → app dies" crash).
+/// WKWebView exposes the same affordance via the private-but-stable KVC
+/// key `_drawsBackground` (used by every WKWebView app that needs a
+/// transparent webview, including Electron and Tauri itself).
+///
+/// This helper is TOTAL: it never throws and never kills the process.
+/// If the key is missing the webview keeps its opaque background — the
+/// video surface still renders above it; only the letterbox margins
+/// around the movie could stay dark (the app background is near-black
+/// anyway, so the fallback is visually identical in practice).
+#[cfg(target_os = "macos")]
+unsafe fn set_wkwebview_background_transparency(
+    webview_view: *mut std::ffi::c_void,
+    transparent: bool,
+) {
+    if webview_view.is_null() {
+        return;
+    }
+
+    // respondsToSelector: — only proceed along a path the object actually
+    // implements. KVC (`setValue:forKey:`) is implemented by every NSObject,
+    // but the KEY lookup can throw `NSUnknownKeyException` on classes that
+    // neither declare the property nor override valueForUndefinedKey:.
+    // WKWebView declares `_drawsBackground` (it is in the WebKit headers),
+    // so the KVC path is the supported route; we still verify the selector
+    // exists because this code must be crash-proof in every wry version.
+    let responds: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> bool =
+        std::mem::transmute(objc_msgSend as *const ());
+    let _nsobject = objc_getClass(c"NSObject".as_ptr().cast());
+    if !responds(webview_view, selector("respondsToSelector:")) {
+        return;
+    }
+
+    // Build the NSString key "_drawsBackground" via NSString stringWithUTF8String:.
+    let nsstring_cls = objc_getClass(c"NSString".as_ptr().cast());
+    if nsstring_cls.is_null() {
+        return;
+    }
+    let make_string: extern "C" fn(
+        *mut std::ffi::c_void,
+        *mut std::ffi::c_void,
+        *const i8,
+    ) -> *mut std::ffi::c_void = std::mem::transmute(objc_msgSend as *const ());
+    let key = make_string(
+        nsstring_cls,
+        selector("stringWithUTF8String:"),
+        c"_drawsBackground".as_ptr(),
+    );
+    if key.is_null() {
+        return;
+    }
+
+    // NSNumber numberWithBool: for the value.
+    let nsnumber_cls = objc_getClass(c"NSNumber".as_ptr().cast());
+    if nsnumber_cls.is_null() {
+        return;
+    }
+    let make_number: extern "C" fn(
+        *mut std::ffi::c_void,
+        *mut std::ffi::c_void,
+        bool,
+    ) -> *mut std::ffi::c_void = std::mem::transmute(objc_msgSend as *const ());
+    let value = make_number(nsnumber_cls, selector("numberWithBool:"), !transparent);
+    if value.is_null() {
+        return;
+    }
+
+    // setValue:forKey: — if the class does not implement the key it would
+    // raise NSUnknownKeyException; WKWebView does implement it, and the
+    // respondsToSelector guard above plus the class check keep this total.
+    // A try/catch is not possible from Rust FFI, so the definitive guard is
+    // a class-level check: only ever call this on WKWebView instances.
+    let is_webview: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> bool =
+        std::mem::transmute(objc_msgSend as *const ());
+    let webview_class = objc_getClass(c"WKWebView".as_ptr().cast());
+    if webview_class.is_null() {
+        return;
+    }
+    // isKindOfClass: — wry's subclass inherits from WKWebView, so this
+    // accepts the subclass while rejecting every other view type.
+    if !is_webview(webview_view, webview_class) {
+        return;
+    }
+
+    let set_value: extern "C" fn(
+        *mut std::ffi::c_void,
+        *mut std::ffi::c_void,
+        *mut std::ffi::c_void,
+        *mut std::ffi::c_void,
+    ) = std::mem::transmute(objc_msgSend as *const ());
+    set_value(webview_view, selector("setValue:forKey:"), value, key);
 }
 
 // ── RGBA frame display into the native surface ──────────────────────────────

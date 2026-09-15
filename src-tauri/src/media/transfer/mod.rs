@@ -36,6 +36,7 @@ pub struct ChunkPacket {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TransferProgress {
     pub media_id: String,
     pub bytes_available: u64,

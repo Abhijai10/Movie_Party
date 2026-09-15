@@ -130,7 +130,7 @@ export function ChatHistoryCard({ snapshot, onClose }: ChatHistoryCardProps) {
           aria-label="Close chat history"
           data-testid="chat-history-backdrop"
         />
-        <div className="relative w-[min(620px,75vw)] h-[min(560px,70vh)] rounded-2xl bg-[#0D0B14]/92 backdrop-blur-xl border border-white/10 shadow-2xl flex flex-col overflow-hidden">
+        <div className="relative w-[min(560px,68vw)] h-[min(500px,64vh)] rounded-2xl bg-[#0D0B14]/92 backdrop-blur-xl border border-white/10 shadow-2xl flex flex-col overflow-hidden">
           <header className="px-5 py-4 flex items-center justify-between border-b border-white/5">
             <div className="flex items-center gap-2.5">
               <MessageCircle className="w-4 h-4 text-white/70" strokeWidth={1.6} />

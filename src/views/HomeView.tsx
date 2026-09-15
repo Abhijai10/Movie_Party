@@ -77,7 +77,10 @@ export function HomeView({
     return percent != null ? String(Math.round(percent * 100)) : "0";
   };
   return (
-    <div className="relative w-full min-h-screen" data-testid="home-screen">
+    <div
+      className="relative w-full min-h-screen flex flex-col"
+      data-testid="home-screen"
+    >
       <div className="fixed inset-0 pointer-events-none">
         <SilkBackground />
       </div>
@@ -121,7 +124,7 @@ export function HomeView({
         </div>
       </header>
 
-      <main className="relative z-10 max-w-[1300px] mx-auto px-12 py-10 grid grid-cols-12 gap-10 items-start">
+      <main className="relative z-10 max-w-[1300px] w-full mx-auto px-12 py-10 grid grid-cols-12 gap-10 items-center flex-1">
         <motion.section
           initial={{ opacity: 0, y: 24 }}
           animate={{ opacity: 1, y: 0 }}

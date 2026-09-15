@@ -3711,15 +3711,18 @@ input[type=range].mp-range::-webkit-slider-thumb {
   right: auto;
   top: clamp(22px, 3vw, 44px);
   z-index: 45;
-  display: grid;
-  align-content: start;
+  /* Flex column so a user-resized height is absorbed by the video stage
+     (the 1fr child), never by dead space under the header. */
+  display: flex;
+  flex-direction: column;
   gap: 12px;
   /* §28: default 220px (overridable by the sizePx style from state),
-     clamped 120–360 by the model; 16:9 default aspect. */
+     clamped 120–360 by the model. Height comes from the heightPx style
+     (150–480 clamp) — the resize grip drags BOTH axes, so there is no
+     fixed aspect-ratio; the video stage letter-boxes via object-fit. */
   width: 220px;
   min-width: 120px;
   max-width: 360px;
-  aspect-ratio: 16 / 9;
   overflow: hidden;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent 34%, rgba(0, 0, 0, 0.72)),
@@ -3811,6 +3814,9 @@ input[type=range].mp-range::-webkit-slider-thumb {
   position: relative;
   display: grid;
   min-height: 112px;
+  /* Fill the leftover card height when the user resizes taller: the
+     stage grows so the video area (not empty padding) absorbs it. */
+  flex: 1 1 auto;
   place-items: center;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 12px;
@@ -4195,6 +4201,7 @@ input[type=range].mp-range::-webkit-slider-thumb {
 
 .social-hidden .camera-card,
 .social-hidden .chat-bubble,
+.social-hidden [data-testid="chat-bubbles"],
 .social-hidden .cinema-chat-overlay,
 .social-hidden .reaction-float-layer,
 .social-hidden .buffer-overlay,
@@ -4819,8 +4826,14 @@ input[type=range].mp-range::-webkit-slider-thumb {
 .settings-layout {
     display: grid;
     grid-template-columns: 220px 1px minmax(0, 1fr);
+    /* One row that fills the flexed main: the vertical divider spans the
+       whole pane height, so a taller window shows a longer partition line
+       instead of dead space below the fold. `minmax(auto, 1fr)` grows
+       with overflowing content while still filling short-content
+       windows. */
+    grid-template-rows: minmax(auto, 1fr);
     gap: 0 2.5rem;
-    align-items: start;
+    align-items: stretch;
 }
 .settings-nav {
     grid-column: 1;

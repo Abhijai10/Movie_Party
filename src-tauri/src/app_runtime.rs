@@ -5751,6 +5751,26 @@ impl AppRuntime {
         }
     }
 
+    /// Detach the live player from its native video surface WITHOUT
+    /// forgetting the loaded media. The frontend calls this when Cinema
+    /// unmounts (leaving the view, React StrictMode's dev double-mount).
+    /// The player tears down its mpv/render contexts and remembers the
+    /// media path + snapshot; the next attach recreates everything and
+    /// reloads at the remembered position — no spurious "cannot move to
+    /// another native surface" PLAYER_ERROR, no frozen paused room.
+    pub fn detach_native_video_surface(&self) -> AppSnapshot {
+        let mut state = self.lock();
+        if let Some(player) = state.player.clone() {
+            let mut player = player
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            player.detach_native_surface();
+            state.player_snapshot = PlayerSnapshot::from_player(&*player);
+        }
+        sync_room_snapshot(&mut state);
+        snapshot_from_state(&state)
+    }
+
     pub fn pause_playback(&self) -> AppSnapshot {
         if Self::is_host_role(&self.lock()) {
             return self.host_pause();
