@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useMemo, useState, type SyntheticEvent } from "react";
 import { runLocalPeerConnectionLoopback } from "../call/webrtc";
 import {
   nextPendingSignals,
@@ -43,8 +44,8 @@ import { ChatBubbles } from "../overlays/ChatBubbles";
 import { CinemaControls } from "../components/mp/CinemaControls";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
-import type { MouseEvent, SyntheticEvent } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import type { MouseEvent } from "react";
+import { useRef } from "react";
 import { useReducedMotion } from "../hooks/useReducedMotion";
 import {
   canToggleChat,
@@ -179,6 +180,25 @@ export function CinemaView({
   const peerName = peer?.displayName ?? "Peer";
   const isComposing = chatVisibility.manualOpen;
   const isHistoryOpen = isChatOverlayOpen(chatVisibility);
+  // The history panel renders unless its 5 s auto-hide has dismissed it
+  // (#2) — the compose bar is unaffected and stays for typing.
+  const isHistoryVisible = isHistoryOpen && !chatVisibility.historyDismissed;
+
+  // The chat toggle ("c" and the dock button): open chat, or — when chat
+  // is already open — re-summon an auto-hidden history panel before
+  // closing anything (so a 5 s auto-hide is not a dead end).
+  const toggleChatVisibility = useCallback(
+    (current: ChatOverlayVisibility): ChatOverlayVisibility => {
+      if (!current.manualOpen) {
+        return openChatManually();
+      }
+      return current.historyDismissed
+        ? { ...current, historyDismissed: false }
+        : closedChatOverlay;
+    },
+    [],
+  );
+
   const encodedDraftLength = useMemo(() => new TextEncoder().encode(draft).length, [draft]);
   const isDraftTooLong = encodedDraftLength > chatBodyLimitBytes;
 
@@ -670,7 +690,7 @@ export function CinemaView({
 
       if (event.key.toLowerCase() === "c") {
         event.preventDefault();
-        setChatVisibility((current) => (current.manualOpen ? closedChatOverlay : openChatManually()));
+        setChatVisibility(toggleChatVisibility);
       }
     };
 
@@ -815,11 +835,16 @@ export function CinemaView({
             }}
           />
         ) : null}
-        {isHistoryOpen && !isComposing ? (
+        {isHistoryVisible ? (
           <ChatHistoryCard
             snapshot={snapshot}
             onClose={() => {
-              setChatVisibility(closedChatOverlay);
+              // The panel's X and its 5 s auto-hide both dismiss ONLY
+              // the history — the composer stays open for typing.
+              setChatVisibility((current) => ({
+                ...current,
+                historyDismissed: true,
+              }));
             }}
           />
         ) : null}
@@ -934,8 +959,10 @@ export function CinemaView({
           chatOpen={isComposing || isHistoryOpen}
           hasUnreadChat={hasUnreadChat}
           onToggleChat={() => {
+            // If the composer is up but the history panel has
+            // auto-hidden, re-summon the panel instead of closing chat.
             if (isComposing) {
-              setChatVisibility(closedChatOverlay);
+              setChatVisibility(toggleChatVisibility);
               return;
             }
             setHasUnreadChat(false);
@@ -952,7 +979,12 @@ export function CinemaView({
           socialControlsHidden={isGhostMode || isPrivacyMode}
           callTileHidden={callTileSession.isHidden}
           onShowCallTile={() => {
-            onCallTileSessionChange({ ...callTileSession, isHidden: false });
+            // Toggle: the floating video tile hides from the dock (the
+            // tile itself no longer carries a close button — see #4).
+            onCallTileSessionChange({
+              ...callTileSession,
+              isHidden: !callTileSession.isHidden,
+            });
           }}
           sharedControls={sharedControls}
           onToggleSharedControls={() => {

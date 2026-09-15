@@ -47,5 +47,6 @@ export function restoreGhostUiSnapshot(snapshot: GhostUiSnapshot): ChatOverlayVi
   return {
     manualOpen: snapshot.chatVisibility.manualOpen,
     transientOpen: false,
+    historyDismissed: false,
   };
 }

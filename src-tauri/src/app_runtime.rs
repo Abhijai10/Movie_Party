@@ -906,6 +906,58 @@ impl AppRuntime {
         self.lock().local_participant.display_name.clone()
     }
 
+    /// Rename THIS device's participant (Settings › General). The name is
+    /// validated (non-empty, 1..=40 chars after trimming) and persisted to
+    /// the SAME identity row — device id, signing key and key label are
+    /// untouched, so the peer trust chain and the protected-store key stay
+    /// exactly as they are. A persistence failure surfaces as an honest
+    /// error instead of a renamed-but-not-saved state.
+    pub fn set_display_name(&self, display_name: &str) -> AppSnapshot {
+        let trimmed = display_name.trim();
+        let snapshot = {
+            let mut state = self.lock();
+            // Start from a clean error slate: a stale error from an
+            // earlier command must not outlive this attempt.
+            state.error = None;
+            if trimmed.is_empty() || trimmed.chars().count() > 40 {
+                state.error =
+                    Some("MP-ID-003 display name must be 1-40 characters".to_string());
+                sync_room_snapshot(&mut state);
+                return snapshot_from_state(&state);
+            }
+            if trimmed == state.local_participant.display_name {
+                sync_room_snapshot(&mut state);
+                return snapshot_from_state(&state);
+            }
+            let Some(db) = state.db.clone() else {
+                state.error = Some(
+                    "MP-STORE-002 database is unavailable to save the name".to_string(),
+                );
+                sync_room_snapshot(&mut state);
+                return snapshot_from_state(&state);
+            };
+            let identity = self.inner.identity();
+            let stored = crate::storage::sqlite::StoredIdentity {
+                device_id: state.local_participant.id.clone(),
+                display_name: trimmed.to_string(),
+                public_key: identity.public_key_base64(),
+                platform: std::env::consts::OS.to_string(),
+                created_at_ms: wall_now_ms(),
+                key_label: Self::key_label_for(&state.local_participant.id),
+            };
+            if let Err(e) = db.upsert_identity(&stored) {
+                state.error = Some(format!("MP-STORE-001 failed to save the name: {e}"));
+                sync_room_snapshot(&mut state);
+                return snapshot_from_state(&state);
+            }
+            state.local_participant.display_name = trimmed.to_string();
+            sync_room_snapshot(&mut state);
+            snapshot_from_state(&state)
+        };
+        self.inner.emit(snapshot.clone());
+        snapshot
+    }
+
     fn key_label_for(device_id: &str) -> String {
         format!("movie-party-device-signing-key-{device_id}")
     }
@@ -10318,6 +10370,97 @@ mod friends_tests {
             by_key("verified.tailc930b7.ts.net."),
             FriendConnectionState::MoviePartyVerified
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Settings › General rename: a valid name persists to the identity
+    /// row AND updates the live participant, while the device id and the
+    /// public key stay byte-identical (the peer trust chain must survive
+    /// a rename — no rotation, no new device id).
+    #[tokio::test]
+    async fn set_display_name_persists_without_rotating_identity() {
+        let (runtime, dir) = runtime_with_db();
+
+        let before = runtime.lock().local_participant.clone();
+        let key_before = runtime.inner.identity().public_key_base64();
+
+        let snapshot = runtime.set_display_name("  Cinephile  ");
+        assert_eq!(
+            snapshot
+                .participants
+                .first()
+                .expect("local participant")
+                .display_name,
+            "Cinephile"
+        );
+        assert_eq!(
+            runtime.lock().local_participant.display_name,
+            "Cinephile"
+        );
+
+        // Same device id + same public key: nothing rotated.
+        assert_eq!(runtime.lock().local_participant.id, before.id);
+        assert_eq!(
+            runtime.inner.identity().public_key_base64(),
+            key_before
+        );
+
+        // The stored identity row carries the new name and the same key.
+        let stored = runtime
+            .lock()
+            .db
+            .as_ref()
+            .expect("db")
+            .get_identity()
+            .expect("read identity")
+            .expect("identity exists");
+        assert_eq!(stored.display_name, "Cinephile");
+        assert_eq!(stored.device_id, before.id);
+        assert_eq!(stored.public_key, key_before);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A rename to an empty or over-long name is rejected with an error on
+    /// the snapshot — the name is NOT changed, and no bogus row is written.
+    #[tokio::test]
+    async fn set_display_name_rejects_empty_and_overlong() {
+        let (runtime, dir) = runtime_with_db();
+        let original = runtime.lock().local_participant.display_name.clone();
+
+        let empty = runtime.set_display_name("   ");
+        assert!(empty.error.is_some(), "empty name must error");
+        assert_eq!(runtime.lock().local_participant.display_name, original);
+
+        let overlong = runtime.set_display_name(&"a".repeat(41));
+        assert!(overlong.error.is_some(), "41-char name must error");
+        assert_eq!(runtime.lock().local_participant.display_name, original);
+
+        // The boundary: 40 chars is valid.
+        let boundary = runtime.set_display_name(&"a".repeat(40));
+        assert!(boundary.error.is_none(), "40-char name is allowed");
+        assert_eq!(
+            runtime.lock().local_participant.display_name,
+            "a".repeat(40)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A no-op rename (same name) does not error and does not churn the
+    /// identity row.
+    #[tokio::test]
+    async fn set_display_name_noop_is_clean() {
+        let (runtime, dir) = runtime_with_db();
+        let current = runtime.lock().local_participant.display_name.clone();
+
+        let snapshot = runtime.set_display_name(&current);
+        assert!(snapshot.error.is_none());
+        assert_eq!(
+            runtime.lock().local_participant.display_name,
+            current
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

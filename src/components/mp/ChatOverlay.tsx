@@ -15,7 +15,7 @@ import type { AppSnapshot } from "../../backend/appRuntime";
  * owned by CinemaView and unchanged).
  *
  * §34 CHAT COMPOSE: a bottom-center input above the control dock,
- * `min(560px, 70vw)`, invoked on Enter — not a big panel.
+ * `min(420px, 56vw)`, invoked on Enter — not a big panel.
  *
  * §36 CHAT HISTORY: press C — a centered translucent card
  * `min(620px, 75vw) × min(560px, 70vh)`; the movie remains full size
@@ -41,12 +41,12 @@ export function ChatCompose({
     <AnimatePresence>
       <motion.form
         key="chat-compose"
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        exit={{ opacity: 0, y: 16 }}
+        initial={{ opacity: 0, y: 16, x: "-50%" }}
+        animate={{ opacity: 1, y: 0, x: "-50%" }}
+        exit={{ opacity: 0, y: 16, x: "-50%" }}
         transition={{ duration: 0.25, ease: "easeOut" }}
         onSubmit={onSubmit}
-        className="absolute left-1/2 -translate-x-1/2 bottom-[132px] z-40 w-[min(560px,70vw)] flex items-center gap-2 rounded-full bg-black/60 backdrop-blur-xl border border-white/10 px-4 py-2 shadow-2xl"
+        className="chat-compose-bar"
         data-testid="chat-compose"
       >
         <input
@@ -64,12 +64,12 @@ export function ChatCompose({
             }
           }}
           placeholder="Press Enter to send…"
-          className="flex-1 bg-transparent text-sm text-white placeholder:text-white/40 focus:outline-none"
+          className="chat-compose-input"
           data-testid="chat-input"
         />
         <button
           type="submit"
-          className="w-9 h-9 rounded-full bg-[#6B46C1] hover:bg-[#553592] transition flex items-center justify-center disabled:opacity-40"
+          className="chat-send-btn"
           disabled={draft.trim().length === 0 || isDraftTooLong}
           data-testid="chat-send-btn"
           aria-label="Send message"
@@ -89,95 +89,128 @@ type ChatHistoryCardProps = {
   onClose: () => void;
 };
 
+/**
+ * §36 CHAT HISTORY — right-anchored side panel. It accompanies the
+ * compose bar: opening chat shows the recent thread so a reply has
+ * context. The panel auto-hides after 5 s, but a resting cursor pauses
+ * the countdown for as long as it stays over the panel; the countdown
+ * restarts when the cursor leaves. The compose bar is unaffected —
+ * typing continues after the history has stepped aside.
+ */
 export function ChatHistoryCard({ snapshot, onClose }: ChatHistoryCardProps) {
   const listRef = useRef<HTMLDivElement>(null);
+  const hoverRef = useRef(false);
+  const closeTimerRef = useRef<number | null>(null);
+  // onClose is a fresh closure per parent render; keep it in a ref so a
+  // frequently-updating snapshot (e.g. playback ticks) can't keep
+  // resetting the countdown via the effect deps.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
+  // Auto-hide (#2): the panel stays 5 s, then slides away — unless the
+  // cursor is resting on it, which pauses the countdown for as long as
+  // it stays; leaving restarts the 5 s. The compose bar is unaffected:
+  // typing continues after the history has stepped aside.
+  useEffect(() => {
+    if (hoverRef.current) {
+      return;
+    }
+
+    closeTimerRef.current = window.setTimeout(() => {
+      onCloseRef.current();
+    }, 5000);
+    return () => {
+      if (closeTimerRef.current != null) {
+        window.clearTimeout(closeTimerRef.current);
+        closeTimerRef.current = null;
+      }
+    };
+  }, [snapshot.chat.length]);
+
+  // Scroll to the newest line whenever the thread changes.
   useEffect(() => {
     if (listRef.current) {
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
   }, [snapshot.chat.length]);
 
+  // Esc closes the panel (and the compose via CinemaView's own listener).
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        onClose();
+        onCloseRef.current();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("keydown", onKey);
     };
-  }, [onClose]);
+  }, []);
 
   return (
     <AnimatePresence>
       <motion.div
         key="chat-history"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
+        initial={{ opacity: 0, x: 24 }}
+        animate={{ opacity: 1, x: 0 }}
+        exit={{ opacity: 0, x: 24 }}
         transition={{ duration: 0.25, ease: "easeOut" }}
-        className="fixed inset-0 z-40 flex items-center justify-center p-6"
+        className="chat-history-panel"
         data-testid="chat-history"
         role="dialog"
         aria-label="Chat history"
+        onMouseEnter={() => {
+          hoverRef.current = true;
+          if (closeTimerRef.current != null) {
+            window.clearTimeout(closeTimerRef.current);
+            closeTimerRef.current = null;
+          }
+        }}
+        onMouseLeave={() => {
+          hoverRef.current = false;
+          // Restart the 5 s countdown now that the cursor is off.
+          if (closeTimerRef.current != null) {
+            window.clearTimeout(closeTimerRef.current);
+          }
+          closeTimerRef.current = window.setTimeout(() => {
+            onCloseRef.current();
+          }, 5000);
+        }}
       >
-        <button
-          type="button"
-          className="absolute inset-0 bg-black/45 backdrop-blur-[2px] cursor-default"
-          onClick={onClose}
-          aria-label="Close chat history"
-          data-testid="chat-history-backdrop"
-        />
-        <div className="relative w-[min(560px,68vw)] h-[min(500px,64vh)] rounded-2xl bg-[#0D0B14]/92 backdrop-blur-xl border border-white/10 shadow-2xl flex flex-col overflow-hidden">
-          <header className="px-5 py-4 flex items-center justify-between border-b border-white/5">
-            <div className="flex items-center gap-2.5">
-              <MessageCircle className="w-4 h-4 text-white/70" strokeWidth={1.6} />
-              <span className="text-[11px] tracking-[0.28em] uppercase text-white/80">
-                Whisper Row
-              </span>
+        <div className="chat-history-panel-card">
+          <header>
+            <div className="chp-label">
+              <MessageCircle className="w-4 h-4" strokeWidth={1.6} />
+              <span>Chat history</span>
             </div>
             <button
               type="button"
               onClick={onClose}
-              className="p-1.5 rounded-full hover:bg-white/10 transition"
+              className="chp-close-btn"
               data-testid="chat-close-btn"
               aria-label="Close chat history"
             >
-              <X className="w-4 h-4 text-white/70" />
+              <X className="w-3.5 h-3.5" />
             </button>
           </header>
-          <div
-            ref={listRef}
-            className="flex-1 overflow-y-auto no-scrollbar px-5 py-4 space-y-3"
-          >
+          <div ref={listRef} className="chp-list">
             {snapshot.chat.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center text-center opacity-70">
-                <div className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center mb-3">
-                  <MessageCircle className="w-4 h-4 text-white/50" strokeWidth={1.4} />
+              <div className="chp-empty">
+                <div className="chp-empty-mark">
+                  <MessageCircle className="w-4 h-4" strokeWidth={1.4} />
                 </div>
-                <p className="font-serif-display text-lg text-white/80">No messages yet</p>
-                <p className="text-[11px] tracking-[0.2em] uppercase text-white/40 mt-1.5">
-                  Say something during the show
-                </p>
+                <p className="chp-empty-title">No messages yet</p>
+                <p className="chp-empty-hint">Say something during the show</p>
               </div>
             ) : (
               snapshot.chat.map((message) => (
-                <div key={message.id} className="flex flex-col">
-                  <span className="text-[10px] tracking-[0.2em] uppercase text-white/40 mb-1">
-                    {message.sender}
-                  </span>
-                  <div className="max-w-[80%] px-3.5 py-2 rounded-2xl text-sm bg-white/6 text-white/90 rounded-bl-sm">
-                    {message.body}
-                  </div>
+                <div key={message.id} className="chp-msg">
+                  <span className="chp-msg-sender">{message.sender}</span>
+                  <div className="chp-msg-body">{message.body}</div>
                 </div>
               ))
             )}
           </div>
-          <footer className="px-5 py-3 border-t border-white/5 text-[11px] tracking-[0.2em] uppercase text-white/40">
-            Press Esc to return to the movie
-          </footer>
         </div>
       </motion.div>
     </AnimatePresence>

@@ -57,7 +57,7 @@ export function ChatBubbles({
   return (
     <div
       data-testid="chat-bubbles"
-      className="pointer-events-none absolute left-0 right-0 z-30 flex flex-col justify-end gap-2"
+      className="chat-bubble-stack"
       style={{ bottom: `calc(18% + ${String(offsetPx)}px)` }}
       aria-live="polite"
       aria-label="Chat messages"
@@ -70,11 +70,9 @@ export function ChatBubbles({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.25, ease: "easeOut" }}
-            className="mx-auto w-fit max-w-[min(560px,70vw)] px-3.5 py-2 rounded-2xl text-sm bg-black/55 backdrop-blur-md text-white/90 rounded-bl-sm border border-white/10"
+            className="chat-bubble-item"
           >
-            <span className="text-[10px] tracking-[0.2em] uppercase text-white/40 mr-2">
-              {bubble.sender}
-            </span>
+            <span>{bubble.sender}</span>
             {bubble.body}
           </motion.div>
         ))}

@@ -1,23 +1,38 @@
 export type ChatOverlayVisibility = {
   manualOpen: boolean;
   transientOpen: boolean;
+  /**
+   * The history panel has auto-hidden (5 s, see ChatHistoryCard) while
+   * the compose bar may still be up. It resets the next time chat is
+   * opened, so the panel reappears alongside the composer.
+   */
+  historyDismissed: boolean;
 };
 
 export const closedChatOverlay: ChatOverlayVisibility = {
   manualOpen: false,
   transientOpen: false,
+  historyDismissed: false,
 };
 
 export function openChatManually(): ChatOverlayVisibility {
-  return { manualOpen: true, transientOpen: false };
+  return { manualOpen: true, transientOpen: false, historyDismissed: false };
 }
 
 export function openChatPreview(): ChatOverlayVisibility {
-  return { manualOpen: false, transientOpen: true };
+  return { manualOpen: false, transientOpen: true, historyDismissed: false };
 }
 
 export function closeChatPreview(current: ChatOverlayVisibility): ChatOverlayVisibility {
   return { ...current, transientOpen: false };
+}
+
+/**
+ * The history panel's 5 s auto-hide: only the panel steps aside — the
+ * compose bar (manualOpen) keeps its state, so typing continues.
+ */
+export function dismissChatHistory(current: ChatOverlayVisibility): ChatOverlayVisibility {
+  return { ...current, historyDismissed: true };
 }
 
 export function isChatOverlayOpen(current: ChatOverlayVisibility): boolean {

@@ -4,6 +4,7 @@ import {
   canToggleChat,
   closeChatPreview,
   closedChatOverlay,
+  dismissChatHistory,
   isChatOverlayOpen,
   openChatManually,
   openChatPreview,
@@ -11,13 +12,30 @@ import {
 
 describe("chat overlay visibility", () => {
   it("keeps a manually opened chat visible when a transient preview ends", () => {
-    expect(closeChatPreview(openChatManually())).toEqual({ manualOpen: true, transientOpen: false });
+    expect(closeChatPreview(openChatManually())).toEqual({
+      manualOpen: true,
+      transientOpen: false,
+      historyDismissed: false,
+    });
   });
 
   it("opens a transient preview without turning on the composer", () => {
     const preview = openChatPreview();
     expect(preview.manualOpen).toBe(false);
     expect(isChatOverlayOpen(preview)).toBe(true);
+  });
+
+  it("auto-hides the history panel without closing the composer (#2)", () => {
+    const open = openChatManually();
+    const dismissed = dismissChatHistory(open);
+    // The composer stays up; only the panel steps aside.
+    expect(dismissed).toEqual({ manualOpen: true, transientOpen: false, historyDismissed: true });
+    expect(isChatOverlayOpen(dismissed)).toBe(true);
+  });
+
+  it("resets the dismissal the next time chat is opened", () => {
+    const reopened = openChatManually();
+    expect(reopened.historyDismissed).toBe(false);
   });
 });
 
@@ -26,12 +44,13 @@ describe("applyChatArrival (incoming message semantics)", () => {
     expect(applyChatArrival(closedChatOverlay, false)).toEqual({
       manualOpen: false,
       transientOpen: true,
+      historyDismissed: false,
     });
   });
 
   it("does not disturb an already-open overlay (manual or transient)", () => {
-    const manual = { manualOpen: true, transientOpen: false };
-    const transient = { manualOpen: false, transientOpen: true };
+    const manual = { manualOpen: true, transientOpen: false, historyDismissed: false };
+    const transient = { manualOpen: false, transientOpen: true, historyDismissed: false };
     expect(applyChatArrival(manual, false)).toEqual(manual);
     expect(applyChatArrival(transient, false)).toEqual(transient);
   });

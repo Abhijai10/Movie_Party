@@ -127,6 +127,7 @@ pub fn run() {
             get_provider_capabilities,
             join_party,
             mark_ready,
+            set_display_name,
             back_to_lobby,
             enter_cinema,
             request_play_countdown,
@@ -394,6 +395,17 @@ async fn join_party(
 #[tauri::command]
 fn mark_ready(runtime: tauri::State<'_, app_runtime::AppRuntime>) -> app_runtime::AppSnapshot {
     runtime.set_ready()
+}
+
+/// Settings › General: rename this device's participant. Persists to the
+/// existing identity row (device id + signing key untouched) so the peer
+/// trust chain survives the rename.
+#[tauri::command]
+fn set_display_name(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    display_name: String,
+) -> app_runtime::AppSnapshot {
+    runtime.set_display_name(&display_name)
 }
 
 #[tauri::command]

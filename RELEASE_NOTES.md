@@ -1,5 +1,44 @@
 # Movie Party — Release Notes
 
+## 0.9.6 (Cinema chat rebuilt, call tile diet, rename yourself, responsive Friends)
+
+### Preview — chat lives on the right side now
+- Incoming chat bubbles render on the **right side** of the screen
+  instead of the middle, so they never sit on top of the movie's
+  subtitles or the action.
+- Clicking the chat icon now shows your **chat history alongside the
+  composer**, anchored to the right side as a slim panel. The panel
+  **steps aside after 5 seconds** — but keep the cursor on it and it
+  stays for as long as you do; moving away restarts the countdown.
+  Clicking the chat icon again brings it straight back.
+- The composer bar is narrower (it was unnecessarily wide) and stays
+  available for typing after the history panel has auto-hidden.
+
+### Preview — the call tile got out of the way
+- The floating partner-video tile dropped its clutter: the "Away"
+  status line and the close (x) button are gone. It now carries only
+  your partner's name, a video toggle, and a minimize button.
+- The **video toggle** shows or hides the partner's video — audio keeps
+  playing while the video is hidden. Hiding the tile itself moved to
+  the "Show call" button in the control dock (it toggles now).
+
+### Settings — rename yourself
+- Settings → General → Display name is now editable: type your name,
+  hit Save (or just click away). It persists across restarts and is
+  what your movie partner sees. Your device identity and trust chain
+  are untouched by a rename — only the label changes.
+
+### Friends — fills the screen at any size
+- In full-screen windows the Friends content used to huddle at the top
+  with dead space below. The columns now stretch to fill the available
+  height, and the friends list scrolls inside its card.
+
+### Bug fixes
+- A stale error from one failed action no longer lingers on the
+  snapshot after a later action succeeds.
+- The compose bar is actually centered now (the centering transform
+  was being clobbered by the entry animation).
+
 ## 0.9.5 (Shared TMDB key baked in, compact ready buttons, macOS call permissions)
 
 ### Home — posters work out of the box now

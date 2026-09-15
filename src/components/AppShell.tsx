@@ -737,7 +737,11 @@ export function AppShell() {
   if (localScreen === "SETTINGS") {
     return (
       <>
-        <SettingsView snapshot={snapshot} onBack={goHome} />
+        <SettingsView
+          snapshot={snapshot}
+          onBack={goHome}
+          onSnapshot={applySnapshot}
+        />
         {debugHudEnabled ? <DebugHud snapshot={snapshot} /> : null}
       </>
     );

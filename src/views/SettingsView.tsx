@@ -13,6 +13,7 @@ import {
   getProviderCapabilities,
   getTailscaleReadiness,
   openProviderBrowser,
+  setDisplayName,
   type AppSnapshot,
   type ProviderCapability,
   type TailscaleReadiness,
@@ -37,6 +38,8 @@ import {
 type SettingsViewProps = {
   snapshot: AppSnapshot;
   onBack: () => void;
+  /** Applied after a successful rename so the whole app sees the new name. */
+  onSnapshot?: (next: AppSnapshot | null) => void;
 };
 
 type SettingsSection =
@@ -83,8 +86,44 @@ function formatBytes(bytes: number): string {
   return `${label} ${units[exponent] ?? "B"}`;
 }
 
-export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
+export function SettingsView({ snapshot, onBack, onSnapshot }: SettingsViewProps) {
   const [section, setSection] = useState<SettingsSection>("general");
+
+  // Display-name editing (General): the row is an inline text field that
+  // saves on Enter / blur. Validation lives in the backend (1–40 chars); a
+  // rejection surfaces inline rather than silently reverting.
+  const [nameDraft, setNameDraft] = useState<string>(
+    snapshot.participants[0]?.displayName ?? "You",
+  );
+  const [nameSaving, setNameSaving] = useState(false);
+  const [nameError, setNameError] = useState<string | null>(null);
+  useEffect(() => {
+    setNameDraft(snapshot.participants[0]?.displayName ?? "You");
+  }, [snapshot.participants]);
+
+  const saveName = useCallback(() => {
+    const trimmed = nameDraft.trim();
+    if (trimmed.length === 0 || trimmed.length > 40) {
+      setNameError("Name must be 1–40 characters.");
+      return;
+    }
+    const currentName = snapshot.participants[0]?.displayName ?? "You";
+    if (trimmed === currentName) {
+      setNameError(null);
+      return;
+    }
+    setNameSaving(true);
+    setNameError(null);
+    void setDisplayName(trimmed).then((next) => {
+      setNameSaving(false);
+      if (next) {
+        onSnapshot?.(next);
+      } else {
+        setNameError("Could not save the name right now.");
+      }
+    });
+  }, [nameDraft, snapshot.participants, onSnapshot]);
+
   const [capabilities, setCapabilities] = useState<ProviderCapability[]>([]);
   const [tailscale, setTailscale] = useState<TailscaleReadiness | null>(null);
   const [metadata, setMetadata] = useState<{ appVersion: string; protocol: string }>({
@@ -323,7 +362,54 @@ export function SettingsView({ snapshot, onBack }: SettingsViewProps) {
           <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.03] px-6 py-5">
           {section === "general" ? (
             <div data-testid="settings-general">
-              <Row label="Display name">{snapshot.participants[0]?.displayName ?? "You"}</Row>
+              <Row
+                label="Display name"
+                hint={
+                  nameError ??
+                  (nameSaving
+                    ? "Saving…"
+                    : "Your name is shown to your movie partner. 1–40 characters.")
+                }
+              >
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    saveName();
+                  }}
+                  className="flex items-center justify-end gap-2"
+                >
+                  <input
+                    type="text"
+                    value={nameDraft}
+                    maxLength={40}
+                    aria-label="Display name"
+                    aria-invalid={nameError != null}
+                    data-testid="settings-display-name-input"
+                    onChange={(event) => {
+                      setNameDraft(event.target.value);
+                    }}
+                    onBlur={saveName}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") {
+                        setNameDraft(
+                          snapshot.participants[0]?.displayName ?? "You",
+                        );
+                        setNameError(null);
+                      }
+                    }}
+                    className="settings-name-input font-mono-mp"
+                  />
+                  <button
+                    type="submit"
+                    disabled={nameSaving}
+                    data-testid="settings-display-name-save"
+                    aria-label="Save display name"
+                    className="settings-name-save"
+                  >
+                    Save
+                  </button>
+                </form>
+              </Row>
               <Row label="Start Movie Party at login" hint="V1: off by default">
                 Off
               </Row>

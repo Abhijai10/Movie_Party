@@ -224,7 +224,7 @@ export function FriendsView({
           initial={{ opacity: 0, y: 14 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5 }}
-          className="my-auto"
+          className="flex-1 flex flex-col min-h-0"
         >
           <h1 className="font-serif-display text-white text-4xl tracking-[-0.02em]">Friends</h1>
           <p className="mt-3 text-white/50 text-sm max-w-lg leading-relaxed">
@@ -309,7 +309,7 @@ export function FriendsView({
             </div>
 
             <div
-              className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 friends-card"
+              className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 friends-card friends-list-card"
               data-testid="friends-list-card"
             >
               <div className="flex items-center justify-between">

@@ -620,6 +620,16 @@ export async function markReady(): Promise<AppSnapshot | null> {
   return invokeSnapshot("mark_ready");
 }
 
+/**
+ * Settings › General: rename this device's participant. The backend
+ * validates (1–40 chars) and persists to the existing identity row, so
+ * the device id and signing key — and therefore the peer trust chain —
+ * are untouched.
+ */
+export async function setDisplayName(displayName: string): Promise<AppSnapshot | null> {
+  return invokeSnapshot("set_display_name", { displayName });
+}
+
 /** Ready Check "Back to lobby": retract readiness, return to the lobby. */
 export async function backToLobby(): Promise<AppSnapshot | null> {
   return invokeSnapshot("back_to_lobby");

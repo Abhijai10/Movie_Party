@@ -6,7 +6,6 @@ import {
   clampCameraCardSize,
   clampCameraCardHeight,
   saveCallTilePosition,
-  closeCallTileLocally,
   deriveRemoteCallPresentation,
   minimizeCallTile,
   restoreCallTile,
@@ -49,6 +48,10 @@ export function CallTile({
   const dragOffset = useRef({ x: 0, y: 0 });
   const activePointerId = useRef<number | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  // §4 call-tile diet: the header toggle that shows/hides the peer's
+  // video. Suppressed shows the avatar instead — the feed is still
+  // attached (audio keeps playing), just not displayed.
+  const [videoSuppressed, setVideoSuppressed] = useState(false);
   const remote = deriveRemoteCallPresentation(
     remoteCameraEnabled,
     remoteMicrophoneEnabled,
@@ -61,7 +64,7 @@ export function CallTile({
   // - remote camera on, no wire yet  → placeholder icon (pre-connect)
   // - remote camera off             → avatar (element unmounts; the peer
   //   re-enabling remounts it and autoplay resumes immediately)
-  const showLiveRemoteVideo = hasRemoteVideoTrack && remote.showVideo;
+  const showLiveRemoteVideo = hasRemoteVideoTrack && remote.showVideo && !videoSuppressed;
 
   // Attach live media: the wire has media whenever the session exists, so
   // the remote video renders whenever the peer actually sends frames.
@@ -261,11 +264,21 @@ export function CallTile({
       )}
       {session.isMinimized ? null : (
         <header className="camera-card-header">
+          <strong>{peerName}</strong>
           <div>
-            <strong>{peerName}</strong>
-            <span>{remote.statusLabel}</span>
-          </div>
-          <div>
+            <button
+              type="button"
+              onClick={() => {
+                setVideoSuppressed((current) => !current);
+              }}
+              aria-label={videoSuppressed ? "Show video" : "Hide video"}
+              title={videoSuppressed ? "Show video" : "Hide video"}
+              data-call-tile-control
+              data-video-toggle
+              data-active={videoSuppressed ? "off" : "on"}
+            >
+              <Video className="w-3.5 h-3.5" strokeWidth={1.7} />
+            </button>
             <button
               type="button"
               onClick={() => {
@@ -276,17 +289,6 @@ export function CallTile({
               data-call-tile-control
             >
               <Minus className="w-3.5 h-3.5" strokeWidth={1.7} />
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                onSessionChange(closeCallTileLocally(session));
-              }}
-              aria-label="Hide call tile"
-              title="Hide call tile"
-              data-call-tile-control
-            >
-              <span aria-hidden="true">x</span>
             </button>
           </div>
         </header>
@@ -301,12 +303,12 @@ export function CallTile({
             playsInline
             aria-label={`${peerName} video`}
           />
-        ) : remote.showVideo ? (
+        ) : remote.showVideo && !videoSuppressed ? (
           <div className="camera-video-placeholder" aria-label={`${peerName} video`}>
             <Video className="w-7 h-7" strokeWidth={1.4} />
           </div>
         ) : (
-          <div className="camera-avatar" aria-label={`${peerName} camera off`}>
+          <div className="camera-avatar" aria-label={videoSuppressed ? `${peerName} video hidden` : `${peerName} camera off`}>
             {initials}
           </div>
         )}
