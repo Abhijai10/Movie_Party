@@ -4256,11 +4256,6 @@ input[type=range].mp-range::-webkit-slider-thumb {
   }
 }
 
-/* Missing base utility (no Tailwind in this project). */
-.min-h-0 {
-  min-height: 0;
-}
-
 .lobby-social-dock {
   position: absolute;
   z-index: 35;
@@ -5139,21 +5134,6 @@ input[type=range].mp-range::-webkit-slider-thumb {
 @media (min-width: 1024px) {
     .friends-layout {
         grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-        /* Fill the tall-window case: the grid grows into the leftover
-           height and both columns stretch to it (#6 — content no longer
-           clusters at the top in full screen). */
-        flex: 1 1 auto;
-        min-height: 0;
-        align-items: stretch;
-    }
-    .friends-list-card {
-        display: flex;
-        flex-direction: column;
-    }
-    .friends-scroll {
-        max-height: none;
-        flex: 1 1 auto;
-        min-height: 0;
     }
 }
 .friends-card {
@@ -5162,7 +5142,7 @@ input[type=range].mp-range::-webkit-slider-thumb {
     overflow: hidden;
 }
 .friends-scroll {
-    max-height: 340px;
+    max-height: 420px;
     overflow-y: auto;
     padding-right: 0.25rem;
     min-width: 0;

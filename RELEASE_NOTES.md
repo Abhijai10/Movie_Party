@@ -1,6 +1,6 @@
 # Movie Party — Release Notes
 
-## 0.9.6 (Cinema chat rebuilt, call tile diet, rename yourself, responsive Friends)
+## 0.9.6 (Cinema chat rebuilt, call tile diet, rename yourself)
 
 ### Preview — chat lives on the right side now
 - Incoming chat bubbles render on the **right side** of the screen
@@ -27,11 +27,6 @@
   hit Save (or just click away). It persists across restarts and is
   what your movie partner sees. Your device identity and trust chain
   are untouched by a rename — only the label changes.
-
-### Friends — fills the screen at any size
-- In full-screen windows the Friends content used to huddle at the top
-  with dead space below. The columns now stretch to fill the available
-  height, and the friends list scrolls inside its card.
 
 ### Bug fixes
 - A stale error from one failed action no longer lingers on the
