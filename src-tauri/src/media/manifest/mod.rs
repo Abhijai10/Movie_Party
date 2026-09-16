@@ -13,17 +13,29 @@ pub const FINGERPRINT_EDGE_BYTES: u64 = 4 * 1_048_576;
 /// True when `media_id` is safe to use as a single path component.
 ///
 /// A media id names a directory inside Movie Party's cache, so it must be one
-/// ordinary component: non-empty, and free of `..` and of either separator.
-/// Extracted from the guest-side manifest check so the retention IPC paths
-/// enforce exactly the same contract instead of re-deriving it (F45).
+/// ordinary component: non-empty, not the current-directory entry, and free of
+/// `..` and of either separator. Extracted from the guest-side manifest check
+/// so the retention IPC paths enforce exactly the same contract instead of
+/// re-deriving it (F45).
+///
+/// `"."` is rejected explicitly: `contains("..")` does not catch it, and
+/// `root.join(".")` resolves to the cache root itself, so a bare `.` would
+/// name the whole cache rather than an entry inside it. (The cache path check
+/// also rejects it — this keeps the rule honest on its own.)
 pub fn is_safe_media_id(media_id: &str) -> bool {
-    !media_id.is_empty() && !media_id.contains("..") && !media_id.contains(['/', '\\'])
+    !media_id.is_empty()
+        && media_id != "."
+        && !media_id.contains("..")
+        && !media_id.contains(['/', '\\'])
 }
 
 /// True when `filename` is safe to keep as metadata. Same rule as a media id;
 /// the filename is never used as a path by Movie Party.
 pub fn is_safe_media_filename(filename: &str) -> bool {
-    !filename.is_empty() && !filename.contains("..") && !filename.contains(['/', '\\'])
+    !filename.is_empty()
+        && filename != "."
+        && !filename.contains("..")
+        && !filename.contains(['/', '\\'])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,6 +240,7 @@ mod tests {
     fn media_id_rule_refuses_separators_and_parent_segments() {
         for hostile in [
             "",
+            ".",
             "..",
             "../..",
             "../../tmp/test",
@@ -260,7 +273,7 @@ mod tests {
 
     #[test]
     fn filename_rule_refuses_separators_and_parent_segments() {
-        for hostile in ["", "..", "a/b", "a\\b", "../../etc/passwd"] {
+        for hostile in ["", ".", "..", "a/b", "a\\b", "../../etc/passwd"] {
             assert!(
                 !is_safe_media_filename(hostile),
                 "{hostile:?} must be refused"

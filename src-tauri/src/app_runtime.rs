@@ -8464,6 +8464,7 @@ mod tests {
         runtime.init_cache_root_for_test(root.clone());
 
         for hostile in [
+            ".",
             "..",
             "../..",
             "../../tmp/test",
@@ -8478,6 +8479,34 @@ mod tests {
             assert!(
                 error.contains("MP-MEDIA-002"),
                 "unexpected error for {hostile:?}: {error}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A media id must never resolve to the cache root itself.
+    ///
+    /// `root.join(".")` is the root, so accepting a bare `.` would let a
+    /// retention "remove" delete the whole cache. Both guards reject it: the
+    /// component rule (`"."` is not an entry) and the containment check
+    /// (`root/.`'s parent is the root's parent, not the root).
+    #[test]
+    fn f45_cache_dir_for_never_resolves_to_the_cache_root_itself() {
+        let runtime = AppRuntime::new();
+        let root = scratch_cache_root("f45-root");
+        runtime.init_cache_root_for_test(root.clone());
+
+        assert!(
+            runtime.cache_dir_for(".").is_err(),
+            "a bare '.' names the cache root and must be refused"
+        );
+
+        for valid in ["a", "media-1", "a.b"] {
+            let resolved = runtime.cache_dir_for(valid).expect("valid id");
+            assert_ne!(
+                resolved, root,
+                "{valid} must not resolve to the cache root itself"
             );
         }
 
