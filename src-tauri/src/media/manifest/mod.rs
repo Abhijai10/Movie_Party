@@ -10,6 +10,22 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_CHUNK_SIZE_BYTES: u64 = 1_048_576;
 pub const FINGERPRINT_EDGE_BYTES: u64 = 4 * 1_048_576;
 
+/// True when `media_id` is safe to use as a single path component.
+///
+/// A media id names a directory inside Movie Party's cache, so it must be one
+/// ordinary component: non-empty, and free of `..` and of either separator.
+/// Extracted from the guest-side manifest check so the retention IPC paths
+/// enforce exactly the same contract instead of re-deriving it (F45).
+pub fn is_safe_media_id(media_id: &str) -> bool {
+    !media_id.is_empty() && !media_id.contains("..") && !media_id.contains(['/', '\\'])
+}
+
+/// True when `filename` is safe to keep as metadata. Same rule as a media id;
+/// the filename is never used as a path by Movie Party.
+pub fn is_safe_media_filename(filename: &str) -> bool {
+    !filename.is_empty() && !filename.contains("..") && !filename.contains(['/', '\\'])
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuickFingerprint {
@@ -46,16 +62,10 @@ impl MediaManifest {
     /// any local cache resources. The filename remains metadata only, but it
     /// must never be a path supplied by the remote host.
     pub fn validate_for_guest(&self) -> Result<(), ManifestError> {
-        if self.media_id.is_empty()
-            || self.media_id.contains("..")
-            || self.media_id.contains(['/', '\\'])
-        {
+        if !is_safe_media_id(&self.media_id) {
             return Err(ManifestError::InvalidManifest("unsafe media id"));
         }
-        if self.filename.is_empty()
-            || self.filename.contains("..")
-            || self.filename.contains(['/', '\\'])
-        {
+        if !is_safe_media_filename(&self.filename) {
             return Err(ManifestError::InvalidManifest("unsafe filename"));
         }
         if self.file_size == 0 || self.chunk_size != DEFAULT_CHUNK_SIZE_BYTES {
@@ -154,6 +164,7 @@ fn blake3_base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{is_safe_media_filename, is_safe_media_id};
     use std::{
         fs::{self, File},
         io::Write,
@@ -210,5 +221,53 @@ mod tests {
     fn write_file(path: &std::path::Path, bytes: &[u8]) {
         let mut file = File::create(path).expect("create");
         file.write_all(bytes).expect("write");
+    }
+
+    /// F45: the shared path-component rule the cache and retention paths use.
+    #[test]
+    fn media_id_rule_refuses_separators_and_parent_segments() {
+        for hostile in [
+            "",
+            "..",
+            "../..",
+            "../../tmp/test",
+            "a/../../etc",
+            "/etc/passwd",
+            "a\\..\\b",
+            "a/b",
+            "a\\b",
+            "..hidden",
+        ] {
+            assert!(
+                !is_safe_media_id(hostile),
+                "{hostile:?} must not be a usable media id"
+            );
+        }
+
+        for valid in [
+            "media-abc123",
+            "0123456789abcdef",
+            "a",
+            "with space",
+            "dash-and_underscore",
+        ] {
+            assert!(
+                is_safe_media_id(valid),
+                "{valid:?} must be a usable media id"
+            );
+        }
+    }
+
+    #[test]
+    fn filename_rule_refuses_separators_and_parent_segments() {
+        for hostile in ["", "..", "a/b", "a\\b", "../../etc/passwd"] {
+            assert!(
+                !is_safe_media_filename(hostile),
+                "{hostile:?} must be refused"
+            );
+        }
+        for valid in ["Dune.mkv", "Movie (2024).mp4", "a"] {
+            assert!(is_safe_media_filename(valid), "{valid:?} must be accepted");
+        }
     }
 }

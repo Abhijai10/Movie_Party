@@ -1310,10 +1310,36 @@ fn configure_server() -> Result<(ServerConfig, CertificateDer<'static>), QuicErr
     Ok((ServerConfig::with_crypto(Arc::new(crypto)), cert_der))
 }
 
-#[derive(Debug)]
+/// Verifies the peer's certificate by pinned SHA-256 fingerprint **and**
+/// proves possession of that certificate's private key.
+///
+/// Fingerprint pinning alone is *not* authentication. The certificate DER is
+/// public: it is generated per host session, sent in the clear in every
+/// handshake, and its fingerprint travels in the invite. Anyone holding a
+/// copy could present it. TLS 1.3 proves key possession through the
+/// `CertificateVerify` signature, so that signature must be checked against
+/// the certificate's own public key — which is what these callbacks now do
+/// (F44). Without it the pin restricts *which* certificate is acceptable but
+/// authenticates nothing.
 struct FingerprintVerifier {
     fingerprint: String,
+    /// Signature algorithms of the crypto provider the endpoint was built
+    /// with. Must come from the same provider, or a legitimately negotiated
+    /// scheme could be rejected as unsupported.
+    signature_algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
 }
+
+impl std::fmt::Debug for FingerprintVerifier {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `WebPkiSupportedAlgorithms` is not `Debug`; the trait requires it,
+        // so render only the pin.
+        formatter
+            .debug_struct("FingerprintVerifier")
+            .field("fingerprint", &self.fingerprint)
+            .finish_non_exhaustive()
+    }
+}
+
 impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
     fn verify_server_cert(
         &self,
@@ -1332,24 +1358,22 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
     }
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.signature_algorithms)
     }
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.signature_algorithms)
     }
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
+        self.signature_algorithms.supported_schemes()
     }
 }
 
@@ -1357,6 +1381,7 @@ fn make_client_endpoint(server_certificate_fingerprint: String) -> Result<Endpoi
     ensure_crypto_provider();
     let verifier = std::sync::Arc::new(FingerprintVerifier {
         fingerprint: server_certificate_fingerprint,
+        signature_algorithms: installed_signature_algorithms(),
     });
     let mut crypto = rustls::ClientConfig::builder()
         .dangerous()
@@ -1377,6 +1402,18 @@ fn make_client_endpoint(server_certificate_fingerprint: String) -> Result<Endpoi
 
 fn ensure_crypto_provider() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
+/// Signature algorithms of the process-wide crypto provider actually in
+/// use. Read back from the installed default so the client verifier and the
+/// endpoint are guaranteed to agree on schemes, even if another provider
+/// was installed before Movie Party had a chance to.
+fn installed_signature_algorithms() -> rustls::crypto::WebPkiSupportedAlgorithms {
+    rustls::crypto::CryptoProvider::get_default()
+        .map(|provider| provider.signature_verification_algorithms)
+        .unwrap_or_else(|| {
+            rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2339,12 +2376,14 @@ mod tests {
     };
 
     use super::{
+        certificate_fingerprint, ensure_crypto_provider, installed_signature_algorithms,
         loopback_bind_addr, monotonic_us, tailscale_bind_addr, validate_quic_bind_addr,
-        AuthRequest, ClientRequest, EventEnvelope, HelloPayload, QuicClient, QuicError, QuicServer,
-        RoomCredentials, ServerEvent, ServerResponse,
+        AuthRequest, ClientRequest, EventEnvelope, FingerprintVerifier, HelloPayload, QuicClient,
+        QuicError, QuicServer, RoomCredentials, ServerEvent, ServerResponse,
     };
     use crate::identity::DeviceIdentity;
     use crate::protocol::MAX_CONTROL_MESSAGE_BYTES;
+    use rustls::pki_types::CertificateDer;
     use tokio::io::AsyncWriteExt;
 
     const TEST_DEVICE_ID: &str = "0198c3d0-7c55-7f82-9af2-36c9946b2974";
@@ -3100,6 +3139,244 @@ mod tests {
             "wrong certificate fingerprint must cause TLS/QUIC connect to fail"
         );
         server_task.abort();
+    }
+
+    // ── F44: handshake signature verification ────────────────────────────
+    //
+    // Fingerprint pinning alone does not authenticate a peer: the certificate
+    // DER is public (sent in the clear in every handshake, and its fingerprint
+    // travels in the invite). TLS proves key possession through the
+    // `CertificateVerify` signature. Both signature callbacks used to return
+    // "valid" unconditionally, so a peer holding only the public certificate
+    // could complete a handshake. These tests exercise that path for real.
+
+    /// F44-A: a genuine server — correct certificate AND a real
+    /// `CertificateVerify` signature — is still accepted end to end.
+    #[tokio::test]
+    async fn f44_a_valid_certificate_and_signature_are_accepted() {
+        let credentials = RoomCredentials::new_for_tests();
+        let server = QuicServer::bind(
+            loopback_bind_addr(),
+            credentials.clone(),
+            "Host".to_string(),
+            TEST_DEVICE_ID.to_string(),
+        )
+        .expect("server");
+        let addr = server.local_addr().expect("addr");
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
+
+        let (client, _) = QuicClient::connect(
+            addr,
+            fingerprint,
+            credentials,
+            test_identity(),
+            "Test Guest".to_string(),
+        )
+        .await
+        .expect("a valid certificate with a valid handshake signature must be accepted");
+
+        // The authenticated session still works after signature verification.
+        client.heartbeat().await.expect("heartbeat");
+        client.wait_idle().await;
+        server_task.abort();
+    }
+
+    /// F44-B: the pin is still enforced — a wrong fingerprint is rejected.
+    ///
+    /// Asserted directly against the verifier so the rejection is attributed
+    /// to the fingerprint check and not to a signature failure.
+    #[test]
+    fn f44_b_wrong_certificate_fingerprint_is_rejected() {
+        use rustls::client::danger::ServerCertVerifier;
+
+        ensure_crypto_provider();
+        let genuine = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("genuine certificate");
+        let other = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("other certificate");
+        let genuine_der = CertificateDer::from(genuine.cert);
+        let other_der = CertificateDer::from(other.cert);
+
+        let verifier = FingerprintVerifier {
+            fingerprint: certificate_fingerprint(&genuine_der),
+            signature_algorithms: installed_signature_algorithms(),
+        };
+
+        assert_ne!(
+            certificate_fingerprint(&genuine_der),
+            certificate_fingerprint(&other_der)
+        );
+
+        // The pinned certificate is accepted…
+        verifier
+            .verify_server_cert(
+                &genuine_der,
+                &[],
+                &rustls::pki_types::ServerName::try_from("localhost").expect("server name"),
+                &[],
+                rustls::pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_secs(
+                    1_700_000_000,
+                )),
+            )
+            .expect("the pinned certificate must be accepted");
+
+        // …and any other certificate is rejected.
+        let error = verifier
+            .verify_server_cert(
+                &other_der,
+                &[],
+                &rustls::pki_types::ServerName::try_from("localhost").expect("server name"),
+                &[],
+                rustls::pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_secs(
+                    1_700_000_000,
+                )),
+            )
+            .expect_err("a different certificate must be rejected by the pin");
+        assert!(
+            error.to_string().contains("fingerprint mismatch"),
+            "expected a fingerprint mismatch, got: {error}"
+        );
+    }
+
+    /// F44-C: a correct certificate carrying a FORGED handshake signature is
+    /// rejected.
+    ///
+    /// Drives `verify_tls13_signature` directly, and deliberately asserts both
+    /// halves — the pinned key's own signature verifies, and a signature over
+    /// the same transcript from a different key does not — so a blanket
+    /// "always reject" implementation cannot pass this test. Under the old
+    /// stubbed callback the forgery was accepted.
+    ///
+    /// Why not end to end: rustls refuses to build a server config whose
+    /// private key does not match its certificate
+    /// (`InconsistentKeys(KeyMismatch)`), so a real peer cannot emit a
+    /// mismatched `CertificateVerify` for us to observe. That refusal is a
+    /// useful second line of defence, but it is not the one this codebase
+    /// relies on — the client verifier must reject the forgery itself.
+    #[test]
+    fn f44_c_correct_certificate_but_forged_handshake_signature_is_rejected() {
+        use rcgen::SigningKey;
+        use rustls::client::danger::ServerCertVerifier;
+        use rustls::internal::msgs::codec::{Codec, Reader};
+
+        ensure_crypto_provider();
+
+        // The certificate whose fingerprint the client pins.
+        let pinned = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("pinned certificate");
+        let cert_der = CertificateDer::from(pinned.cert);
+        let verifier = FingerprintVerifier {
+            fingerprint: certificate_fingerprint(&cert_der),
+            signature_algorithms: installed_signature_algorithms(),
+        };
+
+        let transcript = b"movie-party CertificateVerify transcript";
+        // rcgen's default key is ECDSA P-256, so this is the scheme the
+        // certificate's public key can actually verify.
+        let scheme = rustls::SignatureScheme::ECDSA_NISTP256_SHA256;
+
+        let signed = |signature: &[u8]| {
+            let mut bytes = Vec::new();
+            scheme.encode(&mut bytes);
+            bytes.extend_from_slice(&(signature.len() as u16).to_be_bytes());
+            bytes.extend_from_slice(signature);
+            let mut reader = Reader::init(&bytes);
+            rustls::DigitallySignedStruct::read(&mut reader).expect("decode dss")
+        };
+
+        // Control: the pinned key's own signature over this transcript verifies.
+        let genuine = pinned
+            .signing_key
+            .sign(transcript)
+            .expect("sign with the pinned key");
+        verifier
+            .verify_tls13_signature(transcript, &cert_der, &signed(&genuine))
+            .expect("the pinned key's own signature must verify");
+
+        // The forgery: same transcript, signed by a key we do not trust.
+        let impostor = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("impostor key");
+        let forged = impostor.signing_key.sign(transcript).expect("sign");
+        assert_ne!(
+            genuine, forged,
+            "the two keys must produce different signatures"
+        );
+
+        let error = verifier
+            .verify_tls13_signature(transcript, &cert_der, &signed(&forged))
+            .expect_err("a signature made by another key must be rejected");
+        assert!(
+            !error.to_string().is_empty(),
+            "the rejection must carry a reason"
+        );
+    }
+
+    /// F44-D: malformed and wrong-signer signatures are rejected.
+    ///
+    /// Drives `verify_tls13_signature` directly, so the rejection is
+    /// attributed to signature verification and nothing else. Under the old
+    /// stubbed callback every case below returned "valid".
+    #[test]
+    fn f44_d_malformed_signature_is_rejected() {
+        use rcgen::SigningKey;
+        use rustls::client::danger::ServerCertVerifier;
+        use rustls::internal::msgs::codec::{Codec, Reader};
+
+        ensure_crypto_provider();
+        let genuine = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("genuine certificate");
+        let cert_der = CertificateDer::from(genuine.cert);
+        let verifier = FingerprintVerifier {
+            fingerprint: certificate_fingerprint(&cert_der),
+            signature_algorithms: installed_signature_algorithms(),
+        };
+
+        let transcript = b"movie-party CertificateVerify transcript";
+        let scheme = rustls::SignatureScheme::ECDSA_NISTP256_SHA256;
+
+        // The public `DigitallySignedStruct` constructor is crate-private, so
+        // build one from its wire encoding via the codec rustls exposes for
+        // integration tests: scheme (u16) || signature length (u16) || bytes.
+        let signed = |signature: &[u8]| {
+            let mut bytes = Vec::new();
+            scheme.encode(&mut bytes);
+            bytes.extend_from_slice(&(signature.len() as u16).to_be_bytes());
+            bytes.extend_from_slice(signature);
+            let mut reader = Reader::init(&bytes);
+            rustls::DigitallySignedStruct::read(&mut reader).expect("decode dss")
+        };
+
+        // A well-formed signature produced by a DIFFERENT key.
+        let impostor = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("impostor key");
+        let forged = impostor.signing_key.sign(transcript).expect("sign");
+        assert!(!forged.is_empty());
+        assert!(
+            verifier
+                .verify_tls13_signature(transcript, &cert_der, &signed(&forged))
+                .is_err(),
+            "a signature made by another key must not verify against this certificate"
+        );
+
+        // Truncated / empty signature bytes.
+        for malformed in [vec![], vec![0u8; 1], vec![0u8; 8]] {
+            assert!(
+                verifier
+                    .verify_tls13_signature(transcript, &cert_der, &signed(&malformed))
+                    .is_err(),
+                "a malformed signature ({} bytes) must be rejected",
+                malformed.len()
+            );
+        }
+
+        // Garbage of a plausible length.
+        assert!(
+            verifier
+                .verify_tls13_signature(transcript, &cert_der, &signed(&[0xAB_u8; 64]))
+                .is_err(),
+            "garbage signature bytes must be rejected"
+        );
     }
 
     // ── PROTOCOL_SPEC §67: malformed-input property tests ─────────

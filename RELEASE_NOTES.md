@@ -1,5 +1,59 @@
 # Movie Party — Release Notes
 
+## 0.9.7 (stabilization: release blockers and security fixes)
+
+A focused stabilization patch. No new features, and no experimental work —
+the Shared Movie Experience remains gated off exactly as before.
+
+### Reliability
+- **A database upgrade can no longer be bricked by an interruption.** The
+  migration runner now applies each step *and* its schema version in one
+  transaction, so a crash mid-upgrade rolls back and retries on the next
+  launch instead of failing forever. `ADD COLUMN` steps are now idempotent,
+  which means a database that was interrupted after the column was added but
+  before the version was recorded recovers cleanly. A database written by a
+  *newer* build is now refused rather than having its version quietly
+  rewritten backwards.
+- **Playback failures are detected again.** The player event loop reported a
+  failed player as `ERROR` while the failure watcher, both play gates, the
+  Cinema view and the provider overlay all looked for `PLAYER_ERROR`. The
+  mismatch meant a real playback failure was silently ignored — playback
+  could be started on a broken player and the "Playback unavailable" message
+  never appeared. One canonical failure state is now produced in one place,
+  and the diagnostic message survives the event loop so recovery can fire.
+
+### Security
+- **The QUIC peer certificate is now genuinely verified.** Movie Party pins
+  the host's certificate fingerprint, but the handshake-signature callbacks
+  accepted any signature. Because a certificate is public, that pin did not
+  actually prove the peer held the matching private key. Signatures are now
+  verified against the certificate's own public key; fingerprint pinning and
+  the app-layer join-secret authentication are unchanged.
+- **Retention paths are contained.** The check guarding Movie Party's media
+  cache used a prefix test that accepted `..`, so a crafted media id could
+  resolve outside the cache directory. Media ids are now validated as single
+  path components and the resolved path must be a direct child of the cache
+  root.
+- **Generic links can no longer target your own machine or network.**
+  Pasting a link that resolves to loopback, a private range, a link-local or
+  CGNAT address, `localhost`, or a `.local` name is now refused, so the
+  managed browser can't be pointed at local services. Public links, including
+  plaintext `http` to a public host, behave exactly as before.
+
+### Fixed
+- **Drag-and-drop in Create Party now works.** A dropped movie file used to
+  show as selected while the backend received no path at all, producing a
+  cinema room with nothing to play. Drops now resolve to a real file path
+  through the native drag-drop event, and a drop Movie Party cannot use says
+  so instead of pretending it worked.
+- **You can leave the "Connect to your movie partner" screen.** When a join
+  failed because the host was unreachable, that screen replaced the whole app
+  and offered only Try Again and Setup help. It now has Back and Cancel,
+  which return you to a clean Home state without bypassing Tailscale setup.
+- The React hook dependency warning in the Cinema view is resolved rather
+  than suppressed, and the Rust tree is fully `rustfmt`-clean, so both CI
+  quality gates pass again.
+
 ## 0.9.6 (Cinema chat rebuilt, call tile diet, rename yourself)
 
 ### Preview — chat lives on the right side now

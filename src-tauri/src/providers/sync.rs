@@ -150,8 +150,91 @@ pub fn provider_accepts_url(provider: ProviderId, url: &str) -> bool {
     }
 }
 
+/// True when a pasted generic link is one Movie Party should open.
+///
+/// Generic links are handed to a real managed Chrome instance, so a link that
+/// resolves to the user's own machine or LAN would turn that browser into a
+/// way to probe local services. The host must therefore be a public
+/// destination (F46). The scheme is left as-is: plaintext `http` to a public
+/// host is an intended use (see the `media.example` case below), so the
+/// restriction stays on the destination rather than narrowing the feature.
 pub fn generic_link_accepts_url(url: &str) -> bool {
-    host_from_url(url).is_some()
+    match host_from_url(url) {
+        Some(host) => is_public_destination(host),
+        None => false,
+    }
+}
+
+/// The host portion of an authority, without any port or IPv6 brackets.
+fn bare_host(host: &str) -> &str {
+    let host = host.trim();
+    if let Some(rest) = host.strip_prefix('[') {
+        // Bracketed IPv6 literal, optionally followed by `:port`.
+        return rest.split(']').next().unwrap_or("");
+    }
+    // `host:port`. A bare (unbracketed) IPv6 literal cannot carry a port, so
+    // splitting on the first ':' is safe here.
+    host.split(':').next().unwrap_or(host)
+}
+
+/// True when `host` names a destination outside the local machine and LAN.
+///
+/// Rejects loopback, unspecified, private, link-local, CGNAT and reserved
+/// addresses, `localhost`, mDNS `.local` names, and the numeric shorthand
+/// forms (`127.1`, `2130706433`) that denote loopback without parsing as an
+/// `Ipv4Addr`.
+fn is_public_destination(host: &str) -> bool {
+    let bare = bare_host(host).trim_end_matches('.');
+    if bare.is_empty() {
+        return false;
+    }
+
+    // A literal address must be a genuinely public one.
+    if let Ok(address) = bare.parse::<std::net::IpAddr>() {
+        return is_public_address(address);
+    }
+
+    let lowered = bare.to_ascii_lowercase();
+    if lowered == "localhost" || lowered.ends_with(".localhost") || lowered.ends_with(".local") {
+        return false;
+    }
+    // A public destination is a dotted name, and must not be all digits and
+    // dots (which is how `127.1` slips past the address parser).
+    if !lowered.contains('.') {
+        return false;
+    }
+    !lowered
+        .chars()
+        .all(|character| character.is_ascii_digit() || character == '.')
+}
+
+fn is_public_address(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            // 100.64.0.0/10 — RFC 6598 shared address space, which is also the
+            // range Tailscale hands out; never a provider destination.
+            let carrier_grade_nat = octets[0] == 100 && (64..128).contains(&octets[1]);
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || carrier_grade_nat
+                || octets[0] >= 240)
+        }
+        std::net::IpAddr::V6(v6) => {
+            // `::ffff:a.b.c.d` must be judged as the IPv4 address it carries.
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_public_address(std::net::IpAddr::V4(mapped));
+            }
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local())
+        }
+    }
 }
 
 fn host_from_url(url: &str) -> Option<&str> {
@@ -698,6 +781,97 @@ mod tests {
         assert!(generic_link_accepts_url("http://media.example/movie.m3u8"));
         assert!(!generic_link_accepts_url("movieparty://join/room"));
         assert!(!generic_link_accepts_url("not-a-url"));
+    }
+
+    // ── F46: generic links must not point at the local machine or LAN ────
+
+    #[test]
+    fn f46_generic_link_accepts_public_destinations() {
+        for url in [
+            "https://example.com/movie.mp4",
+            "https://media.example/watch/1",
+            "http://media.example/movie.m3u8",
+            "https://www.netflix.com/watch/1",
+            "https://a.b.c.example.co.uk/x",
+        ] {
+            assert!(generic_link_accepts_url(url), "{url} must be accepted");
+        }
+    }
+
+    #[test]
+    fn f46_generic_link_refuses_loopback_destinations() {
+        for url in [
+            "http://localhost/admin",
+            "https://localhost:8443/",
+            "http://LOCALHOST/",
+            "http://sub.localhost/x",
+            "http://127.0.0.1:8080/admin",
+            "https://127.0.0.1/",
+            "http://127.1/",
+            "http://2130706433/",
+            "http://[::1]/",
+            "http://[::1]:9000/",
+            "http://[::ffff:127.0.0.1]/",
+        ] {
+            assert!(
+                !generic_link_accepts_url(url),
+                "{url} resolves to the local machine and must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn f46_generic_link_refuses_private_and_local_networks() {
+        for url in [
+            "http://10.0.0.5/admin",
+            "http://192.168.1.1/",
+            "http://172.16.4.4/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://100.64.0.7:8080/",
+            "http://0.0.0.0/",
+            "http://printer.local/",
+            "http://[fe80::1]/",
+            "http://[fd00::1]/",
+        ] {
+            assert!(
+                !generic_link_accepts_url(url),
+                "{url} is a private/local destination and must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn f46_generic_link_refuses_malformed_and_unsupported_input() {
+        for url in [
+            "",
+            "   ",
+            "not-a-url",
+            "example.com/watch",
+            "movieparty://join/room",
+            "file:///Users/me/movie.mp4",
+            "javascript:alert(1)",
+            "https://",
+            "http:///path",
+            "https:///",
+        ] {
+            assert!(
+                !generic_link_accepts_url(url),
+                "{url:?} must not be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn f46_supported_provider_urls_are_unaffected() {
+        // The hardening must not disturb the allow-listed provider path.
+        assert!(provider_accepts_url(
+            ProviderId::Netflix,
+            "https://www.netflix.com/watch/1"
+        ));
+        assert!(provider_accepts_url(
+            ProviderId::YouTube,
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        ));
     }
 
     #[test]

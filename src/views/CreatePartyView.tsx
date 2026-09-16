@@ -11,7 +11,8 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { useCallback, useEffect, useState } from "react";
 import {
   pickMediaFile,
   type ProviderCapability,
@@ -29,6 +30,11 @@ import {
   providerSelectLabels,
   resolveProviderSelectValue,
 } from "../providers/providerSelection";
+import {
+  droppedPathErrorMessage,
+  mediaFileNameFromPath,
+  usableDroppedPath,
+} from "./createPartySource";
 
 type SourceKind = "local" | "stream" | "link";
 
@@ -84,12 +90,13 @@ export function CreatePartyView({
   onNavigateProviderTitle,
 }: CreatePartyViewProps) {
   const [selected, setSelected] = useState<SourceKind>("local");
-  const [file, setFile] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [path, setPath] = useState("");
   const [providerId, setProviderId] = useState("");
   const [providerMode, setProviderMode] = useState<ProviderMode>("PROVIDER_SYNC");
   const [status, setStatus] = useState<"idle" | "error">("idle");
+  /** Honest reason a local source was refused (F3). */
+  const [sourceError, setSourceError] = useState<string | null>(null);
   const [preparing, setPreparing] = useState(false);
   const [providerBusy, setProviderBusy] = useState(false);
   const [titleInput, setTitleInput] = useState("");
@@ -97,7 +104,7 @@ export function CreatePartyView({
   const pick = (key: SourceKind) => {
     setSelected(key);
     setStatus("idle");
-    setFile(null);
+    setSourceError(null);
     setPath("");
     setPreparing(false);
   };
@@ -108,24 +115,70 @@ export function CreatePartyView({
     }
   }, [providerCapabilities, providerId]);
 
-  const onFile = (f: File | null) => {
-    if (!f) return;
-    const okExt = /\.(mp4|mkv|mov|webm)$/i.test(f.name);
-    if (!okExt) {
+  /**
+   * Accept a dropped selection.
+   *
+   * Only a real filesystem path counts, because the backend is handed
+   * `mediaPath` and nothing else. A browser `File` carries no path, so
+   * treating one as a selection is what produced a cinema room with no
+   * media (F3). When a drop cannot be used we say so rather than showing a
+   * selection that can never play.
+   */
+  const applyDroppedPaths = useCallback((paths: readonly string[]) => {
+    const usable = usableDroppedPath(paths);
+    if (usable == null) {
       setStatus("error");
+      setSourceError(droppedPathErrorMessage(paths));
       return;
     }
-    setFile(f);
+    setPath(usable);
+    setSourceError(null);
     setStatus("idle");
-  };
+  }, []);
+
+  // Native drag-and-drop is the platform mechanism that yields real paths.
+  // Tauri intercepts file drops at the window level, so the HTML5 handlers
+  // on the dropzone only drive the hover affordance and report an unusable
+  // drop; the path always comes from here.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === "enter" || payload.type === "over") {
+          setDragOver(true);
+          return;
+        }
+        if (payload.type === "leave") {
+          setDragOver(false);
+          return;
+        }
+        setDragOver(false);
+        applyDroppedPaths(payload.paths);
+      })
+      .then((next) => {
+        if (disposed) {
+          next();
+          return;
+        }
+        unlisten = next;
+      })
+      .catch(() => {
+        // No native drag-drop (browser dev): the HTML5 handlers still run.
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [applyDroppedPaths]);
 
   const activeSource = path.trim();
   const selectedProvider = providerCapabilities.find((provider) => provider.id === providerId) ?? null;
-  const hasSelection = selected === "local" ? Boolean(file || activeSource) : Boolean(activeSource);
+  const hasSelection = Boolean(activeSource);
   const providerStatus = providerModeStatus(selectedProvider, providerMode);
   const canPrepareProvider = selected !== "stream" || providerStatus.canPrepare;
-  const selectedMovieName =
-    file?.name ?? (path.trim() ? (path.trim().split(/[\\/]/).at(-1) ?? "") : "");
+  const selectedMovieName = mediaFileNameFromPath(path);
 
   // Provider readiness: only trust the snapshot when it matches the selected
   // provider; a stale session from a different provider is NOT_STARTED.
@@ -281,13 +334,18 @@ export function CreatePartyView({
                   onDrop={(e) => {
                     e.preventDefault();
                     setDragOver(false);
-                    onFile(e.dataTransfer.files[0] ?? null);
+                    // The HTML5 drop carries no filesystem path, so it can
+                    // never satisfy the backend's mediaPath. The native
+                    // drag-drop listener above is the one that accepts a
+                    // drop; reaching here means the file genuinely cannot
+                    // be opened, so say that instead of faking a selection.
+                    applyDroppedPaths([]);
                   }}
                   onClick={() => {
-                    if (file) return;
                     void pickMediaFile().then((picked) => {
                       if (picked) {
                         setPath(picked);
+                        setSourceError(null);
                         setStatus("idle");
                       }
                     });
@@ -299,7 +357,7 @@ export function CreatePartyView({
                   }`}
                   data-testid="upload-dropzone"
                 >
-                  {!file && !path ? (
+                  {!activeSource ? (
                     <>
                       <div
                         className="w-14 h-14 rounded-full flex items-center justify-center"
@@ -326,16 +384,15 @@ export function CreatePartyView({
                         {selectedMovieName}
                       </p>
                       <p className="text-white/45 text-xs mt-2">
-                        {file
-                          ? `${(file.size / (1024 * 1024)).toFixed(1)} MB`
-                          : "Local playback is ready to prepare."}
+                        Local playback is ready to prepare.
                       </p>
                       <button
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          setFile(null);
                           setPath("");
+                          setSourceError(null);
+                          setStatus("idle");
                         }}
                         className="mt-4 inline-flex items-center gap-1.5 text-white/60 hover:text-white text-xs"
                         data-testid="upload-clear-btn"
@@ -355,6 +412,7 @@ export function CreatePartyView({
                     value={path}
                     onChange={(e) => {
                       setPath(e.target.value);
+                      setSourceError(null);
                       setStatus("idle");
                     }}
                     placeholder="/Users/you/Movies/Inception.mkv"
@@ -570,6 +628,7 @@ export function CreatePartyView({
             >
               <AlertCircle className="w-4 h-4" />{" "}
               {error ??
+                sourceError ??
                 (selected === "stream"
                   ? "Choose an available provider, a supported mode, and its matching page URL."
                   : "Unsupported source. Try MP4, MKV or a direct URL.")}

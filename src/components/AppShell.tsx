@@ -707,6 +707,12 @@ export function AppShell() {
         onOpenHelp={() => {
           void openTailscaleSetup("PARTNER_HELP");
         }}
+        // Escape hatch (F4): reuse the canonical home path, which clears the
+        // join error, the MP-NET-TS-005 failure code and the pending invite —
+        // so leaving here cannot leave stale join state behind. Retrying
+        // still goes through the backend, so this never bypasses the
+        // Tailscale onboarding the join requires.
+        onCancel={goHome}
       />
     );
   }

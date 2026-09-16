@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  clearedJoinAttempt,
   createSingleFlight,
   isTailscaleReady,
   pollIntervalMs,
@@ -9,6 +10,53 @@ import {
   TAILSCALE_POLL_INTERVAL_READY_MS,
   TAILSCALE_POLL_INTERVAL_SETUP_MS,
 } from "./tailscaleOnboarding";
+
+describe("Partner Connect escape path (F4)", () => {
+  it("gates the screen on MP-NET-TS-005 only", () => {
+    expect(shouldShowPartnerConnectView("MP-NET-TS-005")).toBe(true);
+    expect(shouldShowPartnerConnectView(null)).toBe(false);
+    for (const other of [
+      "MP-NET-TS-001",
+      "MP-NET-TS-003",
+      "MP-ROOM-001",
+      "MP-NET-003",
+    ]) {
+      expect(shouldShowPartnerConnectView(other)).toBe(false);
+    }
+  });
+
+  it("escaping clears the gate, so the screen cannot re-render", () => {
+    // The screen replaces the whole app while this code is set; the escape
+    // path clears it, which is what actually returns the user to Home.
+    expect(shouldShowPartnerConnectView(clearedJoinAttempt.joinFailureCode)).toBe(
+      false,
+    );
+  });
+
+  it("clears every stale join value, not just the failure code", () => {
+    // A surviving error message or pending invite would leak into the next
+    // join attempt, so the reset must cover all three.
+    expect(clearedJoinAttempt.joinError).toBeNull();
+    expect(clearedJoinAttempt.joinFailureCode).toBeNull();
+    expect(clearedJoinAttempt.pendingInvite).toBe("");
+  });
+
+  it("never bypasses Tailscale onboarding", () => {
+    // Cancelling only resets the join attempt. Readiness still comes from the
+    // live Tailscale state, so an unusable device keeps seeing the setup gate
+    // instead of being waved through to Home.
+    for (const state of [
+      "NOT_INSTALLED",
+      "DAEMON_UNAVAILABLE",
+      "NEEDS_LOGIN",
+      "STOPPED",
+      "NO_USABLE_ADDRESS",
+    ] as const) {
+      expect(isTailscaleReady(state)).toBe(false);
+      expect(shouldShowTailscaleSetup(state)).toBe(true);
+    }
+  });
+});
 
 describe("isTailscaleReady", () => {
   it("returns true only for READY", () => {

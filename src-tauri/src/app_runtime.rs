@@ -29,7 +29,7 @@ use crate::{
         manifest::{build_manifest, MediaManifest},
         player::{
             presentation::PlayerPresentationStatus, LocalPlayer, PlayerError,
-            PlayerSnapshot as LibPlayerSnapshot,
+            PlayerSnapshot as LibPlayerSnapshot, PlayerState,
         },
         stream::range_server::RangeServerHandle,
         transfer::{transfer_progress, TransferProgress},
@@ -353,10 +353,34 @@ impl Default for PlayerSnapshot {
     }
 }
 
+/// Canonical wire name for a failed player.
+///
+/// The `PlayerState` enum variant is `Error`, so a plain `Debug`-and-uppercase
+/// rendering produces `"ERROR"` — while the diagnostic path, the failure
+/// watcher, both play gates, the Cinema UI and the provider overlay all
+/// speak `"PLAYER_ERROR"`. That split meant the event loop could overwrite a
+/// diagnostic error with `"ERROR"` and every consumer would silently miss a
+/// real playback failure (F33).
+///
+/// The mismatch is removed at the single producer instead of teaching every
+/// consumer two spellings: `player_state_wire_name` is the only place a
+/// player state becomes a string.
+pub const PLAYER_STATE_ERROR: &str = "PLAYER_ERROR";
+
+/// Wire name for a player state. Every variant keeps its `Debug` form except
+/// `Error`, which uses [`PLAYER_STATE_ERROR`] so the failure state reads the
+/// same no matter which producer wrote it last.
+fn player_state_wire_name(state: &PlayerState) -> String {
+    match state {
+        PlayerState::Error => PLAYER_STATE_ERROR.to_string(),
+        other => format!("{other:?}").to_ascii_uppercase(),
+    }
+}
+
 impl From<&LibPlayerSnapshot> for PlayerSnapshot {
     fn from(snap: &LibPlayerSnapshot) -> Self {
         Self {
-            state: format!("{:?}", snap.state).to_ascii_uppercase(),
+            state: player_state_wire_name(&snap.state),
             position_ms: snap.position_ms,
             duration_ms: snap.duration_ms,
             volume: snap.volume,
@@ -377,6 +401,26 @@ impl PlayerSnapshot {
         let mut output = Self::from(&snapshot);
         output.presentation = presentation;
         output
+    }
+
+    /// Adopt a freshly observed player snapshot, keeping a previously
+    /// recorded failure diagnostic when the new observation carries none.
+    ///
+    /// [`Self::set_player_diagnostic_error`] records the stable Movie Party
+    /// code (e.g. `MP-MEDIA-001`) for failures libmpv reports message-less.
+    /// The 200 ms event loop re-reads the player on every tick, so without
+    /// this the diagnostic would be wiped on the very next tick — and the
+    /// failure watcher requires that exact message to fire recovery (F33).
+    fn observe(&mut self, observed: Self) {
+        let carried_message = std::mem::take(&mut self.error_message);
+        let keep_diagnostic = observed.error_message.is_none()
+            && observed.state == PLAYER_STATE_ERROR
+            && self.state == PLAYER_STATE_ERROR
+            && carried_message.is_some();
+        *self = observed;
+        if keep_diagnostic {
+            self.error_message = carried_message;
+        }
     }
 }
 
@@ -920,8 +964,7 @@ impl AppRuntime {
             // earlier command must not outlive this attempt.
             state.error = None;
             if trimmed.is_empty() || trimmed.chars().count() > 40 {
-                state.error =
-                    Some("MP-ID-003 display name must be 1-40 characters".to_string());
+                state.error = Some("MP-ID-003 display name must be 1-40 characters".to_string());
                 sync_room_snapshot(&mut state);
                 return snapshot_from_state(&state);
             }
@@ -930,9 +973,8 @@ impl AppRuntime {
                 return snapshot_from_state(&state);
             }
             let Some(db) = state.db.clone() else {
-                state.error = Some(
-                    "MP-STORE-002 database is unavailable to save the name".to_string(),
-                );
+                state.error =
+                    Some("MP-STORE-002 database is unavailable to save the name".to_string());
                 sync_room_snapshot(&mut state);
                 return snapshot_from_state(&state);
             };
@@ -1583,7 +1625,7 @@ impl AppRuntime {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 let should_fire = {
                     let state = inner.lock();
-                    if state.player_snapshot.state != "PLAYER_ERROR" {
+                    if state.player_snapshot.state != PLAYER_STATE_ERROR {
                         consecutive_failures = 0;
                         continue;
                     }
@@ -2387,12 +2429,28 @@ impl AppRuntime {
             .ok_or_else(|| "MP-MEDIA-002 cache root not initialised".to_string())
     }
 
+    /// Resolve a media id to its cache directory, refusing anything that is
+    /// not a direct child of the cache root.
+    ///
+    /// `Path::starts_with` is a *component-prefix* test, not a containment
+    /// test: it does not normalise `..`, so `root.join("../../evil")` passed
+    /// the old guard even though it escapes the root entirely (F45). Two
+    /// independent checks now stand in for it — the id must be a single safe
+    /// path component, and the resolved path's parent must be the root.
     fn cache_dir_for(&self, media_id: &str) -> Result<PathBuf, String> {
         let root = self.cache_root()?;
+
+        if !crate::media::manifest::is_safe_media_id(media_id) {
+            return Err("MP-MEDIA-002 unsafe media id".to_string());
+        }
+
         let dir = root.join(media_id);
-        if !dir.starts_with(&root) {
+        // Belt and braces: `is_safe_media_id` already forbids separators and
+        // `..`, so a direct-child check cannot be satisfied by a traversal.
+        if dir.parent() != Some(root.as_path()) {
             return Err("MP-MEDIA-002 unsafe cache path".to_string());
         }
+
         Ok(dir)
     }
 
@@ -4589,7 +4647,7 @@ impl AppRuntime {
             // (e.g. the native surface attach failed because libmpv could
             // not be loaded). A player error here is sticky until the media
             // is re-opened, so the host cannot talk its way into PLAYING.
-            if state.player_snapshot.state == "PLAYER_ERROR"
+            if state.player_snapshot.state == PLAYER_STATE_ERROR
                 && state
                     .player_snapshot
                     .error_message
@@ -4681,7 +4739,7 @@ impl AppRuntime {
                 sync_room_snapshot(&mut state);
                 return snapshot_from_state(&state);
             }
-            if state.player_snapshot.state == "PLAYER_ERROR"
+            if state.player_snapshot.state == PLAYER_STATE_ERROR
                 && state
                     .player_snapshot
                     .error_message
@@ -5411,7 +5469,7 @@ impl AppRuntime {
     }
 
     fn set_player_diagnostic_error(state: &mut AppRuntimeState, message: String) {
-        state.player_snapshot.state = "PLAYER_ERROR".to_string();
+        state.player_snapshot.state = PLAYER_STATE_ERROR.to_string();
         state.player_snapshot.error_message = Some(message);
     }
 
@@ -5483,7 +5541,9 @@ impl AppRuntime {
                     let mut buffer_transition = None;
                     let mut correction = None;
                     let mut state = inner.lock();
-                    state.player_snapshot = PlayerSnapshot::from_parts(snap.clone(), presentation);
+                    state
+                        .player_snapshot
+                        .observe(PlayerSnapshot::from_parts(snap.clone(), presentation));
                     last_position = snap.position_ms;
                     last_state_name = format!("{:?}", snap.state);
                     // libmpv's buffering value is authoritative when present.
@@ -7254,7 +7314,8 @@ fn apply_recovery_to_state(state: &mut AppRuntimeState, event: FailureEvent, pla
 mod tests {
     use super::{
         adaptive_preload_deadline, project_host_mono_to_wall_ms, reconnect_failure,
-        should_notify_preload_wait, sync_room_snapshot, AppRuntime, AppSnapshot, ReconnectFailure,
+        should_notify_preload_wait, sync_room_snapshot, AppRuntime, AppSnapshot, LibPlayerSnapshot,
+        PlayerSnapshot, PlayerState, ReconnectFailure, PLAYER_STATE_ERROR,
     };
     use crate::call::{CallSignal, CallSignalType};
     use crate::network::quic::monotonic_us;
@@ -7262,6 +7323,7 @@ mod tests {
     use crate::resilience::{FailureEvent, RecoveryAction};
     use crate::room::MoviePartyInvite;
     use crate::sync::state_machine::RoomState;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tokio::sync::Mutex;
@@ -8238,6 +8300,256 @@ mod tests {
             snapshot.player.error_message.as_deref(),
             Some("MP-MEDIA-006 simulated player failure")
         );
+    }
+
+    // ── F33 regression suite: one canonical player failure state ─────────
+    //
+    // The event loop rendered `PlayerState::Error` as `"ERROR"` while the
+    // diagnostic path, the failure watcher, both play gates, CinemaView and
+    // ProviderStatusOverlay all keyed on `"PLAYER_ERROR"`. Every consumer
+    // therefore missed real playback failures.
+
+    /// A lib player snapshot in a chosen state, with everything else inert.
+    fn lib_player_snapshot(state: PlayerState) -> LibPlayerSnapshot {
+        LibPlayerSnapshot {
+            state,
+            position_ms: 0,
+            duration_ms: None,
+            volume: 1.0,
+            playback_rate: 1.0,
+            buffered_ahead_ms: None,
+            error_message: None,
+        }
+    }
+
+    /// Both producers of the failure state must agree on the spelling.
+    #[test]
+    fn f33_event_loop_and_diagnostic_producers_agree() {
+        let runtime = AppRuntime::new();
+
+        // Producer 1 — the 200 ms event loop, through `PlayerSnapshot::from`.
+        let from_event_loop = PlayerSnapshot::from(&lib_player_snapshot(PlayerState::Error));
+
+        // Producer 2 — the diagnostic setter used by the load/command paths.
+        let mut state = runtime.lock();
+        AppRuntime::set_player_diagnostic_error(
+            &mut state,
+            "MP-MEDIA-001 libmpv is unavailable".to_string(),
+        );
+        let from_diagnostic = state.player_snapshot.state.clone();
+
+        assert_eq!(
+            from_event_loop.state, PLAYER_STATE_ERROR,
+            "the event loop must emit the canonical failure state"
+        );
+        assert_eq!(from_diagnostic, PLAYER_STATE_ERROR);
+        assert_eq!(
+            from_event_loop.state, from_diagnostic,
+            "the two producers must not disagree on the failure spelling"
+        );
+    }
+
+    /// Only `Error` is remapped — every other state keeps its wire name.
+    #[test]
+    fn f33_other_player_states_keep_their_wire_names() {
+        let expected = [
+            (PlayerState::Stopped, "STOPPED"),
+            (PlayerState::Ready, "READY"),
+            (PlayerState::Playing, "PLAYING"),
+            (PlayerState::Paused, "PAUSED"),
+            (PlayerState::Buffering, "BUFFERING"),
+            (PlayerState::Seeking, "SEEKING"),
+            (PlayerState::Error, PLAYER_STATE_ERROR),
+        ];
+        for (state, wire) in expected {
+            assert_eq!(
+                PlayerSnapshot::from(&lib_player_snapshot(state)).state,
+                wire,
+                "{state:?} must serialize as {wire}"
+            );
+        }
+    }
+
+    /// A failure observed by the event loop must satisfy every consumer:
+    /// the play gate blocks, the diagnostic survives, and the failure
+    /// watcher's gate (state AND message) holds.
+    #[test]
+    fn f33_event_loop_failure_reaches_every_consumer() {
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            use crate::sync::consensus::ParticipantReadiness;
+            let coord_room_state = {
+                let mut coord = state
+                    .sync_coordinator
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                coord.host_ready(ParticipantReadiness::ready(5_000));
+                coord.guest_ready(ParticipantReadiness::ready(5_000));
+                coord.update_readiness_consensus(5_000);
+                coord.room_state
+            };
+            state.room_state = coord_room_state;
+
+            // The load path records the stable diagnostic…
+            AppRuntime::set_player_diagnostic_error(
+                &mut state,
+                "MP-MEDIA-001 libmpv is unavailable".to_string(),
+            );
+            // …then the event loop observes the same failure, message-less.
+            state
+                .player_snapshot
+                .observe(PlayerSnapshot::from(&lib_player_snapshot(
+                    PlayerState::Error,
+                )));
+            sync_room_snapshot(&mut state);
+        }
+
+        // The play gate must block: `host_play` reads the canonical state.
+        let snapshot = runtime.host_play();
+        assert_ne!(
+            snapshot.sync.room_state, "PLAYING",
+            "the play gate must block a failed player"
+        );
+        assert_eq!(snapshot.player.state, PLAYER_STATE_ERROR);
+        assert!(
+            snapshot
+                .player
+                .error_message
+                .as_deref()
+                .is_some_and(|error| error.starts_with("MP-MEDIA-001")),
+            "the diagnostic must survive the event loop, or recovery never fires: {:?}",
+            snapshot.player.error_message
+        );
+    }
+
+    /// `observe` must not preserve a stale message once the player recovers.
+    #[test]
+    fn f33_recovery_clears_the_diagnostic() {
+        let mut snapshot = PlayerSnapshot::from(&lib_player_snapshot(PlayerState::Error));
+        snapshot.error_message = Some("MP-MEDIA-001 libmpv is unavailable".to_string());
+
+        snapshot.observe(PlayerSnapshot::from(&lib_player_snapshot(
+            PlayerState::Ready,
+        )));
+
+        assert_eq!(snapshot.state, "READY");
+        assert!(
+            snapshot.error_message.is_none(),
+            "a recovered player must not keep the old diagnostic: {:?}",
+            snapshot.error_message
+        );
+    }
+
+    // ── F45 regression suite: retention path containment ─────────────────
+    //
+    // `cache_dir_for` used `Path::starts_with`, a component-prefix test that
+    // does not normalise `..`, so every traversal payload below was accepted
+    // by the guard meant to reject it.
+
+    fn scratch_cache_root(tag: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("mp-{tag}-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
+    #[test]
+    fn f45_cache_dir_for_refuses_traversal_ids() {
+        let runtime = AppRuntime::new();
+        let root = scratch_cache_root("f45-traversal");
+        runtime.init_cache_root_for_test(root.clone());
+
+        for hostile in [
+            "..",
+            "../..",
+            "../../tmp/test",
+            "a/../../etc",
+            "/etc/passwd",
+            "a\\..\\b",
+            "",
+        ] {
+            let error = runtime
+                .cache_dir_for(hostile)
+                .expect_err(&format!("{hostile:?} must be refused"));
+            assert!(
+                error.contains("MP-MEDIA-002"),
+                "unexpected error for {hostile:?}: {error}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn f45_accepted_ids_resolve_to_a_direct_child_of_the_root() {
+        let runtime = AppRuntime::new();
+        let root = scratch_cache_root("f45-contained");
+        runtime.init_cache_root_for_test(root.clone());
+
+        for valid in ["media-abc123", "0123456789abcdef", "a"] {
+            let resolved = runtime.cache_dir_for(valid).expect("valid id");
+            // Assert on the RESULTING PATH, not on the input string.
+            assert_eq!(
+                resolved.parent(),
+                Some(root.as_path()),
+                "{valid} escaped the cache root: {}",
+                resolved.display()
+            );
+            assert!(
+                !resolved.to_string_lossy().contains(".."),
+                "{valid} produced a traversing path: {}",
+                resolved.display()
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn f45_retention_decision_refuses_a_non_child_directory() {
+        let root = scratch_cache_root("f45-retention");
+        // The resolved path a `..` payload used to produce.
+        let outside = root.join("..").join("mp-f45-outside");
+
+        let error = crate::storage::apply_retention_decision(
+            &root,
+            &outside,
+            &outside.join("data.bin"),
+            crate::storage::RetentionDecision::Remove,
+            None,
+        )
+        .expect_err("a directory outside the cache root must be refused");
+
+        assert!(
+            matches!(error, crate::storage::StorageError::UnsafeCachePath),
+            "unexpected error: {error}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn f45_retention_decision_still_allows_a_legitimate_cache_dir() {
+        let root = scratch_cache_root("f45-allow");
+        let dir = root.join("media-ok");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        let kept = crate::storage::apply_retention_decision(
+            &root,
+            &dir,
+            &dir.join("data.bin"),
+            crate::storage::RetentionDecision::KeepInMovieParty,
+            None,
+        )
+        .expect("a direct child of the cache root is legitimate");
+
+        assert_eq!(kept, Some(dir.clone()));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -9389,7 +9701,7 @@ mod tests {
         {
             let mut state = runtime.lock();
             // Simulate the sticky MP-MEDIA-001 player error the gate checks.
-            state.player_snapshot.state = "PLAYER_ERROR".to_string();
+            state.player_snapshot.state = PLAYER_STATE_ERROR.to_string();
             state.player_snapshot.error_message =
                 Some("MP-MEDIA-001 player unavailable".to_string());
             state.media = Some(crate::media::manifest::MediaManifest {
@@ -10393,17 +10705,11 @@ mod friends_tests {
                 .display_name,
             "Cinephile"
         );
-        assert_eq!(
-            runtime.lock().local_participant.display_name,
-            "Cinephile"
-        );
+        assert_eq!(runtime.lock().local_participant.display_name, "Cinephile");
 
         // Same device id + same public key: nothing rotated.
         assert_eq!(runtime.lock().local_participant.id, before.id);
-        assert_eq!(
-            runtime.inner.identity().public_key_base64(),
-            key_before
-        );
+        assert_eq!(runtime.inner.identity().public_key_base64(), key_before);
 
         // The stored identity row carries the new name and the same key.
         let stored = runtime
@@ -10456,10 +10762,7 @@ mod friends_tests {
 
         let snapshot = runtime.set_display_name(&current);
         assert!(snapshot.error.is_none());
-        assert_eq!(
-            runtime.lock().local_participant.display_name,
-            current
-        );
+        assert_eq!(runtime.lock().local_participant.display_name, current);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -700,7 +700,7 @@ export function CinemaView({
       window.removeEventListener("keydown", handleKeyDown);
       window.clearTimeout(noticeTimeout);
     };
-  }, [isGhostMode, isPrivacyMode, onSnapshot]);
+  }, [isGhostMode, isPrivacyMode, onSnapshot, toggleChatVisibility]);
 
   const sendMessage = (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();

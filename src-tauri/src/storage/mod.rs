@@ -36,6 +36,14 @@ pub enum StorageError {
     Io(#[from] std::io::Error),
     #[error("MP-MEDIA-002 SQLite error: {0}")]
     Sqlite(String),
+    /// The database on disk was written by a NEWER build than this one.
+    /// Surfaced instead of silently rewriting `user_version` backwards,
+    /// which would make a later upgrade re-run non-idempotent steps
+    /// against an already-advanced schema.
+    #[error(
+        "MP-STORE-004 database schema v{found} is newer than this build supports (v{supported})"
+    )]
+    SchemaTooNew { found: i32, supported: i32 },
 }
 
 pub fn prompt_for_media(
@@ -56,7 +64,11 @@ pub fn apply_retention_decision(
     decision: RetentionDecision,
     save_as_path: Option<&Path>,
 ) -> Result<Option<PathBuf>, StorageError> {
-    if !media_cache_dir.starts_with(cache_root) {
+    // `starts_with` is a component-prefix test, not containment: it does not
+    // normalise `..`, so a traversing path satisfied it. A media cache
+    // directory is always a DIRECT child of the cache root, so require
+    // exactly that instead (F45).
+    if media_cache_dir.parent() != Some(cache_root) {
         return Err(StorageError::UnsafeCachePath);
     }
 
@@ -72,6 +84,15 @@ pub fn apply_retention_decision(
             let destination = save_as_path.ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing Save As path")
             })?;
+            // The destination is user-chosen and may live anywhere, but it
+            // must name a file — a bare directory or empty path is not a
+            // usable Save As target.
+            if destination.file_name().is_none() {
+                return Err(StorageError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Save As path must name a file",
+                )));
+            }
             fs::copy(data_file, destination)?;
             Ok(Some(destination.to_path_buf()))
         }

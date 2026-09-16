@@ -214,42 +214,98 @@ impl MoviePartyDb {
         Ok(version)
     }
 
-    /// Run all pending migrations idempotently.
+    /// Run all pending migrations.
+    ///
+    /// Safety properties (F51 — the previous runner could brick a database
+    /// permanently, reproduced against a scratch DB):
+    ///
+    /// * **Atomic per step.** Each migration body *and* its `user_version`
+    ///   stamp commit together in one transaction. SQLite journals both DDL
+    ///   and the `user_version` header write, so an interrupt mid-step rolls
+    ///   the whole step back instead of leaving a half-applied schema.
+    /// * **Resumable.** The version is stamped per migration, so a crash
+    ///   during step N resumes at step N rather than replaying earlier ones.
+    /// * **Idempotent `ADD COLUMN`.** A database that was physically altered
+    ///   but still reports the old `user_version` — precisely the
+    ///   interrupted-F51 state — is detected via [`column_exists`] and
+    ///   resumed, instead of failing with `duplicate column name`.
+    /// * **Never downgraded.** A database written by a newer build keeps its
+    ///   version; we refuse to touch it rather than rewriting it backwards.
+    /// * **Errors are surfaced**, never swallowed.
     fn run_migrations(&self) -> Result<(), StorageError> {
         let conn = lock_mutex(&self.conn)?;
 
-        let current = conn
+        let current: i32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
             .unwrap_or(0);
 
-        if current < 1 {
-            conn.execute_batch(MIGRATION_001)
-                .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        if current > CURRENT_SCHEMA_VERSION {
+            return Err(StorageError::SchemaTooNew {
+                found: current,
+                supported: CURRENT_SCHEMA_VERSION,
+            });
         }
 
-        if current < 2 && !device_identity_has_key_label(&conn)? {
-            conn.execute_batch(MIGRATION_002)
-                .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        for version in (current + 1)..=CURRENT_SCHEMA_VERSION {
+            Self::apply_migration(&conn, version)?;
         }
 
-        if current < 3 {
-            conn.execute_batch(MIGRATION_003)
-                .map_err(|e| StorageError::Sqlite(e.to_string()))?;
-        }
-
-        if current < 4 {
-            conn.execute_batch(MIGRATION_004)
-                .map_err(|e| StorageError::Sqlite(e.to_string()))?;
-        }
-
-        if current < 5 {
-            conn.execute_batch(MIGRATION_005)
-                .map_err(|e| StorageError::Sqlite(e.to_string()))?;
-        }
-
-        conn.execute_batch(&format!("PRAGMA user_version={CURRENT_SCHEMA_VERSION};"))
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         Ok(())
+    }
+
+    /// Apply exactly one forward migration and stamp its version, atomically.
+    ///
+    /// On failure the transaction is rolled back so the next launch retries
+    /// this step from a known-good state, and the original error propagates.
+    fn apply_migration(conn: &Connection, version: i32) -> Result<(), StorageError> {
+        exec_sql(conn, "BEGIN IMMEDIATE")?;
+
+        let outcome = Self::apply_migration_body(conn, version)
+            .and_then(|()| exec_sql(conn, &format!("PRAGMA user_version={version};")));
+
+        match outcome {
+            Ok(()) => exec_sql(conn, "COMMIT"),
+            Err(error) => {
+                // Discard the rollback error: the migration error is the
+                // one that explains the failure.
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// The statements for a single migration version, without the version
+    /// stamp or transaction handling.
+    fn apply_migration_body(conn: &Connection, version: i32) -> Result<(), StorageError> {
+        match version {
+            1 => exec_sql(conn, MIGRATION_001),
+            2 => {
+                // The v1 schema declaration recorded `user_version = 1`
+                // without this column, so it is added only when genuinely
+                // absent (a fresh v1 table already carries it).
+                if column_exists(conn, "device_identity", "key_label")? {
+                    Ok(())
+                } else {
+                    exec_sql(conn, MIGRATION_002)
+                }
+            }
+            3 => exec_sql(conn, MIGRATION_003),
+            4 => exec_sql(conn, MIGRATION_004),
+            5 => {
+                // ADD COLUMN is not idempotent: guard it so an interrupted
+                // step (column present, version still 4) resumes cleanly.
+                if !column_exists(conn, "friends", "connection_state")? {
+                    exec_sql(conn, MIGRATION_005_ADD_COLUMN)?;
+                }
+                // The backfill must run even when the column was already
+                // present — that IS the interrupted state, where rows are
+                // still on the column default.
+                exec_sql(conn, MIGRATION_005_BACKFILL)
+            }
+            other => Err(StorageError::Sqlite(format!(
+                "MP-STORE-003 unknown migration version {other}"
+            ))),
+        }
     }
 
     // ── Device Identity ────────────────────────────────────────────────────
@@ -871,16 +927,33 @@ impl MoviePartyDb {
     }
 }
 
-fn device_identity_has_key_label(conn: &Connection) -> Result<bool, StorageError> {
+/// Run one SQL batch, mapping rusqlite failures into [`StorageError`].
+///
+/// The `sql` is always an internal `MIGRATION_*` literal — never user input.
+fn exec_sql(conn: &Connection, sql: &str) -> Result<(), StorageError> {
+    conn.execute_batch(sql)
+        .map_err(|e| StorageError::Sqlite(e.to_string()))
+}
+
+/// True when `table` has a column named `column`.
+///
+/// Lets the runner make `ALTER TABLE ... ADD COLUMN` steps idempotent: a
+/// database interrupted between the `ALTER` and the `user_version` stamp
+/// still reports the old version, so the step is re-entered — and without
+/// this check it would die on `duplicate column name` (F51).
+///
+/// `table`/`column` are always internal literals, never user input, so the
+/// interpolated `PRAGMA table_info` cannot be influenced from outside.
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, StorageError> {
     let mut statement = conn
-        .prepare("PRAGMA table_info(device_identity)")
+        .prepare(&format!("PRAGMA table_info({table})"))
         .map_err(|e| StorageError::Sqlite(e.to_string()))?;
     let columns = statement
         .query_map([], |row| row.get::<_, String>(1))
         .map_err(|e| StorageError::Sqlite(e.to_string()))?;
 
-    for column in columns {
-        if column.map_err(|e| StorageError::Sqlite(e.to_string()))? == "key_label" {
+    for name in columns {
+        if name.map_err(|e| StorageError::Sqlite(e.to_string()))? == column {
             return Ok(true);
         }
     }
@@ -987,10 +1060,28 @@ CREATE TABLE IF NOT EXISTS friends (
 /// ONLINE/OFFLINE is derived at read time from the live status and is
 /// never persisted — it is an observation, not an identity fact.
 /// `pending` is a transient label meaning "INVITED and not yet joined".
-const MIGRATION_005: &str = "
+///
+/// The step is split in two so the runner can make the `ADD COLUMN` half
+/// conditional: `ALTER TABLE ... ADD COLUMN` is NOT idempotent in SQLite,
+/// and re-running it is exactly what bricked databases (F51 —
+/// `duplicate column name: connection_state`).
+const MIGRATION_005_ADD_COLUMN: &str = "
 ALTER TABLE friends ADD COLUMN connection_state TEXT NOT NULL DEFAULT 'INVITED';
-UPDATE friends SET connection_state = 'TAILSCALE_JOINED' WHERE ip IS NOT NULL;
-UPDATE friends SET connection_state = 'MOVIE_PARTY_VERIFIED' WHERE last_verified_at_ms IS NOT NULL;
+";
+
+/// v5 (part 2): map v4 rows onto the new states.
+///
+/// Idempotent by construction, which matters because this runs again on a
+/// database that was physically altered but still reports `user_version`
+/// 4 (the interrupted-F51 state). The first statement only lifts rows
+/// still sitting on the column default, so a resumed run can never demote
+/// a row that a later code path already promoted; the second only ever
+/// promotes.
+const MIGRATION_005_BACKFILL: &str = "
+UPDATE friends SET connection_state = 'TAILSCALE_JOINED'
+    WHERE connection_state = 'INVITED' AND ip IS NOT NULL;
+UPDATE friends SET connection_state = 'MOVIE_PARTY_VERIFIED'
+    WHERE last_verified_at_ms IS NOT NULL;
 ";
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -1176,6 +1267,268 @@ mod tests {
         let _ = std::fs::remove_dir(&dir);
     }
 
+    // ── F51 regression suite: migration interruption safety ──────────────
+    //
+    // The previous runner stamped `user_version` only after all batches had
+    // run, and MIGRATION_005's `ALTER TABLE ADD COLUMN` is not idempotent.
+    // An interrupt between the two left a database that failed on EVERY
+    // subsequent launch with `duplicate column name: connection_state`.
+
+    /// Scratch v4 friends database with three rows covering every backfill
+    /// branch: verified, joined-but-unverified, and bare/unobserved.
+    fn scratch_v4_friends_db(tag: &str) -> (PathBuf, PathBuf) {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        let dir =
+            std::env::temp_dir().join(format!("mp-f51-{tag}-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let db_path = dir.join("movie_party.db");
+        {
+            let conn = Connection::open(&db_path).expect("open raw");
+            conn.execute_batch(MIGRATION_001).expect("v1 schema");
+            conn.execute_batch(MIGRATION_003).expect("v3 providers");
+            conn.execute_batch(MIGRATION_004).expect("v4 friends");
+            conn.execute_batch(
+                "INSERT INTO friends (peer_key, display_name, ip, added_at_ms, last_verified_at_ms, last_path, last_latency_ms)
+                 VALUES
+                    ('verified.tailnet.ts.net.', 'V', '100.64.0.1', 1, 500, 'direct', 12),
+                    ('joined.tailnet.ts.net.',   'J', '100.64.0.2', 2, NULL, NULL, NULL),
+                    ('bare.tailnet.ts.net.',     'B', NULL, 3, NULL, NULL, NULL);",
+            )
+            .expect("seed v4 friends");
+            conn.execute_batch("PRAGMA user_version=4;")
+                .expect("stamp v4");
+        }
+        (dir, db_path)
+    }
+
+    fn friend_state(friends: &[StoredFriend], peer_key: &str) -> FriendConnectionState {
+        friends
+            .iter()
+            .find(|friend| friend.peer_key == peer_key)
+            .unwrap_or_else(|| panic!("missing {peer_key}"))
+            .connection_state
+    }
+
+    fn raw_user_version(db_path: &Path) -> i32 {
+        let conn = Connection::open(db_path).expect("open raw");
+        conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+            .expect("user_version")
+    }
+
+    /// A. Normal v4 → v5 upgrade.
+    #[test]
+    fn f51_a_normal_v4_to_v5_upgrade() {
+        let (dir, db_path) = scratch_v4_friends_db("a");
+        let db = MoviePartyDb::open(&db_path).expect("v4 -> v5 upgrade");
+
+        assert_eq!(
+            db.schema_version().expect("version"),
+            CURRENT_SCHEMA_VERSION
+        );
+        let friends = db.list_friends().expect("list");
+        assert_eq!(friends.len(), 3);
+        assert_eq!(
+            friend_state(&friends, "verified.tailnet.ts.net."),
+            FriendConnectionState::MoviePartyVerified
+        );
+        assert_eq!(
+            friend_state(&friends, "joined.tailnet.ts.net."),
+            FriendConnectionState::TailscaleJoined
+        );
+        assert_eq!(
+            friend_state(&friends, "bare.tailnet.ts.net."),
+            FriendConnectionState::Invited
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// B. Schema already fully upgraded, but `user_version` still at 4.
+    #[test]
+    fn f51_b_already_upgraded_schema_with_stale_user_version() {
+        let (dir, db_path) = scratch_v4_friends_db("b");
+        {
+            let conn = Connection::open(&db_path).expect("open raw");
+            // ALTER *and* backfill completed; the process died before the
+            // version stamp was written.
+            conn.execute_batch(MIGRATION_005_ADD_COLUMN).expect("alter");
+            conn.execute_batch(MIGRATION_005_BACKFILL)
+                .expect("backfill");
+        }
+        assert_eq!(raw_user_version(&db_path), 4, "version deliberately stale");
+
+        let db = MoviePartyDb::open(&db_path).expect("stale-version upgrade must succeed");
+        assert_eq!(
+            db.schema_version().expect("version"),
+            CURRENT_SCHEMA_VERSION
+        );
+
+        let friends = db.list_friends().expect("list");
+        assert_eq!(
+            friend_state(&friends, "verified.tailnet.ts.net."),
+            FriendConnectionState::MoviePartyVerified,
+            "a re-run must not demote an already-verified friend"
+        );
+        assert_eq!(
+            friend_state(&friends, "joined.tailnet.ts.net."),
+            FriendConnectionState::TailscaleJoined
+        );
+        assert_eq!(
+            friend_state(&friends, "bare.tailnet.ts.net."),
+            FriendConnectionState::Invited
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// C. Repeated migration execution.
+    #[test]
+    fn f51_c_repeated_migration_execution() {
+        let (dir, db_path) = scratch_v4_friends_db("c");
+        for round in 0..3 {
+            let db = MoviePartyDb::open(&db_path)
+                .unwrap_or_else(|e| panic!("round {round} failed: {e}"));
+            assert_eq!(
+                db.schema_version().expect("version"),
+                CURRENT_SCHEMA_VERSION
+            );
+        }
+        let db = MoviePartyDb::open(&db_path).expect("final open");
+        assert_eq!(
+            db.list_friends().expect("list").len(),
+            3,
+            "repeated opens must not duplicate rows"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D. Interrupted migration — the exact reproduced F51 scenario.
+    ///
+    /// Before the fix this failed forever with
+    /// `duplicate column name: connection_state`.
+    #[test]
+    fn f51_d_interrupted_migration_does_not_brick() {
+        let (dir, db_path) = scratch_v4_friends_db("d");
+        {
+            let conn = Connection::open(&db_path).expect("open raw");
+            // The ALTER committed, then the process died: the column is
+            // present, the rows are still on the column default, and the
+            // version still says 4.
+            conn.execute_batch(MIGRATION_005_ADD_COLUMN).expect("alter");
+        }
+        assert_eq!(raw_user_version(&db_path), 4);
+
+        let db = MoviePartyDb::open(&db_path)
+            .expect("F51 regression: the interrupted upgrade must recover, not brick");
+
+        assert_eq!(
+            db.schema_version().expect("version"),
+            CURRENT_SCHEMA_VERSION
+        );
+        let friends = db.list_friends().expect("list");
+        assert_eq!(friends.len(), 3);
+        assert_eq!(
+            friend_state(&friends, "verified.tailnet.ts.net."),
+            FriendConnectionState::MoviePartyVerified,
+            "the interrupted backfill is completed on resume"
+        );
+        assert_eq!(
+            friend_state(&friends, "joined.tailnet.ts.net."),
+            FriendConnectionState::TailscaleJoined,
+            "the interrupted backfill is completed on resume"
+        );
+        assert_eq!(
+            friend_state(&friends, "bare.tailnet.ts.net."),
+            FriendConnectionState::Invited
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E. Opening an existing v5 database is a no-op that preserves data.
+    #[test]
+    fn f51_e_opening_an_existing_v5_database() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("mp-f51-e-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let db_path = dir.join("movie_party.db");
+
+        {
+            let db = MoviePartyDb::open(&db_path).expect("create v5");
+            assert_eq!(
+                db.schema_version().expect("version"),
+                CURRENT_SCHEMA_VERSION
+            );
+            db.upsert_friend(&StoredFriend {
+                peer_key: "keep.tailnet.ts.net.".to_string(),
+                display_name: "Keep".to_string(),
+                ip: Some("100.64.0.7".to_string()),
+                added_at_ms: 42,
+                last_verified_at_ms: Some(99),
+                last_path: Some("direct".to_string()),
+                last_latency_ms: Some(7),
+                connection_state: FriendConnectionState::MoviePartyVerified,
+            })
+            .expect("insert");
+        }
+
+        let db = MoviePartyDb::open(&db_path).expect("reopen existing v5");
+        assert_eq!(
+            db.schema_version().expect("version"),
+            CURRENT_SCHEMA_VERSION
+        );
+        let friends = db.list_friends().expect("list");
+        assert_eq!(friends.len(), 1, "reopening must not disturb existing rows");
+        assert_eq!(friends[0].display_name, "Keep");
+        assert_eq!(
+            friends[0].connection_state,
+            FriendConnectionState::MoviePartyVerified
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F. A database from a NEWER build is refused, not downgraded.
+    #[test]
+    fn f51_f_newer_schema_version_is_refused_not_downgraded() {
+        let (dir, db_path) = scratch_v4_friends_db("f");
+        {
+            let conn = Connection::open(&db_path).expect("open raw");
+            conn.execute_batch("PRAGMA user_version=99;")
+                .expect("simulate a newer build");
+        }
+
+        let error = match MoviePartyDb::open(&db_path) {
+            Ok(_) => panic!("a newer schema must be refused, never silently downgraded"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                error,
+                StorageError::SchemaTooNew {
+                    found: 99,
+                    supported: CURRENT_SCHEMA_VERSION
+                }
+            ),
+            "unexpected error: {error}"
+        );
+
+        assert_eq!(
+            raw_user_version(&db_path),
+            99,
+            "the newer build's version must be left untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn friend_state_transitions_never_demote_verification() {
         let db = MoviePartyDb::open_in_memory().expect("open");
@@ -1254,7 +1607,7 @@ mod tests {
         db.run_migrations().expect("upgrade");
 
         let conn = lock_mutex(&db.conn).expect("lock");
-        let has_key_label = device_identity_has_key_label(&conn).expect("columns");
+        let has_key_label = column_exists(&conn, "device_identity", "key_label").expect("columns");
         assert!(has_key_label);
         drop(conn);
         assert_eq!(
