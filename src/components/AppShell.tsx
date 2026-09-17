@@ -53,12 +53,8 @@ import { listRecentMedia, localStorageOrNull } from "../schedule/recentMedia";
 import { LoadingState } from "./LoadingState";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { handleFailureEvent } from "../backend/appRuntime";
-import {
-  createSingleFlight,
-  isTailscaleReady,
-  pollIntervalMs,
-  shouldShowPartnerConnectView,
-} from "../backend/tailscaleOnboarding";
+import { createSingleFlight, isTailscaleReady, pollIntervalMs } from "../backend/tailscaleOnboarding";
+import { resolveAppScreen } from "./appRouting";
 
 type LocalScreen = "CREATE_PARTY" | "SETTINGS" | "SCHEDULE" | "FRIENDS" | "FIRST_RUN" | null;
 
@@ -682,12 +678,29 @@ export function AppShell() {
     });
   };
 
+  /**
+   * F55: the routing decision lives in `resolveAppScreen`, a pure function
+   * with its own tests. The branches below keep their original order and
+   * bodies — only the conditions read from the resolved screen — so this is a
+   * behaviour-preserving extraction, not a rewrite of the shell.
+   */
+  const appScreen = resolveAppScreen({
+    hasSnapshot: snapshot != null,
+    secondsWaiting,
+    hasTailscaleReadiness: tailscaleReadiness != null,
+    tailscaleReady,
+    joinFailureCode,
+    localScreen,
+    devScreen,
+    closePromptVisible: closePrompt.visible,
+    backendScreen: snapshot?.screen ?? "",
+  });
+
   if (!snapshot) {
     // Boot escalation: honest copy instead of an eternal spinner. The
     // runtime normally answers in well under a second; anything past
     // 8 s is a real fault the user should know about, not sit through.
-    const bootStage = secondsWaiting >= 8 ? "slow" : "starting";
-    return bootStage === "slow" ? (
+    return appScreen === "BOOT_SLOW" ? (
       <LoadingState
         title="Movie Party is taking longer than usual"
         message="The local runtime has not responded yet. If this screen stays for more than a minute, restart the app."
@@ -706,7 +719,7 @@ export function AppShell() {
     );
   }
 
-  if (!tailscaleReady) {
+  if (appScreen === "TAILSCALE_SETUP") {
     return (
       <TailscaleSetupView
         readiness={tailscaleReadiness}
@@ -721,7 +734,7 @@ export function AppShell() {
     );
   }
 
-  if (shouldShowPartnerConnectView(joinFailureCode)) {
+  if (appScreen === "PARTNER_CONNECT") {
     return (
       <PartnerConnectView
         isRetrying={isJoining}
@@ -743,7 +756,7 @@ export function AppShell() {
     );
   }
 
-  if (devScreen === "HOME")
+  if (appScreen === "HOME")
     return (
       <>
         <HomeView
@@ -762,12 +775,12 @@ export function AppShell() {
     );
 
   // (§10/§11): First Run — one-time welcome + truthful checks.
-  if (localScreen === "FIRST_RUN") {
+  if (appScreen === "FIRST_RUN") {
     return <FirstRunView onContinue={completeFirstRun} />;
   }
 
   // (§55–§62): Settings — always reachable from the shell.
-  if (localScreen === "SETTINGS") {
+  if (appScreen === "SETTINGS") {
     return (
       <>
         <SettingsView
@@ -781,7 +794,7 @@ export function AppShell() {
   }
 
   // (§18/§19): Schedule form.
-  if (localScreen === "SCHEDULE") {
+  if (appScreen === "SCHEDULE") {
     return (
       <>
         <ScheduleView
@@ -801,7 +814,7 @@ export function AppShell() {
   }
 
   // Friends — the invite-link surface (share a QR, friends land here).
-  if (localScreen === "FRIENDS") {
+  if (appScreen === "FRIENDS") {
     return (
       <>
         <FriendsView
@@ -819,7 +832,7 @@ export function AppShell() {
   }
 
   // §69: window-close-during-party — host decides End-For-Everyone vs Leave.
-  if (closePrompt.visible) {
+  if (appScreen === "CLOSE_PROMPT") {
     return (
       <EndPartyConfirmView
         // F6: the role was already tracked here but never passed through, so a
@@ -838,7 +851,7 @@ export function AppShell() {
     );
   }
 
-  if (localScreen === "CREATE_PARTY" || devScreen === "CREATE") {
+  if (appScreen === "CREATE_PARTY") {
     return (
       <CreatePartyView
         isCreating={isCreating}
@@ -854,7 +867,7 @@ export function AppShell() {
     );
   }
 
-  if (snapshot.screen === "JOIN_PARTY" || devScreen === "JOIN") {
+  if (appScreen === "JOIN_PARTY") {
     return (
       <JoinPartyView
         isJoining={isJoining}
@@ -866,7 +879,7 @@ export function AppShell() {
     );
   }
 
-  if (snapshot.screen === "LOBBY" || devScreen === "LOBBY") {
+  if (appScreen === "LOBBY") {
     return (
       <>
         <LobbyView
@@ -896,7 +909,7 @@ export function AppShell() {
     );
   }
 
-  if (snapshot.screen === "READY_CHECK" || devScreen === "READY") {
+  if (appScreen === "READY_CHECK") {
     return (
       <ReadyCheckView
         snapshot={snapshot}
@@ -913,7 +926,7 @@ export function AppShell() {
     );
   }
 
-  if (snapshot.screen === "CINEMA" || devScreen === "CINEMA") {
+  if (appScreen === "CINEMA") {
     return (
       <CinemaView
         snapshot={snapshot}
@@ -925,7 +938,7 @@ export function AppShell() {
     );
   }
 
-  if (snapshot.screen === "PARTY_END_CONFIRM") {
+  if (appScreen === "END_PARTY_CONFIRM") {
     return (
       <EndPartyConfirmView
         isHost={snapshot.room.role === "HOST"}
