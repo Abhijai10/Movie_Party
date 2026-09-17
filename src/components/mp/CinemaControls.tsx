@@ -13,6 +13,19 @@ import {
   LogOut,
 } from "lucide-react";
 
+/**
+ * Interaction class for the cinema dock's interactive container (F5).
+ *
+ * The dock hides by fading to `opacity-0`, which does NOT stop hit-testing.
+ * The outer wrapper carries `pointer-events-none`, but the interactive
+ * container inside it used to stay `pointer-events-auto`, so an invisible dock
+ * kept swallowing clicks across the bottom of the screen — including Leave.
+ * Interactivity must therefore follow visibility exactly.
+ */
+export function cinemaDockInteractionClass(visible: boolean): string {
+  return visible ? "pointer-events-auto" : "pointer-events-none";
+}
+
 type CinemaControlsProps = {
   visible: boolean;
   isPlaying: boolean;
@@ -91,7 +104,14 @@ export function CinemaControls({
         }}
       />
 
-      <div className="relative pointer-events-auto px-10 pb-8 pt-6">
+      <div
+        // F5: the wrapper is `pointer-events-none`, but this container used to
+        // stay `pointer-events-auto`, so a visually hidden dock still swallowed
+        // clicks — including Leave. Interactivity now follows visibility, and
+        // the hidden dock leaves the accessibility tree with it.
+        aria-hidden={!visible}
+        className={`relative px-10 pb-8 pt-6 ${cinemaDockInteractionClass(visible)}`}
+      >
         <div className="relative group cursor-pointer" data-testid="cinema-progress">
           <div className="h-[3px] rounded-full bg-white/12">
             <div

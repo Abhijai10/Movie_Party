@@ -27,8 +27,9 @@ import type { CallTileSessionState } from "../overlays/callTileState";
 import { BufferingOverlay } from "../overlays/BufferingOverlay";
 import { ProviderStatusOverlay } from "../overlays/ProviderStatusOverlay";
 import { FloatingReactions, ReactionTray } from "../overlays/ReactionTray";
-import { ReconnectOverlay } from "../overlays/ReconnectOverlay";
+import { ReconnectOverlay, reconnectLatchAfter } from "../overlays/ReconnectOverlay";
 import {
+  backToLobby,
   continueWithoutGuest,
   createLocalParty,
   pickMediaFile,
@@ -69,6 +70,13 @@ const privacyNoticeMs = 2_200;
 const ghostNoticeMs = 800;
 /** camera-degradation notice duration (movie-first policy). */
 const cameraNoticeMs = 3_200;
+/**
+ * F30: bounded retry for a failed call start. One automatic retry covers the
+ * transient cases (a device briefly busy, a dismissed-then-granted prompt)
+ * without looping against a permanent one such as denied permission.
+ */
+const CALL_START_MAX_RETRIES = 1;
+const CALL_START_RETRY_DELAY_MS = 1_500;
 /**
  * The floating call/chat tile must never cover the control dock's final
  * action row (Leave / play / chat buttons at the bottom of the screen).
@@ -156,6 +164,19 @@ export function CinemaView({
    * session rather than being skipped as stale.
    */
   const callSessionStartingRef = useRef(false);
+  /**
+   * F30: a transient start failure must not permanently disable the call.
+   *
+   * `callSessionKey` gates the start effect (`=== nextKey` returns early), and
+   * the failure path used to leave it set — so one getUserMedia/start error
+   * disabled the call for that (mode, role, privacy) combination until
+   * something else happened to change the key, with no retry and no way out.
+   * The key is now cleared on failure and ONE bounded retry is scheduled, so
+   * recovery is deterministic and cannot loop against a permanent failure
+   * (e.g. permission denied).
+   */
+  const [callRetryNonce, setCallRetryNonce] = useState(0);
+  const callRetryCountRef = useRef(0);
   const controlsTimer = useRef<number | null>(null);
   const previousChatLength = useRef(snapshot.chat.length);
   const movieFrameRef = useRef<HTMLDivElement | null>(null);
@@ -439,6 +460,8 @@ export function CinemaView({
     }
 
     let cancelled = false;
+    // F30: the single scheduled retry timer, cleared with the effect.
+    let retryTimer: number | null = null;
     void startRealCallSession(
       isHost ? "HOST" : "GUEST",
       callMode,
@@ -464,6 +487,9 @@ export function CinemaView({
           return;
         }
         callSessionRef.current = session;
+        // A successful start clears the retry budget, so a later genuine
+        // failure (F30) can retry again rather than being refused for good.
+        callRetryCountRef.current = 0;
         setCallSessionLive(true);
         // Startup is complete: the next signal-cursor run may advance
         // freely; entries at/before the base were skipped on purpose.
@@ -484,6 +510,17 @@ export function CinemaView({
         }
         callSessionStartingRef.current = false;
         setCallSessionLive(false);
+        // F30: clear the key so this attempt is no longer treated as "already
+        // tried", then retry once. Any duplicate attempt is prevented by the
+        // effect's own teardown (it closes the previous session and clears the
+        // refs before starting), so a retry cannot stack connections or tracks.
+        callSessionKey.current = "";
+        if (callRetryCountRef.current < CALL_START_MAX_RETRIES) {
+          callRetryCountRef.current += 1;
+          retryTimer = window.setTimeout(() => {
+            setCallRetryNonce((nonce) => nonce + 1);
+          }, CALL_START_RETRY_DELAY_MS);
+        }
         const errorCode =
           typeof error === "object" && error !== null && "errorCode" in error
             ? String(error.errorCode)
@@ -494,6 +531,9 @@ export function CinemaView({
     return () => {
       cancelled = true;
       callSessionStartingRef.current = false;
+      if (retryTimer != null) {
+        window.clearTimeout(retryTimer);
+      }
       setCallSessionLive(false);
       callSessionRef.current?.close();
       callSessionRef.current = null;
@@ -501,8 +541,9 @@ export function CinemaView({
     // onSnapshot is a stable AppShell callback; the deps are the session
     // identity. localCameraEnabled/localMicrophoneEnabled are read at
     // session start (initial track.enabled), then toggles stay local.
+    // callRetryNonce is F30's single scheduled retry.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [callMode, isHost, isPrivacyMode, peer != null]);
+  }, [callMode, isHost, isPrivacyMode, peer != null, callRetryNonce]);
 
   // Signal cursor effect: applies peer-originated signals from the
   // snapshot to the live session. The cursor is snapshot-index-based —
@@ -750,6 +791,17 @@ export function CinemaView({
     );
   };
 
+  // F7: the reconnect-dismissal latch is scoped to one disconnect episode.
+  // It used to be cleared only by "Continue without guest", so once dismissed
+  // it stayed dismissed and every later disconnect showed no overlay at all.
+  // Clearing it the moment the room leaves RECONNECTING gives the next
+  // episode its own overlay, while holding it mid-episode prevents duplicates.
+  useEffect(() => {
+    setReconnectDismissed((current) =>
+      reconnectLatchAfter(snapshot.sync.roomState, current),
+    );
+  }, [snapshot.sync.roomState]);
+
   return (
     <main className="cinema-shell" aria-label="Cinema mode">
       <SilkBackground variant="dim" />
@@ -879,7 +931,18 @@ export function CinemaView({
             ]}
             technicalDetails={snapshot.error}
             onDismiss={() => {
-              onLeave();
+              // F14: the button reads "Back to lobby", so it must actually go
+              // back to the lobby. It used to call `onLeave`, which raised the
+              // Leave / End-for-everyone confirmation — a destructive action
+              // behind a non-destructive label. `back_to_lobby` is the same
+              // retreat the Ready Check uses: it retracts readiness, clears any
+              // pending countdown and returns the room to the lobby without
+              // ending the party.
+              void backToLobby().then((next) => {
+                if (next) {
+                  onSnapshot(next);
+                }
+              });
             }}
           />
         ) : null}

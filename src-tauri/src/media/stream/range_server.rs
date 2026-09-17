@@ -212,7 +212,14 @@ fn handle_connection(
     let mut path = String::new();
     let mut headers: HashMap<String, String> = HashMap::new();
     {
-        let reader = BufReader::new(stream.try_clone().expect("clone tcp"));
+        // F49: `try_clone` fails on a genuine OS condition (fd exhaustion), so
+        // this must not panic. The panic was contained by the dropped
+        // JoinHandle, but it killed the connection with a backtrace instead of
+        // closing it cleanly — dropping the connection is the correct answer.
+        let Ok(cloned) = stream.try_clone() else {
+            return;
+        };
+        let reader = BufReader::new(cloned);
         let mut lines = reader.lines();
         if let Some(Ok(request_line)) = lines.next() {
             let parts: Vec<&str> = request_line.split_whitespace().collect();

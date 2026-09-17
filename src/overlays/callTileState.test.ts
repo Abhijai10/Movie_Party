@@ -206,3 +206,32 @@ describe("camera card size + persistence (UI_UX_SPEC §28)", () => {
     expect(loadCallTilePosition({ x: 5, y: 6 }, null)).toEqual({ x: 5, y: 6 });
   });
 });
+
+describe("F12 — growing the call tile must not cover the reserved dock strip", () => {
+  const viewport = { width: 1280, height: 800 };
+  const reservedBottomPx = 132;
+  const small = { width: 260, height: 220 };
+  const large = { width: 360, height: 480 };
+
+  it("moves a grown tile up out of the strip", () => {
+    // Park the tile as low as the SMALL size allows…
+    const parked = clampCallTilePosition({ x: 900, y: 620 }, viewport, small, reservedBottomPx);
+    // …then grow it, re-clamping against the NEW dimensions (what the resize
+    // handler now does). It must move up, not overlap the dock.
+    const grown = clampCallTilePosition(parked, viewport, large, reservedBottomPx);
+    expect(grown.y).toBeLessThan(parked.y);
+    expect(grown.y + large.height).toBeLessThanOrEqual(viewport.height - reservedBottomPx + 1);
+  });
+
+  it("keeps the tile fully inside the viewport after a grow", () => {
+    const grown = clampCallTilePosition({ x: 2000, y: 2000 }, viewport, large, reservedBottomPx);
+    expect(grown.x).toBeGreaterThanOrEqual(0);
+    expect(grown.x + large.width).toBeLessThanOrEqual(viewport.width);
+    expect(grown.y).toBeGreaterThanOrEqual(0);
+  });
+
+  it("without a reserved strip the tile may sit at the bottom", () => {
+    const grown = clampCallTilePosition({ x: 900, y: 620 }, viewport, large, 0);
+    expect(grown.y).toBeGreaterThan(viewport.height - large.height - 60);
+  });
+});

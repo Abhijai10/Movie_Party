@@ -208,6 +208,18 @@ pub fn parse_friend_invite(link: &str) -> Result<FriendInvitePayload, String> {
         .map_err(|_| "MP-FRIEND-001 that invite could not be read".to_string())?;
     let payload: serde_json::Value = serde_json::from_str(&decoded)
         .map_err(|_| "MP-FRIEND-001 that invite is malformed".to_string())?;
+    // F21: enforce the identity-only shape, not just the two fields we read.
+    // This doc comment promised that smuggled extra fields make the link
+    // invalid, but the code only looked up `pk`/`n` and ignored everything
+    // else — so an invite carrying an auth key or token was accepted here
+    // while the frontend rejected it. This function is the trust boundary, so
+    // the contract has to hold on this side.
+    let object = payload
+        .as_object()
+        .ok_or_else(|| "MP-FRIEND-001 that invite is malformed".to_string())?;
+    if object.len() != 2 || !object.contains_key("n") || !object.contains_key("pk") {
+        return Err("MP-FRIEND-001 that invite carries unexpected fields".to_string());
+    }
     let peer_key = payload
         .get("pk")
         .and_then(|v| v.as_str())
@@ -819,9 +831,10 @@ struct RawNode {
 mod tests {
     use super::{
         friend_candidates, is_allowed_party_ipv4, is_usable_tailscale_ipv4,
-        is_wrapper_error_stdout, parse_ping_stdout, parse_status_json, peer_display_name,
-        readiness_from_error, readiness_from_status, required_ipv4, usable_peers, FriendCandidate,
-        PeerConnectionProbe, TailscaleError, TailscalePath, TailscalePeer, TailscaleState,
+        is_wrapper_error_stdout, parse_friend_invite, parse_ping_stdout, parse_status_json,
+        peer_display_name, readiness_from_error, readiness_from_status, required_ipv4,
+        usable_peers, FriendCandidate, PeerConnectionProbe, TailscaleError, TailscalePath,
+        TailscalePeer, TailscaleState,
     };
 
     #[test]
@@ -1396,5 +1409,51 @@ mod tests {
         assert!(json.contains("\"peerKey\""));
         assert!(json.contains("\"displayName\""));
         assert!(json.contains("\"latencyMs\"") || !json.contains("latencyMs"));
+    }
+
+    /// F21: the identity-only invite contract must hold on the Rust side.
+    ///
+    /// The frontend already rejects payloads whose key set is not exactly
+    /// `{n, pk}`, but this function is the trust boundary — a claim in a doc
+    /// comment is not enforcement. Before the fix, extra fields were silently
+    /// ignored here.
+    #[test]
+    fn friend_invite_rejects_smuggled_credential_fields() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let link = |json: &str| {
+            format!(
+                "movieparty://friend/{}",
+                URL_SAFE_NO_PAD.encode(json.as_bytes())
+            )
+        };
+
+        // The one accepted shape.
+        let accepted = parse_friend_invite(&link(
+            r#"{"n":"Rahul","pk":"rahul-mac.tailc930b7.ts.net."}"#,
+        ));
+        assert!(
+            accepted.is_ok(),
+            "an identity-only invite must still parse: {accepted:?}"
+        );
+
+        // Anything else — an auth key, a token, a duplicate, or a missing
+        // field — must invalidate the link rather than be ignored.
+        for hostile in [
+            r#"{"n":"Rahul","pk":"rahul-mac.ts.net.","authKey":"tskey-auth-XXXXX"}"#,
+            r#"{"n":"Rahul","pk":"rahul-mac.ts.net.","token":"abc"}"#,
+            r#"{"n":"Rahul","pk":"rahul-mac.ts.net.","secret":"abc"}"#,
+            r#"{"n":"Rahul","pk":"rahul-mac.ts.net.","pk2":"x"}"#,
+            r#"{"pk":"rahul-mac.ts.net."}"#,
+            r#"{"n":"Rahul"}"#,
+            r#"{}"#,
+        ] {
+            assert!(
+                parse_friend_invite(&link(hostile)).is_err(),
+                "must be rejected: {hostile}"
+            );
+        }
+
+        // A non-object payload is malformed, not accepted.
+        assert!(parse_friend_invite(&link(r#"["n","pk"]"#)).is_err());
     }
 }

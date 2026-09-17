@@ -20,6 +20,21 @@ import { useEffect, useState } from "react";
 
 const GRACE_MS = 4_000;
 
+/**
+ * The reconnect-dismissal latch after observing `roomState` (F7).
+ *
+ * "Keep Waiting" dismisses the decision for the CURRENT episode. The latch
+ * used to be cleared only by "Continue without guest", so once a user had
+ * dismissed one disconnect they never saw the overlay again — every later
+ * disconnect passed silently. Scoping the latch to the episode fixes that:
+ * the moment the room leaves RECONNECTING the latch clears, so the next
+ * disconnect raises its own overlay. While the room stays in RECONNECTING the
+ * latch holds, so one episode never stacks duplicate overlays.
+ */
+export function reconnectLatchAfter(roomState: string, dismissed: boolean): boolean {
+  return roomState === "RECONNECTING" ? dismissed : false;
+}
+
 type ReconnectOverlayProps = {
   peerName: string;
   isReconnecting: boolean;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { COUNTDOWN_LEAD_MS, countdownDisplayFrom } from "./countdownModel";
+import { COUNTDOWN_LEAD_MS, countdownDisplayFrom, countdownHandoff } from "./countdownModel";
 
 describe("§25 backend-driven countdown model", () => {
   it("is idle without a backend-provided deadline", () => {
@@ -40,5 +40,44 @@ describe("§25 backend-driven countdown model", () => {
     // bogus "4" — the label is capped at the §25 3-2-1 sequence.
     const jumped = countdownDisplayFrom(10_000, 10_000 - COUNTDOWN_LEAD_MS - 5_000);
     expect(jumped.phase === "running" ? jumped.label : 0).toBe(3);
+  });
+});
+
+describe("F8 — the cinema hand-off fires exactly once per countdown", () => {
+  it("fires on the first observation of a deadline", () => {
+    const first = countdownHandoff(10_000, null);
+    expect(first.shouldStart).toBe(true);
+    expect(first.nextStartedFor).toBe(10_000);
+  });
+
+  it("does not fire again for the same deadline", () => {
+    // Every re-render, effect re-run, duplicate ready event or reconnect
+    // replays the same deadline — none of them may start the transition twice.
+    const repeated = countdownHandoff(10_000, 10_000);
+    expect(repeated.shouldStart).toBe(false);
+    expect(repeated.nextStartedFor).toBe(10_000);
+  });
+
+  it("fires again for a genuinely new countdown", () => {
+    const next = countdownHandoff(20_000, 10_000);
+    expect(next.shouldStart).toBe(true);
+    expect(next.nextStartedFor).toBe(20_000);
+  });
+
+  it("never fires without a deadline, and disarms when one is cleared", () => {
+    const idle = countdownHandoff(null, 10_000);
+    expect(idle.shouldStart).toBe(false);
+    expect(idle.nextStartedFor).toBeNull();
+  });
+
+  it("survives many replays of one countdown without a second start", () => {
+    let startedFor: number | null = null;
+    let starts = 0;
+    for (let tick = 0; tick < 50; tick++) {
+      const decision = countdownHandoff(10_000, startedFor);
+      startedFor = decision.nextStartedFor;
+      if (decision.shouldStart) starts += 1;
+    }
+    expect(starts).toBe(1);
   });
 });

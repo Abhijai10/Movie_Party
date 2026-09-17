@@ -1,5 +1,102 @@
 # Movie Party — Release Notes
 
+## 0.9.8 (P2 remediation)
+
+The deferred P2 findings from the v0.9.6 audit, re-audited against the v0.9.7
+code and fixed where they were still real. No new features, and no experimental
+work — the Shared Movie Experience remains gated off exactly as before.
+
+### Cinema and party UX
+- **A hidden control dock is no longer clickable.** The dock faded out with
+  opacity while its interactive container stayed clickable, so invisible
+  Leave / play / chat buttons still swallowed clicks along the bottom of the
+  screen. Interactivity now follows visibility.
+- **Guests see the right leave wording.** A guest pressing Leave was shown the
+  host-only "End Movie Party for everyone?" confirmation. The role was already
+  tracked but never passed to the confirmation. (The backend was already
+  correct — a guest has no host server to stop.)
+- **Reconnects recover every time.** Dismissing "Keep Waiting" once used to
+  disable the reconnect overlay permanently, so later disconnects passed
+  silently. The dismissal is now scoped to one disconnect episode.
+- **The countdown starts once.** The hand-off into Cinema could fire repeatedly
+  because the effect's guard reset on every re-render. It is now keyed on the
+  countdown's deadline, so duplicate ready events and re-renders cannot start
+  the transition twice while a genuinely new countdown still can.
+- **The call tile can no longer cover the controls.** Resizing the floating
+  call tile did not re-clamp its position, so growing it could bury the control
+  dock. It is now re-clamped against the new size.
+- **The reaction tray sits above the call tile** (it was z-index 4 against the
+  tile's 45), raised by the minimum step rather than escalating the whole
+  stacking order.
+- **"Back to lobby" actually goes back to the lobby.** On the cinema error
+  screen it opened the Leave / End-for-everyone confirmation instead — a
+  destructive action behind a non-destructive label.
+
+### Settings
+- **Typing your display name no longer gets wiped.** The draft was re-synced on
+  every snapshot because the effect depended on the participants *array*, which
+  the backend re-creates on every tick. It now depends on the name value.
+- **The provider control no longer claims to log you out.** "Reset Provider
+  Profile" asked you to confirm a logout and then only re-checked status. There
+  is no command that clears a signed-in provider profile, so the control is now
+  labelled for what it does.
+- **"Clear cache" is no longer a dead button.** Cached copies are removed per
+  party by the post-party prompt; there is no bulk clear, and the row now says
+  so instead of offering a button that did nothing.
+
+### Friends and calls
+- **Invites are identity-only on the Rust side too.** The parser documented
+  that smuggled extra fields invalidate a link but only read the two it wanted,
+  so an invite carrying an auth key or token was accepted there while the
+  frontend rejected it.
+- **Re-accepting an invite no longer demotes a verified friend.** Re-opening an
+  old link wiped the verification record and its cached path/latency.
+- **Joined friends can show Online.** Both call sites passed a hard-coded
+  "unknown" online hint, so the Online state was unreachable and every joined
+  friend read "Offline" forever. The live tailnet status is now consulted, and
+  an absent peer still reads Offline rather than a fabricated Online.
+- **Turning the camera off releases the camera.** The toggle only muted the
+  track, so the capture device stayed open and the macOS indicator stayed lit
+  while the UI said the camera was off. Off now releases the device; on
+  re-acquires it through the existing sender. The degradation ladder keeps its
+  documented freeze behaviour.
+- **A failed call can retry.** The session key was committed before the start
+  resolved and never cleared on failure, so one transient error disabled the
+  call for that configuration with no way back. Failures now clear the key and
+  schedule one bounded retry.
+
+### Playback, schedules and Home
+- **libmpv recovery is possible again.** A single transient library failure set
+  a sticky "unavailable" flag that made every later command fail for the life
+  of the process; a successful load now clears it.
+- **"Change movie" changes the movie.** The active party's media took
+  precedence over an explicit pick, so the new choice was silently discarded.
+- **The guest schedule prompt no longer dismisses on failure** — it stays up
+  and says so, instead of marking the schedule answered when nothing reached
+  the backend.
+- **Schedules can be cancelled.** The backend command existed and was
+  registered, but no UI could reach it, so "Cancelled" was a state nothing
+  could produce.
+- **Duplicate test id removed** in the guest schedule prompt.
+- **The Home feed refreshes.** The 30-minute refresh aborted the request it had
+  just issued, so the wall never refreshed and the aborted fetch was recorded
+  as a network failure, corrupting the Settings diagnostic. Refreshes are now
+  sequenced, and a malformed response is reported as a parse failure rather
+  than a network one.
+- **Display-name limits are character-counted**, not byte-counted, so valid
+  non-Latin names are no longer silently rejected.
+
+### Robustness
+- **Externally launched processes are reaped** instead of being left as
+  zombies for the life of the app.
+- **A panic on file-descriptor exhaustion was removed** from the media range
+  server; the connection now closes cleanly.
+
+### Provider Shared — still not implemented
+Unchanged and doubly gated: the experimental mode must clear a per-device
+diagnostic *and* the stable path still refuses anything that is not Provider
+Sync. The boundary is now covered by tests.
+
 ## 0.9.7 (stabilization: release blockers and security fixes)
 
 A focused stabilization patch. No new features, and no experimental work —

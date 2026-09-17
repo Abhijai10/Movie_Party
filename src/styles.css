@@ -4479,7 +4479,11 @@ input[type=range].mp-range::-webkit-slider-thumb {
 
 .reaction-tray {
   position: absolute;
-  z-index: 4;
+  /* F13: must sit above the floating call tile (.camera-card is 45) so a
+     visible tray is never buried under it. Kept just one step above that
+     rather than escalating globally — the overlay/modal layers (50, 65, 70,
+     80, 100) stay on top of both. */
+  z-index: 46;
   right: clamp(22px, 3vw, 44px);
   bottom: clamp(148px, 18vh, 184px);
   display: grid;

@@ -353,6 +353,16 @@ impl Default for PlayerSnapshot {
     }
 }
 
+/// Maximum user-visible display-name length, counted in CHARACTERS (F50).
+///
+/// This is a user-facing constraint, so it must be character-aware: a byte
+/// limit silently rejects valid names in non-Latin scripts — a 40-character
+/// Cyrillic name is 80 bytes — and one call site used `len()` while two others
+/// used `chars().count()`, so the same name was accepted in one path and
+/// discarded in another. Protocol and storage limits elsewhere stay byte-based
+/// on purpose; only this user-visible rule is character-counted.
+const MAX_DISPLAY_NAME_CHARS: usize = 40;
+
 /// Canonical wire name for a failed player.
 ///
 /// The `PlayerState` enum variant is `Error`, so a plain `Debug`-and-uppercase
@@ -963,7 +973,7 @@ impl AppRuntime {
             // Start from a clean error slate: a stale error from an
             // earlier command must not outlive this attempt.
             state.error = None;
-            if trimmed.is_empty() || trimmed.chars().count() > 40 {
+            if trimmed.is_empty() || trimmed.chars().count() > MAX_DISPLAY_NAME_CHARS {
                 state.error = Some("MP-ID-003 display name must be 1-40 characters".to_string());
                 sync_room_snapshot(&mut state);
                 return snapshot_from_state(&state);
@@ -1263,7 +1273,7 @@ impl AppRuntime {
         let now_ms = wall_now_ms();
         let friendly_name = display_name
             .map(|name| name.trim().to_string())
-            .filter(|name| !name.is_empty() && name.len() <= 40)
+            .filter(|name| !name.is_empty() && name.chars().count() <= MAX_DISPLAY_NAME_CHARS)
             .unwrap_or_else(|| crate::network::tailscale::peer_display_name(&peer.dns_name));
         let friend = crate::storage::sqlite::StoredFriend {
             peer_key: peer.dns_name.clone(),
@@ -1388,21 +1398,37 @@ impl AppRuntime {
             .map(|f| f.display_name.clone())
             .unwrap_or_else(|| payload.display_name.clone());
 
+        // F23: never demote an existing verification. Re-opening an old invite
+        // link is a normal way to re-share it, and it must not wipe a
+        // MOVIE_PARTY_VERIFIED record: the rest of the friend flow only ever
+        // promotes (see `update_friend_verification`). The cached verification
+        // observations are preserved exactly like the user's chosen name above.
+        let verified_at = existing.as_ref().and_then(|f| f.last_verified_at_ms);
+        let connection_state = if verified_at.is_some() {
+            crate::storage::sqlite::FriendConnectionState::MoviePartyVerified
+        } else if observed.is_some() {
+            crate::storage::sqlite::FriendConnectionState::TailscaleJoined
+        } else {
+            crate::storage::sqlite::FriendConnectionState::Invited
+        };
+
         let friend = crate::storage::sqlite::StoredFriend {
             peer_key: peer_key.clone(),
             display_name,
-            ip: observed.clone(),
+            // A fresh observation wins; otherwise keep the last cached address
+            // rather than forgetting it just because the peer was briefly
+            // absent from the tailnet status.
+            ip: observed
+                .clone()
+                .or_else(|| existing.as_ref().and_then(|f| f.ip.clone())),
             added_at_ms: existing.as_ref().map(|f| f.added_at_ms).unwrap_or(now_ms),
             // Never claim verification from a link alone — that stays
-            // verify_friend's job (a real ping through the tunnel).
-            last_verified_at_ms: None,
-            last_path: None,
-            last_latency_ms: None,
-            connection_state: if observed.is_some() {
-                crate::storage::sqlite::FriendConnectionState::TailscaleJoined
-            } else {
-                crate::storage::sqlite::FriendConnectionState::Invited
-            },
+            // verify_friend's job (a real ping through the tunnel). Only a
+            // PREVIOUSLY recorded verification is carried forward.
+            last_verified_at_ms: verified_at,
+            last_path: existing.as_ref().and_then(|f| f.last_path.clone()),
+            last_latency_ms: existing.as_ref().and_then(|f| f.last_latency_ms),
+            connection_state,
         };
 
         let db = self
@@ -1460,7 +1486,7 @@ impl AppRuntime {
         if name.is_empty() {
             return Err("MP-FRIEND-001 the name cannot be empty".to_string());
         }
-        if name.chars().count() > 40 {
+        if name.chars().count() > MAX_DISPLAY_NAME_CHARS {
             return Err("MP-FRIEND-001 the name is too long (max 40 characters)".to_string());
         }
         let friends = self.list_friends();
@@ -10353,7 +10379,7 @@ mod scheduling_tests {
 mod friends_tests {
     use crate::storage::sqlite::{FriendConnectionState, StoredFriend};
 
-    use super::AppRuntime;
+    use super::{AppRuntime, MAX_DISPLAY_NAME_CHARS};
 
     fn runtime_with_db() -> (AppRuntime, std::path::PathBuf) {
         let runtime = AppRuntime::new();
@@ -10660,6 +10686,63 @@ mod friends_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// F23: re-accepting an invite must never demote a verified friend.
+    ///
+    /// Re-opening an old invite link is a normal way to re-share it. The accept
+    /// path used to write `last_verified_at_ms: None` plus a downgraded
+    /// connection state, wiping a MOVIE_PARTY_VERIFIED record — even though the
+    /// rest of the friend flow only ever promotes.
+    #[tokio::test]
+    async fn reaccepting_an_invite_never_demotes_a_verified_friend() {
+        let (runtime, dir) = runtime_with_db();
+        {
+            let state = runtime.lock();
+            let db = state.db.as_ref().expect("db");
+            db.upsert_friend(&StoredFriend {
+                peer_key: "verified.tailc930b7.ts.net.".to_string(),
+                display_name: "Verified".to_string(),
+                ip: Some("100.64.0.9".to_string()),
+                added_at_ms: 1,
+                last_verified_at_ms: Some(5_000),
+                last_path: Some("direct".to_string()),
+                last_latency_ms: Some(12),
+                connection_state: FriendConnectionState::MoviePartyVerified,
+            })
+            .expect("seed verified");
+        }
+
+        let payload = format!(
+            "{{\"n\":{},\"pk\":{}}}",
+            serde_json::to_string("Ignored Link Name").unwrap(),
+            serde_json::to_string("verified.tailc930b7.ts.net").unwrap(),
+        );
+        let link = format!(
+            "movieparty://friend/{}",
+            crate::network::tailscale::base64url_encode(payload.as_bytes())
+        );
+        let friend = runtime.accept_friend_invite(link).await.expect("re-accept");
+
+        assert_eq!(
+            friend.last_verified_at_ms,
+            Some(5_000),
+            "the recorded verification must survive a re-accept"
+        );
+        assert_eq!(friend.last_path.as_deref(), Some("direct"));
+        assert_eq!(friend.last_latency_ms, Some(12));
+        assert_eq!(
+            friend.connection_state,
+            FriendConnectionState::MoviePartyVerified,
+            "a re-accept must not demote a verified friend"
+        );
+        assert_eq!(
+            friend.display_name, "Verified",
+            "the saved name still wins over the link"
+        );
+        assert_eq!(runtime.list_friends().len(), 1, "no duplicate rows");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// refresh_friend_states: an INVITED friend whose device has since
     /// joined the tailnet (observed via detect_status) is promoted to
     /// TAILSCALE_JOINED; a MOVIE_PARTY_VERIFIED friend is never demoted
@@ -10777,6 +10860,30 @@ mod friends_tests {
         assert_eq!(
             runtime.lock().local_participant.display_name,
             "a".repeat(40)
+        );
+
+        // F50: the limit is CHARACTER-counted, not byte-counted. 40 Cyrillic
+        // characters is 80 bytes, so a byte limit would silently reject a
+        // perfectly valid name — and one call site did use `len()` while the
+        // others used `chars().count()`.
+        let multibyte = "д".repeat(MAX_DISPLAY_NAME_CHARS);
+        assert_eq!(multibyte.chars().count(), 40);
+        assert!(
+            multibyte.len() > 40,
+            "the case only bites when bytes exceed characters"
+        );
+        let accepted = runtime.set_display_name(&multibyte);
+        assert!(
+            accepted.error.is_none(),
+            "40 multibyte characters must be accepted: {:?}",
+            accepted.error
+        );
+        assert_eq!(runtime.lock().local_participant.display_name, multibyte);
+
+        let multibyte_over = "д".repeat(MAX_DISPLAY_NAME_CHARS + 1);
+        assert!(
+            runtime.set_display_name(&multibyte_over).error.is_some(),
+            "41 multibyte characters must be refused"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

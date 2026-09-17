@@ -1,15 +1,18 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { ArrowLeft, CalendarClock, FolderOpen, TriangleAlert } from "lucide-react";
 import { CinemaButton } from "../components/mp/CinemaButton";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
 import {
+  candidateOnlineFor,
   createAndBroadcastSchedule,
   friendStatusFor,
   pickMediaFile,
+  tailnetPeers,
   type AppSnapshot,
   type StoredFriend,
+  type TailnetPeersView,
 } from "../backend/appRuntime";
 import { listRecentMedia, localStorageOrNull, rememberMedia, type RecentMedia } from "../schedule/recentMedia";
 import type { CallMode } from "../call/webrtc";
@@ -126,20 +129,46 @@ export function ScheduleView({ snapshot, onBack, onScheduled, friends }: Schedul
   const [recent, setRecent] = useState<RecentMedia[]>(() => listRecentMedia(localStorageOrNull()));
   const [pickedPath, setPickedPath] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
+  /**
+   * Live tailnet reading (F22) so a joined friend's status reflects whether
+   * the app can actually observe them, instead of a hard-coded "unknown".
+   */
+  const [peers, setPeers] = useState<TailnetPeersView | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void tailnetPeers()
+      .then((view) => {
+        if (!cancelled) setPeers(view);
+      })
+      .catch(() => {
+        if (!cancelled) setPeers(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const scheduledUtcMs = localInputToUtcMs(dateValue, timeValue);
 
-  /** The chosen movie reference: the active party media id, else the
-   * picked local file path, else nothing. */
+  /**
+   * The chosen movie reference: the file the user explicitly picked, else the
+   * active party's media, else nothing.
+   *
+   * F37: an explicit pick wins. The active party's media used to take
+   * precedence unconditionally, so "Change movie" set a new path and then
+   * submitted the OLD movie — the choice was silently discarded with no
+   * feedback at all.
+   */
   const movieSource: { ref: string; label: string; fromActiveParty: boolean } | null =
-    activeMedia != null
-      ? { ref: activeMedia.mediaId, label: activeMedia.filename, fromActiveParty: true }
-      : pickedPath != null
-        ? {
-            ref: pickedPath,
-            label: recent.find((entry) => entry.path === pickedPath)?.name ?? pickedPath,
-            fromActiveParty: false,
-          }
+    pickedPath != null
+      ? {
+          ref: pickedPath,
+          label: recent.find((entry) => entry.path === pickedPath)?.name ?? pickedPath,
+          fromActiveParty: false,
+        }
+      : activeMedia != null
+        ? { ref: activeMedia.mediaId, label: activeMedia.filename, fromActiveParty: true }
         : null;
   const movieRef = movieSource?.ref ?? "";
   const movieLabel = movieSource?.label ?? "";
@@ -395,7 +424,7 @@ export function ScheduleView({ snapshot, onBack, onScheduled, friends }: Schedul
               {friends.length > 0 ? (
                 <div className="mt-2.5 flex flex-wrap gap-2.5" data-testid="schedule-guest-picker">
                   {friends.map((friend) => {
-                    const status = friendStatusFor(friend, undefined);
+                    const status = friendStatusFor(friend, candidateOnlineFor(friend, peers));
                     const chosen = guestChoice === friend.peerKey;
                     return (
                       <button

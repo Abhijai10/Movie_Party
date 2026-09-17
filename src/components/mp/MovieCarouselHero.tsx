@@ -53,16 +53,27 @@ export function MovieCarouselHero() {
   // Periodic refresh: while Home stays open, re-check the feed so new
   // trending titles appear automatically (cache TTL still throttles the
   // actual network calls to one per hour at most).
+  //
+  // F41: this used to call the returned `stop()` immediately after starting
+  // the load, which aborted the request it had just issued — so the wall never
+  // refreshed, and the aborted fetch was recorded as a network failure, which
+  // corrupted the Settings diagnostic every 30 minutes. The stop handle is now
+  // retained and invoked only when the NEXT refresh starts or on unmount, so
+  // refreshes are sequenced rather than self-cancelling and a stale response
+  // can never overwrite a newer one.
   useEffect(() => {
+    let stopPrevious: (() => void) | null = null;
     const timer = window.setInterval(() => {
-      const stop = loadTmdbTrending((next) => {
+      stopPrevious?.();
+      stopPrevious = loadTmdbTrending((next) => {
         setFeatures(next);
         setUsingTmdb(true);
+        setIndex((current) => Math.min(current, next.length - 1));
       });
-      stop();
     }, LIVE_REFRESH_MS);
     return () => {
       window.clearInterval(timer);
+      stopPrevious?.();
     };
   }, []);
 

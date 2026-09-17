@@ -275,6 +275,26 @@ function createSyntheticVideoTrack(): MediaStreamTrack | null {
   return canvas.captureStream(15).getVideoTracks()[0] ?? null;
 }
 
+/**
+ * What the camera toggle must do for hardware state to match the UI (F29).
+ *
+ * `track.enabled = false` mutes a track but leaves the capture device open, so
+ * the OS camera indicator stays lit while the UI says the camera is off. The
+ * toggle is a privacy control, so turning it off must RELEASE the device, and
+ * turning it on must re-acquire it (or re-enable a track that is still live).
+ */
+export type CameraToggleAction = "release" | "enable-existing" | "acquire";
+
+export function cameraToggleAction(
+  hasLiveVideoTrack: boolean,
+  enabled: boolean,
+): CameraToggleAction {
+  if (!enabled) {
+    return "release";
+  }
+  return hasLiveVideoTrack ? "enable-existing" : "acquire";
+}
+
 export async function acquireRealCallMedia(
   mode: CallMode,
   cameraEnabled: boolean,

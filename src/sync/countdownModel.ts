@@ -47,3 +47,30 @@ export function countdownDisplayFrom(
   const label = Math.min(3, Math.max(1, Math.ceil(remaining / 1_000)));
   return { phase: "running", remaining, label };
 }
+
+/**
+ * Decide whether an elapsed countdown should hand off into the cinema, and
+ * what the once-guard becomes (F8).
+ *
+ * The deadline can be observed many times for the SAME countdown — React
+ * re-renders, the effect re-runs because the parent re-creates its callback
+ * every render, duplicate ready events arrive, a reconnect replays state. The
+ * handoff must still happen exactly once per countdown.
+ *
+ * The guard is keyed on the deadline rather than a boolean, which is what
+ * makes both halves work: a re-observation of the same deadline cannot fire
+ * again, while a genuinely NEW countdown (a different deadline) can.
+ * Clearing the deadline disarms the guard so the next countdown starts fresh.
+ */
+export function countdownHandoff(
+  deadlineMs: number | null,
+  startedForMs: number | null,
+): { shouldStart: boolean; nextStartedFor: number | null } {
+  if (deadlineMs == null) {
+    return { shouldStart: false, nextStartedFor: null };
+  }
+  return {
+    shouldStart: startedForMs !== deadlineMs,
+    nextStartedFor: deadlineMs,
+  };
+}

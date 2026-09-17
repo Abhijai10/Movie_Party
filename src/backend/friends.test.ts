@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  candidateOnlineFor,
   friendErrorCopy,
   friendStatusCopy,
   friendStatusFor,
@@ -70,6 +71,47 @@ describe("friendStatusFor (friend-flow states)", () => {
     // the tunnel was PROVEN, not inferred.
     const friend = savedFriend({ lastVerifiedAtMs: 1 });
     expect(friendStatusFor(friend, true)).toBe("MOVIE_PARTY_VERIFIED");
+  });
+});
+
+describe("F22 — candidateOnlineFor reads the live tailnet status", () => {
+  const view = (candidates: FriendCandidate[]): TailnetPeersView => ({
+    candidates,
+    saved: [],
+  });
+
+  it("reports a peer the tailnet currently observes", () => {
+    const friend = savedFriend({ connectionState: "TAILSCALE_JOINED" });
+    const live = view([
+      { peerKey: friend.peerKey, displayName: "R", ip: "100.64.0.2", online: true, path: "direct" },
+    ]);
+    expect(candidateOnlineFor(friend, live)).toBe(true);
+    // …and that makes the status ONLINE, which was unreachable before: both
+    // call sites passed a hard-coded `undefined`.
+    expect(friendStatusFor(friend, candidateOnlineFor(friend, live))).toBe("ONLINE");
+  });
+
+  it("reports a peer the tailnet lists as offline", () => {
+    const friend = savedFriend({ connectionState: "TAILSCALE_JOINED" });
+    const live = view([
+      { peerKey: friend.peerKey, displayName: "R", ip: null, online: false, path: "offline" },
+    ]);
+    expect(candidateOnlineFor(friend, live)).toBe(false);
+    expect(friendStatusFor(friend, candidateOnlineFor(friend, live))).toBe("OFFLINE");
+  });
+
+  it("is honestly unknown when the peer is absent from the reading", () => {
+    const friend = savedFriend({ connectionState: "TAILSCALE_JOINED" });
+    const live = view([
+      { peerKey: "someone-else.tailnet.ts.net.", displayName: "X", ip: null, online: true, path: "direct" },
+    ]);
+    // Absent is not online — and it must not fabricate ONLINE either.
+    expect(candidateOnlineFor(friend, live)).toBeUndefined();
+    expect(friendStatusFor(friend, candidateOnlineFor(friend, live))).toBe("OFFLINE");
+  });
+
+  it("is unknown when the tailnet could not be read at all", () => {
+    expect(candidateOnlineFor(savedFriend(), null)).toBeUndefined();
   });
 });
 

@@ -23,7 +23,20 @@ type HomeViewProps = {
   onOpenSchedule: () => void;
   /** Open the Friends tab (invite links + friend list). */
   onOpenFriends: () => void;
+  /** F39: cancel a pending schedule. Absent when the caller cannot cancel. */
+  onCancelSchedule?: (scheduleId: string) => void;
 };
+
+/**
+ * Whether a stored schedule can still be cancelled (F39).
+ *
+ * A schedule that already ran, or was cancelled, has nothing left to cancel —
+ * offering the action there would be a lie, and re-cancelling a completed
+ * party would be destructive. Everything pending is cancellable.
+ */
+export function canCancelSchedule(status: string): boolean {
+  return status !== "Cancelled" && status !== "Completed";
+}
 
 /**
  * Header action chip — an unmistakable BUTTON: icon + label + border +
@@ -70,6 +83,7 @@ export function HomeView({
   onOpenSettings,
   onOpenSchedule,
   onOpenFriends,
+  onCancelSchedule,
 }: HomeViewProps) {
   const mediaNameFor = mediaNameById;
   const preloadPercentLabel = (scheduleId: string): string => {
@@ -207,19 +221,37 @@ export function HomeView({
                         })}
                       </p>
                     </div>
-                    <p className="mt-1.5 text-xs text-white/45">
-                      {schedule.status === "WaitingForPeer" || schedule.status === "WaitingForGuest"
-                        ? "Waiting for your partner to come online"
-                        : schedule.status === "Transferring"
-                          ? `Preload ${preloadPercentLabel(schedule.scheduleId)}% complete`
-                          : schedule.status === "Cancelled"
-                            ? "Cancelled"
-                            : schedule.status === "PreloadFailed"
-                              ? "Preload failed — retry from the schedule"
-                              : schedule.status === "Accepted"
-                                ? "Accepted — reminders set"
-                                : "Ready to preload"}
-                    </p>
+                    <div className="mt-1.5 flex items-end justify-between gap-4">
+                      <p className="text-xs text-white/45">
+                        {schedule.status === "WaitingForPeer" ||
+                        schedule.status === "WaitingForGuest"
+                          ? "Waiting for your partner to come online"
+                          : schedule.status === "Transferring"
+                            ? `Preload ${preloadPercentLabel(schedule.scheduleId)}% complete`
+                            : schedule.status === "Cancelled"
+                              ? "Cancelled"
+                              : schedule.status === "PreloadFailed"
+                                ? "Preload failed — retry from the schedule"
+                                : schedule.status === "Accepted"
+                                  ? "Accepted — reminders set"
+                                  : "Ready to preload"}
+                      </p>
+                      {/* F39: cancellation had no UI at all — a cancelled
+                          schedule was a state nothing could produce. Only
+                          offered while there is still something to cancel. */}
+                      {onCancelSchedule && canCancelSchedule(schedule.status) ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onCancelSchedule(schedule.scheduleId);
+                          }}
+                          className="shrink-0 text-xs tracking-wider uppercase text-white/50 hover:text-white transition"
+                          data-testid={`cancel-schedule-${schedule.scheduleId}`}
+                        >
+                          Cancel
+                        </button>
+                      ) : null}
+                    </div>
                   </li>
                 ))}
               </ul>

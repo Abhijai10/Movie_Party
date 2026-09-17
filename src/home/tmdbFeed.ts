@@ -265,11 +265,26 @@ export function mapTrendingPayload(payload: unknown): TmdbFeature[] | null {
   return features.length > 0 ? features : null;
 }
 
+/**
+ * Outcome of one trending fetch (F42).
+ *
+ * The three failure kinds are distinct on purpose: `http` is "TMDB answered,
+ * but not usably", `parse` is "TMDB answered 200 with a body we could not
+ * read", and a thrown error is `network` ("we never reached TMDB"). Previously
+ * a malformed body propagated as a throw and was recorded as a NETWORK
+ * failure, which mislabelled the diagnostic and left the declared `parse` kind
+ * unreachable.
+ */
+type TrendingFetch =
+  | { outcome: "ok"; features: TmdbFeature[] }
+  | { outcome: "http" }
+  | { outcome: "parse" };
+
 async function fetchTrending(
   token: string,
   fetchImpl: typeof fetch,
   abort: AbortSignal,
-): Promise<TmdbFeature[] | null> {
+): Promise<TrendingFetch> {
   // v4 read token (JWT) → Bearer header; classic v3 key → api_key param.
   const isBearer = token.startsWith("eyJ");
   const url = isBearer ? TRENDING_PATH : `${TRENDING_PATH}&api_key=${encodeURIComponent(token)}`;
@@ -278,8 +293,20 @@ async function fetchTrending(
     headers.Authorization = `Bearer ${token}`;
   }
   const response = await fetchImpl(url, { headers, signal: abort });
-  if (!response.ok) return null;
-  return mapTrendingPayload(await response.json());
+  if (!response.ok) return { outcome: "http" };
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    // A 200 whose body is not JSON is a parse failure, not a network one.
+    return { outcome: "parse" };
+  }
+  const features = mapTrendingPayload(payload);
+  // A body that parses but yields nothing usable is the "unusable answer" case
+  // the http branch already describes; only an unreadable body is "parse".
+  return features != null && features.length > 0
+    ? { outcome: "ok", features }
+    : { outcome: "http" };
 }
 
 type CachedFeed = { at: number; features: TmdbFeature[] };
@@ -367,7 +394,7 @@ export function loadTmdbTrending(
   // (seen in the field: ISP packet filters resetting TMDB connections)
   // often clear on the second attempt, and the hero degrades gracefully
   // anyway, so a single cheap retry is a good trade.
-  const attemptWithRetry = async (): Promise<TmdbFeature[] | null> => {
+  const attemptWithRetry = async (): Promise<TrendingFetch> => {
     try {
       return await fetchTrending(token, fetchImpl, controller.signal);
     } catch (error) {
@@ -377,19 +404,21 @@ export function loadTmdbTrending(
   };
 
   void attemptWithRetry()
-    .then((features) => {
+    .then((result) => {
       clearTimeout(timeout);
       if (cancelled) return;
-      if (features == null) {
-        // Reached TMDB but the answer was unusable (non-200 or bad shape).
+      if (result.outcome !== "ok") {
+        // Reached TMDB but the answer was unusable — reported as the kind it
+        // actually was: "http" for a non-200 or an empty payload, "parse" for
+        // a 200 we could not read (F42).
         writeTmdbStatus(storage, {
           lastSuccessAtMs: readTmdbStatus(storage)?.lastSuccessAtMs ?? null,
           lastAttemptAtMs: now(),
-          lastError: "http",
+          lastError: result.outcome,
         });
         return;
       }
-      deliver(features);
+      deliver(result.features);
       writeTmdbStatus(storage, {
         lastSuccessAtMs: now(),
         lastAttemptAtMs: now(),
@@ -397,7 +426,7 @@ export function loadTmdbTrending(
       });
       if (storage != null) {
         try {
-          const entry: CachedFeed = { at: now(), features };
+          const entry: CachedFeed = { at: now(), features: result.features };
           storage.setItem(CACHE_KEY, JSON.stringify(entry));
         } catch {
           /* storage full — the session still shows the live wall */

@@ -666,6 +666,19 @@ impl LocalPlayer for MpvPlayer {
         self.fns = Some(fns);
         self.surface_handle = Some(surface_handle);
         self.render_ctx = Some(render_ctx);
+        // F34: a successful load clears the sticky unavailability. The flag was
+        // only ever set, so ONE transient dylib failure made every later
+        // open/play/pause/seek early-return `LibMpvUnavailable` for the rest of
+        // the process — recovery was impossible even once libmpv was available
+        // again. Clearing the recorded Error state with it lets the player
+        // actually be used rather than sitting in a permanent failure.
+        if self.unavailable {
+            self.unavailable = false;
+            if self.snapshot.state == PlayerState::Error {
+                self.snapshot.state = PlayerState::Stopped;
+                self.snapshot.error_message = None;
+            }
+        }
         let empty_stride = (self.render_w * 4).div_ceil(64) * 64;
         self.render_stride = empty_stride;
         self.render_buf.resize(empty_stride * self.render_h, 0);

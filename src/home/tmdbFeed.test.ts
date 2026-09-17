@@ -316,6 +316,41 @@ describe("loadTmdbTrending", () => {
     });
   });
 
+  it("F42: records a malformed 200 body as a PARSE failure, not a network one", async () => {
+    // A body that is not JSON used to propagate as a throw and be recorded as
+    // "network" — mislabelling the diagnostic and leaving the declared
+    // "parse" kind unreachable.
+    const fetchImpl = vi.fn().mockResolvedValueOnce(
+      new Response("{not json", { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    const storage = tokenStorage("tok");
+    loadTmdbTrending(() => undefined, { storage, fetchImpl: fetchImpl as unknown as typeof fetch });
+    await vi.waitFor(() => {
+      const status = readTmdbStatus(storage);
+      expect(status).not.toBeNull();
+      expect(status?.lastError).toBe("parse");
+      expect(status?.lastSuccessAtMs).toBeNull();
+    });
+  });
+
+  it("F42: a parsed-but-empty payload is an unusable answer, not a parse failure", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ results: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    const storage = tokenStorage("tok");
+    loadTmdbTrending(() => undefined, { storage, fetchImpl: fetchImpl as unknown as typeof fetch });
+    await vi.waitFor(() => {
+      const status = readTmdbStatus(storage);
+      expect(status).not.toBeNull();
+      expect(status?.lastError).toBe("http");
+    });
+  });
+
   it("readTmdbStatus tolerates corrupt/absent records", () => {
     const storage = memoryStorage();
     expect(readTmdbStatus(storage)).toBeNull();

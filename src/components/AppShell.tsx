@@ -1,6 +1,7 @@
 import {
   BackendCommandError,
   backToLobby,
+  cancelAndBroadcastSchedule,
   checkProviderStatus,
   commandErrorMessage,
   createLocalParty,
@@ -448,6 +449,31 @@ export function AppShell() {
     setLocalScreen("FRIENDS");
   };
 
+  /**
+   * F39: cancel a pending schedule. The backend command already existed and
+   * was registered, but nothing in the UI could reach it — so "Cancelled" was
+   * a persisted state no user action could produce. Refreshing afterwards
+   * drops the cancelled row from Upcoming, so reopening the app cannot
+   * resurrect it.
+   */
+  const cancelSchedule = useCallback((scheduleId: string) => {
+    void cancelAndBroadcastSchedule(scheduleId).then((cancelled) => {
+      if (!cancelled) {
+        return;
+      }
+      void listSchedules().then((schedules) => {
+        setUpcoming(
+          schedules.filter(
+            (schedule) =>
+              schedule.status !== "Cancelled" &&
+              schedule.status !== "Completed" &&
+              schedule.scheduledStartUtcMs > Date.now() - 24 * 3600_000,
+          ),
+        );
+      });
+    });
+  }, []);
+
   // Media naming for Upcoming cards — the snapshot's live media when it
   // matches, else a stored cache entry name, else the honest raw id.
   // §56: the guest's pending schedule accept — shown until answered.
@@ -729,6 +755,7 @@ export function AppShell() {
           onOpenSettings={goSettings}
           onOpenSchedule={goSchedule}
           onOpenFriends={goFriends}
+          onCancelSchedule={cancelSchedule}
         />
         {debugHudEnabled ? <DebugHud snapshot={snapshot} /> : null}
       </>
@@ -795,6 +822,9 @@ export function AppShell() {
   if (closePrompt.visible) {
     return (
       <EndPartyConfirmView
+        // F6: the role was already tracked here but never passed through, so a
+        // guest was shown the host-only "End for everyone" wording.
+        isHost={closePrompt.isHost}
         onCancel={() => {
           setClosePrompt({ visible: false, isHost: false });
         }}
@@ -896,7 +926,13 @@ export function AppShell() {
   }
 
   if (snapshot.screen === "PARTY_END_CONFIRM") {
-    return <EndPartyConfirmView onCancel={goCinema} onConfirm={confirmEndParty} />;
+    return (
+      <EndPartyConfirmView
+        isHost={snapshot.room.role === "HOST"}
+        onCancel={goCinema}
+        onConfirm={confirmEndParty}
+      />
+    );
   }
 
   // §52: the retention question renders over the post-party HOME screen —
@@ -913,6 +949,7 @@ export function AppShell() {
         onOpenSettings={goSettings}
         onOpenSchedule={goSchedule}
         onOpenFriends={goFriends}
+        onCancelSchedule={cancelSchedule}
       />
       {debugHudEnabled ? <DebugHud snapshot={snapshot} /> : null}
       {retentionPrompt != null ? (

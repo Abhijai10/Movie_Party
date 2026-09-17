@@ -1,8 +1,8 @@
 import { motion } from "framer-motion";
 import { ArrowLeft, ArrowRight, Film } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AppSnapshot } from "../backend/appRuntime";
-import { countdownDisplayFrom } from "../sync/countdownModel";
+import { countdownDisplayFrom, countdownHandoff } from "../sync/countdownModel";
 import { CinemaButton } from "../components/mp/CinemaButton";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
@@ -51,20 +51,35 @@ export function ReadyCheckView({
     snapshot.network.connected &&
     snapshot.room.strictSync;
 
+  // F8: fire the hand-off into the cinema exactly once per countdown. The
+  // effect below restarts whenever its deps change — and `onStarted` is
+  // re-created by the parent on every render — so a guard local to the effect
+  // resets on each run and re-fired on an already-elapsed deadline. Keying the
+  // guard on the deadline (held in a ref, so it survives effect re-runs) keeps
+  // duplicate ready events, re-renders and reconnects from starting the
+  // transition twice, while still allowing a genuinely new countdown.
+  const startedForRef = useRef<number | null>(null);
+
   useEffect(() => {
     if (executeAtWallMs == null) {
+      startedForRef.current = null;
       return;
     }
     let frame = 0;
-    let completed = false;
     const tick = () => {
       const next = countdownDisplayFrom(executeAtWallMs, Date.now());
       setNowWallMs(Date.now());
-      if (next.phase === "done" && !completed) {
-        completed = true;
-        // The backend commit at the deadline is authoritative; this is
-        // the visual handoff into cinema once it has fired.
-        onStarted();
+      if (next.phase === "done") {
+        const { shouldStart, nextStartedFor } = countdownHandoff(
+          executeAtWallMs,
+          startedForRef.current,
+        );
+        startedForRef.current = nextStartedFor;
+        if (shouldStart) {
+          // The backend commit at the deadline is authoritative; this is
+          // the visual handoff into cinema once it has fired.
+          onStarted();
+        }
         return;
       }
       frame = window.requestAnimationFrame(tick);

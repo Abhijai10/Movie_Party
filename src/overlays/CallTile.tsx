@@ -248,9 +248,26 @@ export function CallTile({
             // drives width, dy drives height. Each is clamped in its own
             // spec range so the header always stays visible.
             const onMove = (moveEvent: PointerEvent) => {
+              const sizePx = clampCameraCardSize(startSize + (moveEvent.clientX - startX));
+              const heightPx = clampCameraCardHeight(
+                startHeight + (moveEvent.clientY - startY),
+              );
+              // F12: growing the card must not push it over the reserved dock
+              // strip. `clampPosition` reads the live DOM rect, which still
+              // reports the PRE-resize size at this point, so clamp against the
+              // incoming dimensions instead.
               updateSession({
-                sizePx: clampCameraCardSize(startSize + (moveEvent.clientX - startX)),
-                heightPx: clampCameraCardHeight(startHeight + (moveEvent.clientY - startY)),
+                sizePx,
+                heightPx,
+                position: clampCallTilePosition(
+                  session.position,
+                  {
+                    width: typeof window === "undefined" ? 1280 : window.innerWidth,
+                    height: typeof window === "undefined" ? 720 : window.innerHeight,
+                  },
+                  { width: sizePx, height: heightPx },
+                  reservedBottomPx,
+                ),
               });
             };
             const onUp = () => {

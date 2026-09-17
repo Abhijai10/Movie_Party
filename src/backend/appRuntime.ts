@@ -335,6 +335,29 @@ export function friendStatusFor(
   return "OFFLINE";
 }
 
+/**
+ * Whether the live tailnet status currently observes a saved friend (F22).
+ *
+ * `undefined` means the peer was not present in this tailnet reading — a real
+ * answer, not a missing one — and `friendStatusFor` renders it as OFFLINE.
+ * That keeps the contract honest in both directions: a joined friend is no
+ * longer stuck permanently Offline when the app genuinely knows they are
+ * online, and nothing fabricates ONLINE when they are absent.
+ *
+ * Callers used to pass a hard-coded `undefined`, which made ONLINE
+ * unreachable and left every joined friend reading "Offline" forever.
+ */
+export function candidateOnlineFor(
+  friend: StoredFriend,
+  view: TailnetPeersView | null,
+): boolean | undefined {
+  if (view == null) {
+    return undefined;
+  }
+  const candidate = view.candidates.find((entry) => entry.peerKey === friend.peerKey);
+  return candidate?.online;
+}
+
 /** Human copy for a friend's connection state. */
 export function friendStatusCopy(friend: StoredFriend, status: FriendFlowStatus): string {
   if (status === "MOVIE_PARTY_VERIFIED") {

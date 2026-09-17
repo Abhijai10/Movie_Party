@@ -26,6 +26,7 @@
 
 import {
   acquireRealCallMedia,
+  cameraToggleAction,
   createMoviePartyPeerConnection,
   stopCallStream,
   type CallMode,
@@ -381,8 +382,14 @@ export async function startRealCallSession(
     }
   };
 
+  // F29: remember the video sender so the camera toggle can swap tracks
+  // without renegotiating — a same-kind `replaceTrack` needs no re-offer.
+  let videoSender: RTCRtpSender | null = null;
   for (const track of localStream.getTracks()) {
-    peerConnection.addTrack(track, localStream);
+    const sender = peerConnection.addTrack(track, localStream);
+    if (track.kind === "video") {
+      videoSender = sender;
+    }
   }
 
   // The wire-driven re-offer path (distinct from the RENEGOTIATE poke in
@@ -516,6 +523,82 @@ export async function startRealCallSession(
     return applyQueueTail;
   };
 
+  /**
+   * F29: the user's camera toggle is a privacy control, so turning it off must
+   * RELEASE the capture device rather than merely mute a live track.
+   * `track.enabled = false` keeps the device open, so the OS camera indicator
+   * stays lit while the UI reports the camera as off — the two disagreed.
+   *
+   * Turning it back on re-acquires the video device and swaps it through the
+   * existing sender (a same-kind `replaceTrack` needs no renegotiation). If the
+   * device is unavailable or permission is refused, the camera stays off rather
+   * than silently claiming otherwise.
+   *
+   * The degradation ladder (`applyCameraTier`) deliberately keeps its
+   * documented freeze semantics: that path is a temporary quality step, not a
+   * user privacy choice, so it must not hard-end the track.
+   */
+  const applyLocalCameraEnabled = async (enabled: boolean): Promise<void> => {
+    if (closed) {
+      return;
+    }
+    const liveTracks = localStream
+      .getVideoTracks()
+      .filter((track) => track.readyState === "live");
+
+    switch (cameraToggleAction(liveTracks.length > 0, enabled)) {
+      case "enable-existing":
+        for (const track of liveTracks) {
+          track.enabled = true;
+        }
+        return;
+
+      case "acquire":
+        try {
+          const devices = typeof navigator === "undefined" ? undefined : navigator.mediaDevices;
+          if (!devices?.getUserMedia) {
+            return;
+          }
+          const fresh = await devices.getUserMedia({ video: true });
+          const freshVideo = fresh.getVideoTracks();
+          const track = freshVideo[0];
+          // `track === undefined` covers a device that yielded no video; the
+          // connection check covers the call ending while the permission prompt
+          // was still open. Either way, release instead of leaking a camera.
+          if (track === undefined || peerConnection.connectionState === "closed") {
+            for (const opened of fresh.getTracks()) {
+              opened.stop();
+            }
+            return;
+          }
+          localStream.addTrack(track);
+          if (videoSender) {
+            await videoSender.replaceTrack(track);
+          } else {
+            videoSender = peerConnection.addTrack(track, localStream);
+          }
+        } catch {
+          // Denied or unavailable — the camera stays off, honestly.
+        }
+        return;
+
+      case "release":
+        // Off: release the device so the OS indicator goes out.
+        for (const track of localStream.getVideoTracks()) {
+          track.stop();
+          localStream.removeTrack(track);
+        }
+        if (videoSender) {
+          try {
+            await videoSender.replaceTrack(null);
+          } catch {
+            // A torn-down connection has nothing to detach from.
+          }
+        }
+        return;
+    }
+  };
+
   const session: LiveCallSession = {
     role,
     markerId,
@@ -526,12 +609,12 @@ export async function startRealCallSession(
     mediaErrorCode: media.errorCode,
     applyRemoteSignal,
     setLocalTracksEnabled(cameraEnabled: boolean, microphoneEnabled: boolean) {
-      for (const track of localStream.getVideoTracks()) {
-        track.enabled = cameraEnabled;
-      }
       for (const track of localStream.getAudioTracks()) {
         track.enabled = microphoneEnabled;
       }
+      // F29: the camera half is async (it may have to release or re-acquire the
+      // device). Audio stays a synchronous enabled flip.
+      void applyLocalCameraEnabled(cameraEnabled);
     },
     async applyCameraTier(camera: CameraTierState) {
       if (closed) {

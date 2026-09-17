@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { ArrowLeft, Download, RotateCcw, Trash2 } from "lucide-react";
+import { ArrowLeft, Download, RotateCcw } from "lucide-react";
 import { CinemaButton } from "../components/mp/CinemaButton";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
@@ -35,6 +35,16 @@ import {
  * (§38), Strict Sync is visible but NOT disableable (§56 — it is
  * core product behavior, §14), destructive actions confirm.
  */
+/**
+ * Label for the provider session control (F10).
+ *
+ * The action behind it is a status re-check: Movie Party's provider session
+ * lives inside its managed browser, and no command clears a signed-in provider
+ * profile. The control therefore must not promise a logout or a reset. Exported
+ * so the honesty of this copy is pinned by a test rather than by review.
+ */
+export const PROVIDER_RECHECK_LABEL = "Re-check provider session";
+
 type SettingsViewProps = {
   snapshot: AppSnapshot;
   onBack: () => void;
@@ -97,9 +107,15 @@ export function SettingsView({ snapshot, onBack, onSnapshot }: SettingsViewProps
   );
   const [nameSaving, setNameSaving] = useState(false);
   const [nameError, setNameError] = useState<string | null>(null);
+  // F9: re-sync the draft on the NAME VALUE, never on the participants array.
+  // The backend emits a fresh array on every snapshot tick, so the old
+  // `[snapshot.participants]` dependency re-ran constantly and overwrote
+  // whatever the user was mid-way through typing. Depending on the derived
+  // string means the draft only resets when the name genuinely changes.
+  const backendDisplayName = snapshot.participants[0]?.displayName ?? "You";
   useEffect(() => {
-    setNameDraft(snapshot.participants[0]?.displayName ?? "You");
-  }, [snapshot.participants]);
+    setNameDraft(backendDisplayName);
+  }, [backendDisplayName]);
 
   const saveName = useCallback(() => {
     const trimmed = nameDraft.trim();
@@ -130,7 +146,6 @@ export function SettingsView({ snapshot, onBack, onSnapshot }: SettingsViewProps
     appVersion: "—",
     protocol: "—",
   });
-  const [confirmResetProvider, setConfirmResetProvider] = useState<string | null>(null);
   const [exportedBundle, setExportedBundle] = useState<string | null>(null);
   // TMDB hero key: stored only in localStorage on this device.
   const [tmdbTokenSaved, setTmdbTokenSaved] = useState<boolean>(() =>
@@ -532,12 +547,10 @@ export function SettingsView({ snapshot, onBack, onSnapshot }: SettingsViewProps
                   : "Nothing cached yet"}
               </Row>
               <Row
-                label="Clear cache"
-                hint="Removes Movie Party's downloaded copy — never your original movie"
+                label="Clearing cached copies"
+                hint="Each party's downloaded copy is removed (or kept) by the post-party prompt. Movie Party has no bulk clear — a cached copy is only ever removed as part of that decision, never as a standalone action."
               >
-                <CinemaButton variant="neutral" icon={Trash2} iconPos="left">
-                  Clear
-                </CinemaButton>
+                Per party
               </Row>
               <Row label="Post-party media policy" hint="Keep / Remove is asked per party (§52)">
                 Ask every time
@@ -550,7 +563,6 @@ export function SettingsView({ snapshot, onBack, onSnapshot }: SettingsViewProps
               {capabilities.map((capability) => {
                 const providerSnapshot =
                   snapshot.provider.providerId === capability.id ? snapshot.provider : null;
-                const resetting = confirmResetProvider === capability.id;
                 return (
                   <article
                     key={capability.id}
@@ -643,19 +655,20 @@ export function SettingsView({ snapshot, onBack, onSnapshot }: SettingsViewProps
                         variant="neutral"
                         icon={RotateCcw}
                         iconPos="left"
+                        disabled={diagnosticRunning != null}
                         onClick={() => {
-                          if (!resetting) {
-                            setConfirmResetProvider(capability.id);
-                            return;
-                          }
-                          // §60: reset requires confirmation because it logs the user out.
-                          setConfirmResetProvider(null);
-                          void (async () => {
-                            await checkProviderStatus(capability.id);
-                          })();
+                          // F10: this is a status re-check, NOT a logout. The
+                          // provider session lives in Movie Party's managed
+                          // browser, and there is no command that clears a
+                          // signed-in provider profile — so the control
+                          // describes what it actually does instead of
+                          // claiming to log the user out. (It previously
+                          // demanded a "Confirm reset — logs you out" step and
+                          // then only re-checked status.)
+                          void checkProviderStatus(capability.id);
                         }}
                       >
-                        {resetting ? "Confirm reset — logs you out" : "Reset Provider Profile"}
+                        {PROVIDER_RECHECK_LABEL}
                       </CinemaButton>
                     </div>
                   </article>

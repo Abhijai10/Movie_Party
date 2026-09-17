@@ -18,6 +18,7 @@ import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
 import {
   acceptFriendInvite,
+  candidateOnlineFor,
   friendErrorCopy,
   friendInviteLink,
   friendStatusCopy,
@@ -26,9 +27,11 @@ import {
   refreshFriendStates,
   removeFriend,
   renameFriend,
+  tailnetPeers,
   verifyFriend,
   type FriendInviteLink,
   type StoredFriend,
+  type TailnetPeersView,
 } from "../backend/appRuntime";
 import { parseFriendInvite } from "../invites/deepLinks";
 
@@ -75,6 +78,12 @@ export function FriendsView({
   const [renamingKey, setRenamingKey] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
+  /**
+   * Live tailnet reading (F22). Every render used to pass a hard-coded
+   * `undefined` as the online hint, so a joined friend could never be shown
+   * Online — the state was unreachable and the peer table was never read.
+   */
+  const [peers, setPeers] = useState<TailnetPeersView | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -84,6 +93,13 @@ export function FriendsView({
       onFriendsChanged(await refreshFriendStates());
     } catch {
       // list_friends never throws in Rust — keep the last known list.
+    }
+    // Read the live tailnet status alongside the persisted states. A null
+    // view is honest "unknown" and renders as Offline, never as Online.
+    try {
+      setPeers(await tailnetPeers());
+    } catch {
+      setPeers(null);
     }
   }, [onFriendsChanged]);
 
@@ -329,7 +345,7 @@ export function FriendsView({
               ) : (
                 <ul className="mt-4 space-y-3 friends-scroll">
                   {friends.map((friend) => {
-                    const status = friendStatusFor(friend, undefined);
+                    const status = friendStatusFor(friend, candidateOnlineFor(friend, peers));
                     const renaming = renamingKey === friend.peerKey;
                     const busy = busyKey === friend.peerKey;
                     return (

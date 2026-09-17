@@ -150,6 +150,33 @@ pub fn provider_accepts_url(provider: ProviderId, url: &str) -> bool {
     }
 }
 
+/// Outcome of validating a requested provider mode on the stable path.
+///
+/// F56/F57: this is the security boundary that keeps Provider Shared out of the
+/// stable app, and it is deliberately TWO checks. The experimental mode must
+/// clear the per-device diagnostic gate, and every mode must then be exactly
+/// `PROVIDER_SYNC` to proceed — so even a device whose diagnostic verified
+/// capture still cannot enter the experimental path from a stable build.
+pub enum ProviderModeGate {
+    /// `PROVIDER_SYNC` — the supported provider path.
+    Stable,
+    /// `PROVIDER_SHARED` without a verified diagnostic on this device.
+    SharedUnverified,
+    /// Anything else, including `PROVIDER_SHARED` that cleared the diagnostic.
+    Unsupported,
+}
+
+/// Decide whether a requested provider mode may proceed (F56/F57).
+pub fn provider_mode_gate(mode: &str, shared_verified_on_device: bool) -> ProviderModeGate {
+    if mode == "PROVIDER_SHARED" && !shared_verified_on_device {
+        return ProviderModeGate::SharedUnverified;
+    }
+    if mode != "PROVIDER_SYNC" {
+        return ProviderModeGate::Unsupported;
+    }
+    ProviderModeGate::Stable
+}
+
 /// True when a pasted generic link is one Movie Party should open.
 ///
 /// Generic links are handed to a real managed Chrome instance, so a link that
@@ -964,5 +991,75 @@ mod tests {
             recovery_action(Some(10.0), false),
             ProviderRecoveryAction::StrictGlobalPause
         );
+    }
+
+    // ── F56/F57: the Provider Shared boundary ────────────────────────────
+
+    #[test]
+    fn f56_stable_provider_sync_mode_is_allowed() {
+        assert!(matches!(
+            provider_mode_gate("PROVIDER_SYNC", false),
+            ProviderModeGate::Stable
+        ));
+        // A verified diagnostic must not change that — the stable path is the
+        // stable path either way.
+        assert!(matches!(
+            provider_mode_gate("PROVIDER_SYNC", true),
+            ProviderModeGate::Stable
+        ));
+    }
+
+    #[test]
+    fn f56_shared_mode_is_refused_without_a_verified_diagnostic() {
+        assert!(matches!(
+            provider_mode_gate("PROVIDER_SHARED", false),
+            ProviderModeGate::SharedUnverified
+        ));
+    }
+
+    #[test]
+    fn f57_shared_mode_stays_refused_even_on_a_verified_device() {
+        // The second half of the double gate: the experimental path is
+        // unreachable from a stable build no matter what the diagnostic says.
+        assert!(matches!(
+            provider_mode_gate("PROVIDER_SHARED", true),
+            ProviderModeGate::Unsupported
+        ));
+    }
+
+    #[test]
+    fn f56_unknown_modes_are_refused() {
+        for mode in [
+            "",
+            "OFF",
+            "SHARED",
+            "provider_shared",
+            "PROVIDER_SYNC ",
+            "GENERIC_LINK",
+        ] {
+            assert!(
+                matches!(
+                    provider_mode_gate(mode, false),
+                    ProviderModeGate::Unsupported
+                ),
+                "{mode:?} must not open a provider path"
+            );
+        }
+    }
+
+    #[test]
+    fn f57_no_mode_other_than_sync_ever_reaches_the_stable_path() {
+        // Exhaustive over the modes the app can name, in both diagnostic
+        // states: only PROVIDER_SYNC proceeds.
+        for mode in ["PROVIDER_SYNC", "PROVIDER_SHARED", "", "OFF", "junk"] {
+            for verified in [false, true] {
+                let gate = provider_mode_gate(mode, verified);
+                assert_eq!(
+                    matches!(gate, ProviderModeGate::Stable),
+                    mode == "PROVIDER_SYNC",
+                    "{mode:?} verified={verified} must not be Stable"
+                );
+            }
+        }
     }
 }

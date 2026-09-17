@@ -350,7 +350,16 @@ fn open_external_url(url: &str) -> Result<(), String> {
         "external setup actions are unsupported on this platform",
     ));
     result
-        .map(|_| ())
+        .map(|mut child| {
+            // F47: reap the launcher. Dropping a `Child` does not wait for it,
+            // so the process stayed a zombie for the life of the app. The wait
+            // runs on a detached thread so the IPC call never blocks on a slow
+            // handler (a browser or the Tailscale app can take seconds to
+            // start), and only the child we spawned is ever waited on.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        })
         .map_err(|error| format!("MP-NET-TS-003 could not open Tailscale setup: {error}"))
 }
 
@@ -641,26 +650,30 @@ fn launch_provider(
     mode: String,
     runtime: tauri::State<'_, app_runtime::AppRuntime>,
 ) -> Result<app_runtime::AppSnapshot, String> {
-    use crate::providers::sync::{provider_accepts_url, provider_id_from_str};
+    use crate::providers::sync::{
+        provider_accepts_url, provider_id_from_str, provider_mode_gate, ProviderModeGate,
+    };
 
-    if mode == "PROVIDER_SHARED" {
-        // the gate consults the persisted empirical record
-        // (§38). A verified diagnostic on THIS device unlocks the
-        // experimental path; anything else stays the honest MP-CAPTURE-001
-        // with the Sync Mode offer.
-        let verified = runtime
+    // F56/F57: the mode gate stays doubly enforced. The diagnostic is only
+    // consulted for PROVIDER_SHARED (as before), and even a verified device is
+    // then refused by the second check — the experimental path is unreachable
+    // from a stable build.
+    let shared_verified = mode == "PROVIDER_SHARED"
+        && runtime
             .list_provider_diagnostics()
             .into_iter()
             .any(|record| record.provider_id == provider_id && record.shared_available);
-        if !verified {
+    match provider_mode_gate(&mode, shared_verified) {
+        ProviderModeGate::Stable => {}
+        ProviderModeGate::SharedUnverified => {
             return Err(
                 "MP-CAPTURE-001 Provider Shared is experimental and unavailable until the capture diagnostic is verified on this device. Run the Shared diagnostic in Settings › Providers, or use Provider Sync Mode."
                     .to_string(),
             );
         }
-    }
-    if mode != "PROVIDER_SYNC" {
-        return Err("MP-PROVIDER-002 unsupported provider mode".to_string());
+        ProviderModeGate::Unsupported => {
+            return Err("MP-PROVIDER-002 unsupported provider mode".to_string());
+        }
     }
 
     let provider = provider_id_from_str(&provider_id)
