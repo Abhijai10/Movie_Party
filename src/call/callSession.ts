@@ -538,7 +538,7 @@ export async function startRealCallSession(
    * documented freeze semantics: that path is a temporary quality step, not a
    * user privacy choice, so it must not hard-end the track.
    */
-  const applyLocalCameraEnabled = async (enabled: boolean): Promise<void> => {
+  const applyLocalCameraToggle = async (enabled: boolean): Promise<void> => {
     if (closed) {
       return;
     }
@@ -597,6 +597,24 @@ export async function startRealCallSession(
         }
         return;
     }
+  };
+
+  /**
+   * Serializes camera toggles (F29).
+   *
+   * The toggle awaits `getUserMedia`, and the caller's effect re-runs on the
+   * MICROPHONE toggle too. Without serialization, a mic toggle landing while a
+   * camera acquire was in flight would find no live track yet, start a SECOND
+   * acquire, and add a duplicate video track. Chaining preserves the user's
+   * ordering — the last toggle issued is the one that wins.
+   */
+  let cameraToggleChain: Promise<void> = Promise.resolve();
+
+  const applyLocalCameraEnabled = (enabled: boolean): Promise<void> => {
+    cameraToggleChain = cameraToggleChain
+      .then(() => applyLocalCameraToggle(enabled))
+      .catch(() => undefined);
+    return cameraToggleChain;
   };
 
   const session: LiveCallSession = {
