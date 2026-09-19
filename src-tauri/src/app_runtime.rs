@@ -21,8 +21,9 @@ use crate::{
         CallSignalLedger, CallSignalType, CameraFeedback, CameraState, MicState,
     },
     chat::{
-        allowed_reactions, validate_chat_message, validate_reaction, ChatMessage, ReactionMessage,
-        ReactionRateLimiter,
+        allowed_reactions, push_bounded, validate_chat_message, validate_reaction,
+        validate_received_chat_message, validate_received_reaction, ChatMessage, ReactionMessage,
+        ReactionRateLimiter, MAX_CHAT_HISTORY, MAX_REACTION_HISTORY,
     },
     identity::DeviceIdentity,
     media::{
@@ -2856,6 +2857,15 @@ impl AppRuntime {
 
         let display_name = self.lock().local_participant.display_name.clone();
 
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        // MP-16: one expiry value, used both for the invite the guest receives
+        // and for the host's own authorization check — so the two can never
+        // disagree about when this room stops accepting new guests.
+        let invite_expires_at_ms = now_ms + room::INVITE_TTL_MS;
+
         let server = if let Some(ref path) = maybe_media_path {
             QuicServer::bind_with_local_media(
                 bind_addr,
@@ -2872,16 +2882,12 @@ impl AppRuntime {
                 identity.device_id.clone(),
             )
         }
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .with_invite_expiry(invite_expires_at_ms);
 
         let bound_addr = server.local_addr().map_err(|e| e.to_string())?;
         let cert_der = server.certificate().as_ref().to_vec();
         let cert_fingerprint = URL_SAFE_NO_PAD.encode(Sha256::digest(&cert_der));
-
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
 
         let invite = room::MoviePartyInvite {
             v: room::INVITE_VERSION_V1,
@@ -2893,7 +2899,7 @@ impl AppRuntime {
             host_ip: tailscale_ip,
             host_port: bound_addr.port(),
             server_certificate_fingerprint: cert_fingerprint.clone(),
-            expires_at_ms: now_ms + room::INVITE_TTL_MS,
+            expires_at_ms: invite_expires_at_ms,
         };
 
         let invite_url = room::encode_invite(&invite).map_err(|e| e.to_string())?;
@@ -4499,13 +4505,26 @@ impl AppRuntime {
                     body,
                     created_host_time_us,
                 } => {
+                    // MP-14: validate on receipt as well as at the transport
+                    // boundary. The boundary is the authoritative rejection
+                    // point; this second check is what protects the *applied*
+                    // state, which must hold even if an event reaches here by
+                    // another route (a local broadcast, a future transport).
+                    // The local send path already validated its own message.
+                    if validate_received_chat_message(&message_id, &body).is_err() {
+                        return;
+                    }
                     if !state.chat.iter().any(|m| m.id == message_id) {
-                        state.chat.push(ChatSnapshot {
-                            id: message_id,
-                            sender: msg_sender,
-                            body,
-                            created_host_time_us,
-                        });
+                        push_bounded(
+                            &mut state.chat,
+                            ChatSnapshot {
+                                id: message_id,
+                                sender: msg_sender,
+                                body,
+                                created_host_time_us,
+                            },
+                            MAX_CHAT_HISTORY,
+                        );
                     }
                 }
                 QuicServerEvent::Reaction {
@@ -4513,6 +4532,12 @@ impl AppRuntime {
                     sender: msg_sender,
                     reaction,
                 } => {
+                    // MP-14: the value check the local send path applies. A
+                    // reaction that is merely rate-limited but not one of the
+                    // v1 reactions must not enter room state.
+                    if validate_received_reaction(&reaction_id, &reaction).is_err() {
+                        return;
+                    }
                     let participant_id = msg_sender.clone();
                     if let Err(_err) = state
                         .reaction_limiter
@@ -4522,12 +4547,16 @@ impl AppRuntime {
                         return;
                     }
                     if !state.reactions.iter().any(|r| r.id == reaction_id) {
-                        state.reactions.push(ReactionSnapshot {
-                            id: reaction_id,
-                            sender: msg_sender,
-                            reaction,
-                            created_host_time_us: monotonic_us(),
-                        });
+                        push_bounded(
+                            &mut state.reactions,
+                            ReactionSnapshot {
+                                id: reaction_id,
+                                sender: msg_sender,
+                                reaction,
+                                created_host_time_us: monotonic_us(),
+                            },
+                            MAX_REACTION_HISTORY,
+                        );
                     }
                 }
                 QuicServerEvent::ControlGrant { request_id, .. } => {
@@ -5186,12 +5215,16 @@ impl AppRuntime {
                 .accept(&participant_id, host_time_us)
                 .map_err(|error| error.to_string())?;
             let sender = state.local_participant.display_name.clone();
-            state.reactions.push(ReactionSnapshot {
-                id: message.reaction_id.to_string(),
-                sender: sender.clone(),
-                reaction: message.reaction.clone(),
-                created_host_time_us: host_time_us,
-            });
+            push_bounded(
+                &mut state.reactions,
+                ReactionSnapshot {
+                    id: message.reaction_id.to_string(),
+                    sender: sender.clone(),
+                    reaction: message.reaction.clone(),
+                    created_host_time_us: host_time_us,
+                },
+                MAX_REACTION_HISTORY,
+            );
 
             let event = QuicServerEvent::Reaction {
                 reaction_id: message.reaction_id.to_string(),
@@ -6376,12 +6409,16 @@ impl AppRuntime {
         };
         validate_chat_message(&message).map_err(|error| error.to_string())?;
         let sender = state.local_participant.display_name.clone();
-        state.chat.push(ChatSnapshot {
-            id: message.message_id.to_string(),
-            sender: sender.clone(),
-            body: message.body.clone(),
-            created_host_time_us: message.created_host_time_us,
-        });
+        push_bounded(
+            &mut state.chat,
+            ChatSnapshot {
+                id: message.message_id.to_string(),
+                sender: sender.clone(),
+                body: message.body.clone(),
+                created_host_time_us: message.created_host_time_us,
+            },
+            MAX_CHAT_HISTORY,
+        );
         // Guest→Host transport: relay the message to the host, which is the
         // canonical broadcast point (host appends + echoes to all guests).
         if let Some(client) = state.client.clone() {
@@ -10751,6 +10788,152 @@ mod scheduling_tests {
         let state = runtime.lock();
         let db = state.db.as_ref().expect("db");
         assert_eq!(db.list_schedules().expect("list")[0].status, "Cancelled");
+    }
+
+    // ── MP-14: received chat/reactions are validated and bounded ─────────
+
+    /// MP-14: a received message is held to the same body and id rules as a
+    /// locally generated one. Before this, the receive path applied whatever
+    /// came off the wire — the asymmetry the finding describes.
+    #[test]
+    fn mp14_received_chat_messages_are_validated_before_being_applied() {
+        let (runtime, _dir) = runtime_with_db();
+        let inner = runtime.inner_for_events();
+
+        let deliver = |message_id: String, body: String| {
+            let event = ServerEvent::ChatMessage {
+                message_id,
+                sender: "guest-device".to_string(),
+                body,
+                created_host_time_us: 1,
+            };
+            super::AppRuntime::apply_peer_event_pub(&inner, envelope(event.clone()), event);
+        };
+
+        deliver(
+            uuid::Uuid::now_v7().to_string(),
+            "a".repeat(crate::chat::MAX_CHAT_BODY_BYTES + 1),
+        );
+        assert!(
+            runtime.lock().chat.is_empty(),
+            "an oversized received message must not be applied"
+        );
+
+        deliver("not-a-uuid".to_string(), "hello".to_string());
+        assert!(
+            runtime.lock().chat.is_empty(),
+            "a received message with a malformed id must not be applied"
+        );
+
+        deliver(uuid::Uuid::now_v7().to_string(), "   ".to_string());
+        assert!(
+            runtime.lock().chat.is_empty(),
+            "a received message with an empty body must not be applied"
+        );
+
+        // Not a blanket refusal: valid input is still applied.
+        deliver(uuid::Uuid::now_v7().to_string(), "hello".to_string());
+        let chat = runtime.lock().chat.clone();
+        assert_eq!(chat.len(), 1, "a valid received message must be applied");
+        assert_eq!(chat[0].body, "hello");
+    }
+
+    /// MP-14: a received reaction must be one of the v1 set, not merely
+    /// rate-limited.
+    #[test]
+    fn mp14_received_reactions_are_validated_before_being_applied() {
+        let (runtime, _dir) = runtime_with_db();
+        let inner = runtime.inner_for_events();
+
+        let deliver = |reaction_id: String, reaction: String| {
+            let event = ServerEvent::Reaction {
+                reaction_id,
+                sender: "guest-device".to_string(),
+                reaction,
+            };
+            super::AppRuntime::apply_peer_event_pub(&inner, envelope(event.clone()), event);
+        };
+
+        deliver(uuid::Uuid::now_v7().to_string(), "⭐".to_string());
+        assert!(
+            runtime.lock().reactions.is_empty(),
+            "an unknown reaction must not be applied"
+        );
+
+        deliver("not-a-uuid".to_string(), "🔥".to_string());
+        assert!(
+            runtime.lock().reactions.is_empty(),
+            "a malformed reaction id must not be applied"
+        );
+
+        deliver(uuid::Uuid::now_v7().to_string(), "🔥".to_string());
+        assert_eq!(
+            runtime.lock().reactions.len(),
+            1,
+            "a valid reaction must still be applied"
+        );
+    }
+
+    /// MP-14: chat history is bounded, so a peer cannot grow it without limit.
+    #[test]
+    fn mp14_room_chat_history_is_bounded() {
+        let (runtime, _dir) = runtime_with_db();
+        let inner = runtime.inner_for_events();
+
+        let total = crate::chat::MAX_CHAT_HISTORY + 25;
+        for index in 0..total {
+            let event = ServerEvent::ChatMessage {
+                message_id: uuid::Uuid::now_v7().to_string(),
+                sender: "guest-device".to_string(),
+                body: format!("message {index}"),
+                created_host_time_us: 1,
+            };
+            super::AppRuntime::apply_peer_event_pub(&inner, envelope(event.clone()), event);
+        }
+
+        let chat = runtime.lock().chat.clone();
+        assert_eq!(
+            chat.len(),
+            crate::chat::MAX_CHAT_HISTORY,
+            "chat history must be capped"
+        );
+        // The retained window is the most recent, still in order.
+        assert_eq!(
+            chat[0].body,
+            format!("message {}", total - crate::chat::MAX_CHAT_HISTORY)
+        );
+        assert_eq!(chat[chat.len() - 1].body, format!("message {}", total - 1));
+    }
+
+    /// MP-14: the reaction history is bounded by the same mechanism. Filling it
+    /// through the event path is impractical because the rate limiter allows
+    /// five per three seconds, so the bound is exercised directly here and the
+    /// *wiring* is covered by the chat test above.
+    #[test]
+    fn mp14_room_reaction_history_is_bounded() {
+        let (runtime, _dir) = runtime_with_db();
+
+        let total = crate::chat::MAX_REACTION_HISTORY + 10;
+        {
+            let mut state = runtime.lock();
+            for index in 0..total {
+                crate::chat::push_bounded(
+                    &mut state.reactions,
+                    super::ReactionSnapshot {
+                        id: format!("r{index}"),
+                        sender: "guest-device".to_string(),
+                        reaction: "🔥".to_string(),
+                        created_host_time_us: index as u64,
+                    },
+                    crate::chat::MAX_REACTION_HISTORY,
+                );
+            }
+        }
+
+        let reactions = runtime.lock().reactions.clone();
+        assert_eq!(reactions.len(), crate::chat::MAX_REACTION_HISTORY);
+        assert_eq!(reactions[0].id, "r10");
+        assert_eq!(reactions[reactions.len() - 1].id, format!("r{}", total - 1));
     }
 }
 

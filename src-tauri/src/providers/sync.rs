@@ -127,8 +127,17 @@ pub fn provider_capabilities() -> Vec<ProviderCapability> {
 }
 
 pub fn provider_accepts_url(provider: ProviderId, url: &str) -> bool {
-    let host = match host_from_url(url) {
-        Some(host) => host.to_ascii_lowercase(),
+    let parsed = match parse_http_url(url) {
+        Some(parsed) => parsed,
+        None => return false,
+    };
+
+    // Provider domains are DNS names, so a literal address can never match one.
+    // Refusing it here — rather than comparing `127.0.0.1` as text — keeps the
+    // allowlist a domain allowlist.
+    let host = match parsed.host() {
+        Some(url::Host::Domain(name)) => name.trim_end_matches('.').to_ascii_lowercase(),
+        Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_)) => return false,
         None => return false,
     };
 
@@ -186,50 +195,53 @@ pub fn provider_mode_gate(mode: &str, shared_verified_on_device: bool) -> Provid
 /// host is an intended use (see the `media.example` case below), so the
 /// restriction stays on the destination rather than narrowing the feature.
 pub fn generic_link_accepts_url(url: &str) -> bool {
-    match host_from_url(url) {
-        Some(host) => is_public_destination(host),
+    let parsed = match parse_http_url(url) {
+        Some(parsed) => parsed,
+        None => return false,
+    };
+
+    match parsed.host() {
+        Some(host) => is_public_destination(&host),
         None => false,
     }
-}
-
-/// The host portion of an authority, without any port or IPv6 brackets.
-fn bare_host(host: &str) -> &str {
-    let host = host.trim();
-    if let Some(rest) = host.strip_prefix('[') {
-        // Bracketed IPv6 literal, optionally followed by `:port`.
-        return rest.split(']').next().unwrap_or("");
-    }
-    // `host:port`. A bare (unbracketed) IPv6 literal cannot carry a port, so
-    // splitting on the first ':' is safe here.
-    host.split(':').next().unwrap_or(host)
 }
 
 /// True when `host` names a destination outside the local machine and LAN.
 ///
 /// Rejects loopback, unspecified, private, link-local, CGNAT and reserved
-/// addresses, `localhost`, mDNS `.local` names, and the numeric shorthand
-/// forms (`127.1`, `2130706433`) that denote loopback without parsing as an
-/// `Ipv4Addr`.
-fn is_public_destination(host: &str) -> bool {
-    let bare = bare_host(host).trim_end_matches('.');
+/// addresses, `localhost`, mDNS `.local` names, and single-label names.
+///
+/// The numeric shorthand forms (`127.1`, `2130706433`, `0x7f.1`) no longer
+/// need a special case: the URL parser normalises them to an `Ipv4` host
+/// before this function sees them, so they are judged as the address they
+/// denote rather than as a name.
+fn is_public_destination(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Ipv4(address) => is_public_address(std::net::IpAddr::V4(*address)),
+        url::Host::Ipv6(address) => is_public_address(std::net::IpAddr::V6(*address)),
+        url::Host::Domain(name) => is_public_domain(name),
+    }
+}
+
+/// True when `name` is a public DNS name.
+fn is_public_domain(name: &str) -> bool {
+    let bare = name.trim_end_matches('.');
     if bare.is_empty() {
         return false;
-    }
-
-    // A literal address must be a genuinely public one.
-    if let Ok(address) = bare.parse::<std::net::IpAddr>() {
-        return is_public_address(address);
     }
 
     let lowered = bare.to_ascii_lowercase();
     if lowered == "localhost" || lowered.ends_with(".localhost") || lowered.ends_with(".local") {
         return false;
     }
-    // A public destination is a dotted name, and must not be all digits and
-    // dots (which is how `127.1` slips past the address parser).
+    // A public destination is a dotted name. A single-label name is an
+    // intranet or mDNS host, never a provider destination.
     if !lowered.contains('.') {
         return false;
     }
+    // Belt and braces. The URL parser already normalises numeric shorthands to
+    // an `Ipv4` host, so an all-digits-and-dots *domain* should be
+    // unreachable — but if one ever appears, refuse it rather than trust that.
     !lowered
         .chars()
         .all(|character| character.is_ascii_digit() || character == '.')
@@ -264,16 +276,33 @@ fn is_public_address(address: std::net::IpAddr) -> bool {
     }
 }
 
-fn host_from_url(url: &str) -> Option<&str> {
-    let trimmed = url.trim();
-    let without_scheme = trimmed
-        .strip_prefix("https://")
-        .or_else(|| trimmed.strip_prefix("http://"))?;
-    let end = without_scheme
-        .find(['/', '?', '#'])
-        .unwrap_or(without_scheme.len());
-    let host = &without_scheme[..end];
-    (!host.is_empty()).then_some(host)
+/// Parse an absolute `http`/`https` URL with a real URL parser.
+///
+/// Splitting the authority by hand is what let `https://x@127.0.0.1:8080/`
+/// read as the host `x@127.0.0.1` — not an `IpAddr`, containing a dot, and not
+/// all digits, so it satisfied the "public destination" test (MP-19). A parser
+/// separates userinfo, host and port structurally, so the *host* is the only
+/// thing left to validate.
+///
+/// Note this is a destination check, not a provider-domain check: the same
+/// helper feeds the generic-link path and the provider allowlist, but the
+/// allowlist itself is unchanged — it still matches on the true host, so
+/// `https://netflix.com@evil.example/` is judged as `evil.example`.
+fn parse_http_url(url: &str) -> Option<url::Url> {
+    let parsed = url::Url::parse(url.trim()).ok()?;
+
+    // `Url::parse` also accepts `file:`, `data:`, `javascript:` and similar.
+    // Only the two schemes this app opens are allowed.
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+
+    // The WHATWG parser infers an authority for some inputs (`http:example.com`
+    // becomes `http://example.com/`), which is intended behaviour. An input
+    // that still has no host is not usable.
+    parsed.host()?;
+
+    Some(parsed)
 }
 
 /// Official landing page opened in the managed provider browser before any
@@ -899,6 +928,106 @@ mod tests {
             ProviderId::YouTube,
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
         ));
+    }
+
+    // ── MP-19: the destination is the *parsed* host, not the authority text ──
+
+    #[test]
+    fn mp19_userinfo_cannot_masquerade_as_a_public_destination() {
+        // The reported bypass. Hand-splitting the authority read
+        // `https://x@127.0.0.1:8080/` as the host `x@127.0.0.1` — not an
+        // `IpAddr`, containing a dot, and not all digits — so it satisfied the
+        // public-destination test while Chrome would navigate to loopback.
+        for url in [
+            "https://x@127.0.0.1:8080/",
+            "https://x@127.0.0.1/",
+            "http://user@localhost/",
+            "http://user:pass@127.0.0.1:9000/admin",
+            "https://anything@[::1]/",
+            "https://user@192.168.1.10/",
+            "https://user@10.0.0.1/",
+            "https://user@printer.local/",
+            "https://user@100.64.0.7/",
+        ] {
+            assert!(
+                !generic_link_accepts_url(url),
+                "{url} reaches the local machine or LAN through userinfo and must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn mp19_userinfo_on_a_public_host_remains_accepted() {
+        // A no-narrowing guard, and an honest record of what changed: the
+        // pre-MP-19 parser accepted this too (its string test let
+        // `x@example.com` through), and so does the parsed-host version. The
+        // destination really is `example.com`, which is public, so nothing
+        // outside the public internet becomes reachable either way.
+        //
+        // Verified against the old parser as a control: this test passes on
+        // both, which is exactly why the finding is a *local-destination*
+        // bypass and not a provider-domain bypass.
+        assert!(generic_link_accepts_url("https://x@example.com/movie.mp4"));
+    }
+
+    #[test]
+    fn mp19_provider_allowlist_is_judged_on_the_parsed_host() {
+        // A non-provider host wearing a provider name in its userinfo must not
+        // be admitted. This is NOT a provider-domain bypass in the shipped
+        // code — the previous parser refused these too, because it compared the
+        // raw authority text and `netflix.com@evil.example` matches no provider
+        // suffix — but the reason must not rest on that accident.
+        for url in [
+            "https://netflix.com@evil.example/watch/1",
+            "https://www.netflix.com@evil.example/",
+            "https://evil.example/?netflix.com",
+            "https://evil.example/#netflix.com",
+            "https://netflix.com.evil.example/watch/1",
+            "https://notnetflix.com/watch/1",
+        ] {
+            assert!(
+                !provider_accepts_url(ProviderId::Netflix, url),
+                "{url} is not a netflix.com destination and must be refused"
+            );
+        }
+
+        // A literal address is never a provider domain.
+        for url in ["https://127.0.0.1/watch/1", "https://[::1]/watch/1"] {
+            assert!(
+                !provider_accepts_url(ProviderId::Netflix, url),
+                "{url} is an address, not a provider domain"
+            );
+        }
+
+        // Genuine destinations are untouched.
+        for url in [
+            "https://netflix.com/watch/1",
+            "https://www.netflix.com/watch/1",
+            "https://netflix.com/",
+        ] {
+            assert!(
+                provider_accepts_url(ProviderId::Netflix, url),
+                "{url} is a genuine netflix.com URL and must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn mp19_numeric_host_shorthands_are_normalised_to_their_address() {
+        // These denote loopback without parsing as an `Ipv4Addr` from text.
+        // The URL parser normalises them, so they are judged as addresses.
+        for url in [
+            "http://127.1/",
+            "http://2130706433/",
+            "http://0x7f.1/",
+            "http://0177.0.0.1/",
+            "http://127.0.0.1./",
+        ] {
+            assert!(
+                !generic_link_accepts_url(url),
+                "{url} denotes a loopback address and must be refused"
+            );
+        }
     }
 
     #[test]

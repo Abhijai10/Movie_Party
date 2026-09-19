@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::chat::{validate_received_chat_message, validate_received_reaction};
 use crate::identity::{verify_auth_request_signature, DeviceIdentity};
 use crate::protocol::{
     SequenceTracker, ENVELOPE_V_MAJOR, ENVELOPE_V_MINOR, MAX_CONTROL_MESSAGE_BYTES,
@@ -39,6 +40,21 @@ const MAX_CONTROL_FRAME_BYTES: usize = MAX_CONTROL_MESSAGE_BYTES;
 /// (§5), so they only need a DoS-bounding frame cap.
 const MAX_RAW_STREAM_BYTES: usize = 2 * 1024 * 1024;
 const MAX_AUTH_NONCES: usize = 4_096;
+/// MP-15: bound on remembered `device_id -> public key` bindings. Mirrors the
+/// nonce set's policy (clear at capacity) so neither map can grow without
+/// limit. A one-guest room holds one or two entries in practice.
+const MAX_BOUND_IDENTITIES: usize = 4_096;
+/// MP-18: Movie Party is a two-person app — one host, one guest. The host
+/// accepts exactly one authenticated peer at a time; a second, *different*
+/// peer is refused with `SERVER_FULL` at the authorization boundary.
+const MAX_AUTHENTICATED_PEERS: usize = 1;
+/// `AuthenticatedPeers` models the slot as a single `Option`, so raising the
+/// cap means changing that representation — not just this number. Enforced at
+/// compile time rather than trusted.
+const _: () = assert!(
+    MAX_AUTHENTICATED_PEERS == 1,
+    "AuthenticatedPeers stores exactly one slot; change the representation before raising the cap"
+);
 
 /// Wraps a [`ServerEvent`] with metadata identifying the originating peer and
 /// the monotonic time at which the event was scheduled by the sender.
@@ -296,8 +312,19 @@ pub enum ServerResponse {
     ChatAccepted {
         message_id: String,
     },
+    /// MP-14: the host refused a chat message that failed validation. The
+    /// message is NOT relayed to the room.
+    ChatRejected {
+        message_id: String,
+        code: String,
+    },
     ReactionAccepted {
         reaction_id: String,
+    },
+    /// MP-14: the host refused a reaction that failed validation.
+    ReactionRejected {
+        reaction_id: String,
+        code: String,
     },
     ControlResponse {
         request_id: String,
@@ -561,6 +588,13 @@ pub struct QuicServer {
     event_tx: Option<std::sync::Arc<broadcast::Sender<EventEnvelope>>>,
     next_event_seq: AtomicU64,
     shared_controls: Option<std::sync::Arc<AtomicBool>>,
+    /// MP-16: the expiry (epoch ms) of the invite this host issued, if it
+    /// issued one. `None` means "no invite to expire" — the loopback and
+    /// shared-pipeline harnesses bind a server without going through the
+    /// invite flow.
+    invite_expires_at_ms: Option<i64>,
+    /// MP-18: the single authenticated-peer slot.
+    peers: AuthenticatedPeers,
 }
 
 impl QuicServer {
@@ -586,6 +620,8 @@ impl QuicServer {
             event_tx: None,
             next_event_seq: AtomicU64::new(1),
             shared_controls: None,
+            invite_expires_at_ms: None,
+            peers: AuthenticatedPeers::default(),
         })
     }
 
@@ -621,6 +657,19 @@ impl QuicServer {
     /// deny guest control requests at the transport boundary.
     pub fn with_shared_controls(mut self, flag: std::sync::Arc<AtomicBool>) -> Self {
         self.shared_controls = Some(flag);
+        self
+    }
+
+    /// MP-16: enforce the host's own invite expiry at the authorization
+    /// boundary.
+    ///
+    /// `parse_invite` already refuses an expired invite on the *guest* side,
+    /// but that is the joiner checking the joiner's own clock on the joiner's
+    /// own machine. The host has to make this decision for itself, and it is
+    /// the only party that can: the value comes from the invite the host
+    /// issued, so a malicious client cannot extend it by lying.
+    pub fn with_invite_expiry(mut self, expires_at_ms: i64) -> Self {
+        self.invite_expires_at_ms = Some(expires_at_ms);
         self
     }
 
@@ -732,7 +781,11 @@ impl QuicServer {
             let credentials = self.credentials.clone();
             let replay_guard = self.replay_guard.clone();
             let host_display_name = self.host_display_name.clone();
-            let host_device_id = self.host_device_id.clone();
+            let authorization = HostAuthorization {
+                host_device_id: self.host_device_id.clone(),
+                invite_expires_at_ms: self.invite_expires_at_ms,
+                peers: self.peers.clone(),
+            };
             let event_callback = self.event_callback.clone();
             let local_media = self.local_media.clone();
             let event_tx = self.event_tx.clone();
@@ -746,7 +799,7 @@ impl QuicServer {
                             credentials,
                             replay_guard,
                             host_display_name,
-                            host_device_id,
+                            authorization,
                             event_callback,
                             local_media,
                             event_tx,
@@ -767,6 +820,8 @@ impl QuicServer {
 #[derive(Debug, Clone, Default)]
 struct AuthReplayGuard {
     accepted_nonces: Arc<Mutex<HashSet<String>>>,
+    /// MP-15: the first public key seen for each device id.
+    bound_public_keys: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl AuthReplayGuard {
@@ -782,6 +837,140 @@ impl AuthReplayGuard {
 
         accepted_nonces.insert(format!("{device_id}:{invite_nonce}"))
     }
+
+    /// MP-15: bind `device_id` to `public_key` on first sight; a later
+    /// authentication for the same device id must present the same key.
+    ///
+    /// This does **not** replace the join secret, which remains the
+    /// authentication boundary — it is called only after the join secret and
+    /// the device signature have both verified, so it can never be used to
+    /// pre-empt a binding. What it removes is the ability to *re-use* an
+    /// established device id under a freshly generated key, which would
+    /// otherwise let any holder of the join secret act as that identity for
+    /// the lifetime of the room.
+    fn bind_identity(&self, device_id: &str, public_key: &str) -> bool {
+        let mut bound = match self.bound_public_keys.lock() {
+            Ok(bound) => bound,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        if bound.len() >= MAX_BOUND_IDENTITIES {
+            bound.clear();
+        }
+
+        match bound.get(device_id) {
+            Some(existing) => existing == public_key,
+            None => {
+                bound.insert(device_id.to_owned(), public_key.to_owned());
+                true
+            }
+        }
+    }
+}
+
+/// MP-18: the single authenticated-peer slot, claimed race-safely.
+///
+/// The claim is a compare-and-swap loop rather than a check-then-act, so two
+/// connections that both pass the pre-check cannot both end up holding it.
+/// `device_id` is part of the slot because a re-authentication from the same
+/// peer is a *transport replacement*, not a second peer: the guest's
+/// documented reconnect path opens a fresh connection and the host must accept
+/// it. A different device id is refused.
+#[derive(Debug, Clone, Default)]
+struct AuthenticatedPeers {
+    slot: Arc<Mutex<Option<(String, u64)>>>,
+    next_generation: Arc<AtomicU64>,
+}
+
+/// Releases the MP-18 slot on drop, and only if the slot is still the one this
+/// guard claimed — so a replaced connection's stale guard cannot evict its
+/// replacement.
+#[derive(Debug)]
+struct AuthenticatedPeerGuard {
+    device_id: String,
+    generation: u64,
+    peers: AuthenticatedPeers,
+}
+
+impl AuthenticatedPeers {
+    fn claim(&self, device_id: &str) -> Option<AuthenticatedPeerGuard> {
+        let mut slot = match self.slot.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        if let Some((holder, _)) = slot.as_ref() {
+            if holder != device_id {
+                return None;
+            }
+        }
+
+        let generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
+        *slot = Some((device_id.to_owned(), generation));
+        drop(slot);
+
+        Some(AuthenticatedPeerGuard {
+            device_id: device_id.to_owned(),
+            generation,
+            peers: self.clone(),
+        })
+    }
+
+    #[cfg(test)]
+    fn is_free(&self) -> bool {
+        match self.slot.lock() {
+            Ok(slot) => slot.is_none(),
+            Err(poisoned) => poisoned.into_inner().is_none(),
+        }
+    }
+}
+
+impl Drop for AuthenticatedPeerGuard {
+    fn drop(&mut self) {
+        let mut slot = match self.peers.slot.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        if slot.as_ref() == Some(&(self.device_id.clone(), self.generation)) {
+            *slot = None;
+        }
+    }
+}
+
+/// The facts the host's authorization boundary needs, bundled so they cannot
+/// drift apart as separate arguments threaded through the request handlers.
+#[derive(Debug, Clone)]
+struct HostAuthorization {
+    /// The host's own device id. A guest may never claim it: host-authored
+    /// events are recognised by sender, so impersonating the host would let a
+    /// guest speak with the host's authority (MP-15).
+    host_device_id: String,
+    /// MP-16: the expiry of the invite this host issued, epoch ms. The host
+    /// created this value itself, so it cannot be forged by a joiner — which
+    /// is what makes host-side enforcement meaningful.
+    invite_expires_at_ms: Option<i64>,
+    /// MP-18: the single authenticated-peer slot.
+    peers: AuthenticatedPeers,
+}
+
+impl HostAuthorization {
+    #[cfg(test)]
+    fn for_tests(host_device_id: &str) -> Self {
+        Self {
+            host_device_id: host_device_id.to_owned(),
+            invite_expires_at_ms: None,
+            peers: AuthenticatedPeers::default(),
+        }
+    }
+}
+
+/// MP-16: current wall-clock time in epoch milliseconds.
+fn epoch_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 #[derive(Clone, Debug)]
@@ -1289,6 +1478,23 @@ fn current_platform() -> &'static str {
     }
 }
 
+/// The rustls half of [`configure_server`], split out so tests can assert on
+/// the TLS *policy* itself (0-RTT, ALPN) rather than only on its effects.
+fn server_crypto_config(
+    cert_der: CertificateDer<'static>,
+    priv_key: PrivatePkcs8KeyDer<'static>,
+) -> Result<rustls::ServerConfig, QuicError> {
+    let mut crypto = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], priv_key.into())
+        .map_err(|error| QuicError::Tls(error.to_string()))?;
+    crypto.alpn_protocols = MOVIE_PARTY_ALPN
+        .iter()
+        .map(|value| value.to_vec())
+        .collect();
+    Ok(crypto)
+}
+
 fn configure_server() -> Result<(ServerConfig, CertificateDer<'static>), QuicError> {
     ensure_crypto_provider();
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
@@ -1296,15 +1502,9 @@ fn configure_server() -> Result<(ServerConfig, CertificateDer<'static>), QuicErr
     let cert_der = CertificateDer::from(cert.cert);
     let priv_key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
 
-    let mut crypto = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(vec![cert_der.clone()], priv_key.into())
-        .map_err(|error| QuicError::Tls(error.to_string()))?;
-    crypto.alpn_protocols = MOVIE_PARTY_ALPN
-        .iter()
-        .map(|value| value.to_vec())
-        .collect();
-
+    let crypto = server_crypto_config(cert_der.clone(), priv_key)?;
+    // `QuicServerConfig::try_from` is where quinn enforces its TLS 1.3-only
+    // requirement: a config that cannot do TLS 1.3 is rejected here.
     let crypto =
         QuicServerConfig::try_from(crypto).map_err(|error| QuicError::Tls(error.to_string()))?;
     Ok((ServerConfig::with_crypto(Arc::new(crypto)), cert_der))
@@ -1377,8 +1577,9 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
     }
 }
 
-fn make_client_endpoint(server_certificate_fingerprint: String) -> Result<Endpoint, QuicError> {
-    ensure_crypto_provider();
+/// The rustls half of [`make_client_endpoint`], split out so tests can assert
+/// on the TLS policy (0-RTT, ALPN) directly.
+fn client_crypto_config(server_certificate_fingerprint: String) -> rustls::ClientConfig {
     let verifier = std::sync::Arc::new(FingerprintVerifier {
         fingerprint: server_certificate_fingerprint,
         signature_algorithms: installed_signature_algorithms(),
@@ -1391,6 +1592,12 @@ fn make_client_endpoint(server_certificate_fingerprint: String) -> Result<Endpoi
         .iter()
         .map(|value| value.to_vec())
         .collect();
+    crypto
+}
+
+fn make_client_endpoint(server_certificate_fingerprint: String) -> Result<Endpoint, QuicError> {
+    ensure_crypto_provider();
+    let crypto = client_crypto_config(server_certificate_fingerprint);
 
     let crypto =
         QuicClientConfig::try_from(crypto).map_err(|error| QuicError::Tls(error.to_string()))?;
@@ -1422,7 +1629,7 @@ async fn handle_connection(
     credentials: RoomCredentials,
     replay_guard: AuthReplayGuard,
     host_display_name: String,
-    host_device_id: String,
+    authorization: HostAuthorization,
     event_callback: Option<std::sync::Arc<dyn Fn(QuicHostEvent) + Send + Sync>>,
     local_media: Option<String>,
     event_tx: Option<std::sync::Arc<broadcast::Sender<EventEnvelope>>>,
@@ -1459,10 +1666,12 @@ async fn handle_connection(
             Ok(stream) => stream,
             Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
                 fire_peer_disconnected(&session, &event_callback);
+                release_authenticated_peer(&session);
                 return Ok(());
             }
             Err(error) => {
                 fire_peer_disconnected(&session, &event_callback);
+                release_authenticated_peer(&session);
                 return Err(QuicError::Connection(error));
             }
         };
@@ -1471,7 +1680,7 @@ async fn handle_connection(
         let replay_guard = replay_guard.clone();
         let session = session.clone();
         let host_display_name = host_display_name.clone();
-        let host_device_id = host_device_id.clone();
+        let authorization = authorization.clone();
         let event_callback = event_callback.clone();
         let local_media = local_media.clone();
         let coordinator = coordinator.clone();
@@ -1483,7 +1692,7 @@ async fn handle_connection(
                 credentials,
                 replay_guard,
                 host_display_name,
-                host_device_id,
+                authorization,
                 event_callback,
                 local_media,
                 session,
@@ -1505,6 +1714,19 @@ struct ConnectionSession {
     guest_clock_rtt_p95_us: u64,
     guest_clock_sample_count: u64,
     guest_clock_quality: String,
+    /// MP-18: holds the authenticated-peer slot for this connection. Dropping
+    /// it releases the slot, which is the backstop behind the explicit release
+    /// at connection teardown.
+    authenticated_peer: Option<AuthenticatedPeerGuard>,
+}
+
+/// MP-18: release this connection's authenticated-peer slot, if it holds one.
+///
+/// Called when the connection loop ends so the slot is freed at *connection*
+/// teardown rather than whenever the last in-flight request task happens to
+/// finish. `AuthenticatedPeerGuard::drop` is the backstop.
+fn release_authenticated_peer(session: &Arc<Mutex<ConnectionSession>>) {
+    lock_session(session).authenticated_peer = None;
 }
 
 fn fire_peer_disconnected(
@@ -1552,7 +1774,7 @@ async fn handle_request(
     credentials: RoomCredentials,
     replay_guard: AuthReplayGuard,
     host_display_name: String,
-    host_device_id: String,
+    authorization: HostAuthorization,
     event_callback: Option<std::sync::Arc<dyn Fn(QuicHostEvent) + Send + Sync>>,
     _local_media: Option<String>,
     session: Arc<Mutex<ConnectionSession>>,
@@ -1567,27 +1789,42 @@ async fn handle_request(
         ClientRequest::HelloAuth { hello, auth } => {
             let authenticated_device_id = hello.device_id.clone();
             let guest_display_name = hello.display_name.clone();
-            let response = validate_handshake(
+            match validate_handshake(
                 &credentials,
                 &replay_guard,
                 *hello,
                 *auth,
                 host_display_name,
-                host_device_id,
-            );
-            if matches!(response, ServerResponse::AuthAccept(_)) {
-                let mut session = lock_session(&session);
-                session.authenticated_device_id = Some(authenticated_device_id.clone());
-                session.authenticated_display_name = Some(guest_display_name.clone());
+                &authorization,
+            ) {
+                ServerResponse::AuthAccept(accept) => {
+                    let mut session = lock_session(&session);
+                    // MP-18: `validate_handshake` can only pre-check the slot —
+                    // two connections may both find it free. The claim is what
+                    // actually decides, and it happens under the session lock
+                    // so a connection claims at most once.
+                    match authorization.peers.claim(&authenticated_device_id) {
+                        Some(guard) => {
+                            session.authenticated_peer = Some(guard);
+                            session.authenticated_device_id = Some(authenticated_device_id.clone());
+                            session.authenticated_display_name = Some(guest_display_name.clone());
+                            drop(session);
 
-                if let Some(ref cb) = event_callback {
-                    cb(QuicHostEvent::PeerAuthenticated {
-                        device_id: authenticated_device_id,
-                        display_name: guest_display_name,
-                    });
+                            if let Some(ref cb) = event_callback {
+                                cb(QuicHostEvent::PeerAuthenticated {
+                                    device_id: authenticated_device_id,
+                                    display_name: guest_display_name,
+                                });
+                            }
+                            ServerResponse::AuthAccept(accept)
+                        }
+                        None => ServerResponse::AuthReject {
+                            code: "SERVER_FULL".to_string(),
+                        },
+                    }
                 }
+                rejection => rejection,
             }
-            response
         }
         ClientRequest::Heartbeat { seq, sender, .. } => {
             match validate_authenticated_sequence(&session, &sender, seq) {
@@ -1831,19 +2068,31 @@ async fn handle_request(
             created_host_time_us,
         } => match validate_authenticated_sequence(&session, &sender, seq) {
             Ok(()) => {
-                broadcast_guest_event(
-                    &event_tx,
-                    seq,
-                    &sender,
-                    &credentials.room_id,
-                    ServerEvent::ChatMessage {
-                        message_id: message_id.clone(),
-                        sender: guest_display_name(&session),
-                        body: body.clone(),
-                        created_host_time_us,
-                    },
-                );
-                ServerResponse::ChatAccepted { message_id }
+                // MP-14: a guest's message is held to the same rules as one
+                // the host generates. Without this the host relayed an
+                // arbitrary body — up to the 256 KiB frame limit — to every
+                // room subscriber, while a locally generated message was
+                // capped at `MAX_CHAT_BODY_BYTES`.
+                if let Err(error) = validate_received_chat_message(&message_id, &body) {
+                    ServerResponse::ChatRejected {
+                        message_id,
+                        code: error.to_string(),
+                    }
+                } else {
+                    broadcast_guest_event(
+                        &event_tx,
+                        seq,
+                        &sender,
+                        &credentials.room_id,
+                        ServerEvent::ChatMessage {
+                            message_id: message_id.clone(),
+                            sender: guest_display_name(&session),
+                            body: body.clone(),
+                            created_host_time_us,
+                        },
+                    );
+                    ServerResponse::ChatAccepted { message_id }
+                }
             }
             Err(code) => ServerResponse::AuthReject { code },
         },
@@ -1854,18 +2103,27 @@ async fn handle_request(
             reaction,
         } => match validate_authenticated_sequence(&session, &sender, seq) {
             Ok(()) => {
-                broadcast_guest_event(
-                    &event_tx,
-                    seq,
-                    &sender,
-                    &credentials.room_id,
-                    ServerEvent::Reaction {
-                        reaction_id: reaction_id.clone(),
-                        sender: guest_display_name(&session),
-                        reaction: reaction.clone(),
-                    },
-                );
-                ServerResponse::ReactionAccepted { reaction_id }
+                // MP-14: the value check the local send path already applies.
+                // Rate limiting alone let any string through as a "reaction".
+                if let Err(error) = validate_received_reaction(&reaction_id, &reaction) {
+                    ServerResponse::ReactionRejected {
+                        reaction_id,
+                        code: error.to_string(),
+                    }
+                } else {
+                    broadcast_guest_event(
+                        &event_tx,
+                        seq,
+                        &sender,
+                        &credentials.room_id,
+                        ServerEvent::Reaction {
+                            reaction_id: reaction_id.clone(),
+                            sender: guest_display_name(&session),
+                            reaction: reaction.clone(),
+                        },
+                    );
+                    ServerResponse::ReactionAccepted { reaction_id }
+                }
             }
             Err(code) => ServerResponse::AuthReject { code },
         },
@@ -1919,7 +2177,7 @@ async fn handle_request(
                             v_minor: ENVELOPE_V_MINOR,
                             room_id: credentials.room_id.clone(),
                             seq,
-                            sender: host_device_id.clone(),
+                            sender: authorization.host_device_id.clone(),
                             sent_mono_us: monotonic_us(),
                             event: ServerEvent::ControlDeny {
                                 request_id: request_id.clone(),
@@ -2105,7 +2363,7 @@ fn validate_handshake(
     hello: HelloPayload,
     auth: AuthRequest,
     host_display_name: String,
-    host_device_id: String,
+    authorization: &HostAuthorization,
 ) -> ServerResponse {
     if hello.protocol_major != crate::PROTOCOL_MAJOR {
         return ServerResponse::AuthReject {
@@ -2122,6 +2380,17 @@ fn validate_handshake(
     if !is_uuid_v7(&hello.device_id) {
         return ServerResponse::AuthReject {
             code: "INVALID_DEVICE_ID".to_string(),
+        };
+    }
+
+    // MP-15: a guest may never present the host's own device id. Host-authored
+    // events are recognised by their sender, and the room-binding and
+    // sequence checks are skipped for the local participant's id — so a guest
+    // that claimed this id would be able to speak with the host's authority
+    // and bypass those checks.
+    if hello.device_id == authorization.host_device_id {
+        return ServerResponse::AuthReject {
+            code: "DEVICE_ID_IS_HOST".to_string(),
         };
     }
 
@@ -2157,6 +2426,20 @@ fn validate_handshake(
         };
     }
 
+    // MP-16: the host enforces its *own* invite expiry here, at the
+    // authorization boundary. `parse_invite` already refuses an expired invite
+    // on the guest side, but that is the joiner checking the joiner's own clock
+    // on the joiner's own machine — it constrains an honest client and nothing
+    // else. This check sits behind the join-secret comparison so only a peer
+    // that already holds the secret can learn that the invite has lapsed.
+    if let Some(expires_at_ms) = authorization.invite_expires_at_ms {
+        if epoch_ms() >= expires_at_ms {
+            return ServerResponse::AuthReject {
+                code: "INVITE_EXPIRED".to_string(),
+            };
+        }
+    }
+
     if verify_auth_request_signature(
         &hello.public_key,
         &auth.device_signature,
@@ -2178,11 +2461,21 @@ fn validate_handshake(
         };
     }
 
+    // MP-15: bind device id to public key on first sight. Deliberately after
+    // the signature check — that is what proves the peer controls the private
+    // key for this device id, so the binding cannot be pre-empted with an
+    // arbitrary key.
+    if !replay_guard.bind_identity(&hello.device_id, &hello.public_key) {
+        return ServerResponse::AuthReject {
+            code: "IDENTITY_KEY_MISMATCH".to_string(),
+        };
+    }
+
     ServerResponse::AuthAccept(AuthAccept {
         session_id: Uuid::now_v7().to_string(),
         room_role: "guest".to_string(),
         host_display_name,
-        host_device_id,
+        host_device_id: authorization.host_device_id.clone(),
     })
 }
 
@@ -2386,10 +2679,20 @@ mod tests {
     use rustls::pki_types::CertificateDer;
     use tokio::io::AsyncWriteExt;
 
+    /// The host's device id. Movie Party is two devices — one host, one guest —
+    /// so the test fixture keeps them distinct. They were the same value before
+    /// MP-15, which is precisely the impersonation the host now refuses.
     const TEST_DEVICE_ID: &str = "0198c3d0-7c55-7f82-9af2-36c9946b2974";
+    /// The guest's device id. Distinct from [`TEST_DEVICE_ID`] on purpose.
+    const TEST_GUEST_DEVICE_ID: &str = "0198c3d0-7c55-7f82-9af2-36c9946b2975";
 
     fn test_identity() -> DeviceIdentity {
-        DeviceIdentity::from_seed_for_tests(TEST_DEVICE_ID, [9; 32])
+        DeviceIdentity::from_seed_for_tests(TEST_GUEST_DEVICE_ID, [9; 32])
+    }
+
+    /// An identity that deliberately claims the *host's* device id (MP-15).
+    fn host_impersonating_identity() -> DeviceIdentity {
+        DeviceIdentity::from_seed_for_tests(TEST_DEVICE_ID, [11; 32])
     }
 
     #[test]
@@ -2998,7 +3301,7 @@ mod tests {
         let response = client
             .send_request(ClientRequest::Heartbeat {
                 seq: 1,
-                sender: TEST_DEVICE_ID.to_string(),
+                sender: TEST_GUEST_DEVICE_ID.to_string(),
                 sent_mono_us: monotonic_us(),
                 room_state: "LOBBY".to_string(),
                 last_seen_peer_seq: 0,
@@ -3042,7 +3345,7 @@ mod tests {
         let first = client
             .send_request(ClientRequest::Heartbeat {
                 seq: 1,
-                sender: TEST_DEVICE_ID.to_string(),
+                sender: TEST_GUEST_DEVICE_ID.to_string(),
                 sent_mono_us: monotonic_us(),
                 room_state: "LOBBY".to_string(),
                 last_seen_peer_seq: 0,
@@ -3052,7 +3355,7 @@ mod tests {
         let duplicate = client
             .send_request(ClientRequest::Heartbeat {
                 seq: 1,
-                sender: TEST_DEVICE_ID.to_string(),
+                sender: TEST_GUEST_DEVICE_ID.to_string(),
                 sent_mono_us: monotonic_us(),
                 room_state: "LOBBY".to_string(),
                 last_seen_peer_seq: 0,
@@ -3870,5 +4173,560 @@ mod tests {
         handle.await.expect("writer");
         // Transport layer: frame accepted (under 256 KiB).
         assert!(parsed.is_ok());
+    }
+
+    /// Build a correctly signed auth request for `identity`.
+    fn signed_auth_request(
+        identity: &DeviceIdentity,
+        credentials: &RoomCredentials,
+        invite_nonce: &str,
+    ) -> AuthRequest {
+        AuthRequest {
+            room_id: credentials.room_id.clone(),
+            join_secret_hash: credentials.join_secret_hash(),
+            invite_nonce: invite_nonce.to_string(),
+            device_signature: identity.sign_auth_request(
+                &credentials.room_id,
+                &credentials.join_secret_hash(),
+                invite_nonce,
+            ),
+        }
+    }
+
+    /// Bind a loopback server for the standard test credentials.
+    fn bind_test_server(credentials: &RoomCredentials) -> QuicServer {
+        QuicServer::bind(
+            loopback_bind_addr(),
+            credentials.clone(),
+            "Host".to_string(),
+            TEST_DEVICE_ID.to_string(),
+        )
+        .expect("server")
+    }
+
+    // ── MP-16: invite expiry at the host authorization boundary ──────────
+
+    #[test]
+    fn mp16_expiry_is_decided_at_the_host_authorization_boundary() {
+        let credentials = RoomCredentials::new_for_tests();
+        let identity = test_identity();
+
+        let decide = |expires_at_ms: Option<i64>| {
+            let authorization = super::HostAuthorization {
+                host_device_id: TEST_DEVICE_ID.to_string(),
+                invite_expires_at_ms: expires_at_ms,
+                peers: super::AuthenticatedPeers::default(),
+            };
+            super::validate_handshake(
+                &credentials,
+                &super::AuthReplayGuard::default(),
+                HelloPayload::local("Test Guest".to_string(), &identity),
+                signed_auth_request(&identity, &credentials, "nonce"),
+                "Host".to_string(),
+                &authorization,
+            )
+        };
+
+        assert!(
+            matches!(
+                decide(Some(super::epoch_ms() + 60_000)),
+                ServerResponse::AuthAccept(_)
+            ),
+            "a join inside the host's invite window must be accepted"
+        );
+        assert_eq!(
+            decide(Some(super::epoch_ms() - 1)),
+            ServerResponse::AuthReject {
+                code: "INVITE_EXPIRED".to_string()
+            },
+            "a join after the host's own invite expiry must be refused"
+        );
+        assert_eq!(
+            decide(Some(super::epoch_ms())),
+            ServerResponse::AuthReject {
+                code: "INVITE_EXPIRED".to_string()
+            },
+            "the expiry instant itself is expired"
+        );
+        assert!(
+            matches!(decide(None), ServerResponse::AuthAccept(_)),
+            "a server bound without an invite has no expiry to enforce"
+        );
+    }
+
+    #[tokio::test]
+    async fn mp16_host_refuses_a_join_once_its_invite_has_expired() {
+        let credentials = RoomCredentials::new_for_tests();
+        let server = bind_test_server(&credentials).with_invite_expiry(super::epoch_ms() - 1);
+        let addr = server.local_addr().expect("addr");
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
+
+        let result = QuicClient::connect(
+            addr,
+            fingerprint,
+            credentials,
+            test_identity(),
+            "Test Guest".to_string(),
+        )
+        .await;
+
+        match result {
+            Err(QuicError::Auth(code)) => assert_eq!(code, "INVITE_EXPIRED"),
+            other => panic!("expected INVITE_EXPIRED, got {other:?}"),
+        }
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn mp16_host_accepts_a_join_inside_its_invite_window() {
+        let credentials = RoomCredentials::new_for_tests();
+        let server = bind_test_server(&credentials).with_invite_expiry(super::epoch_ms() + 60_000);
+        let addr = server.local_addr().expect("addr");
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
+
+        let (client, accept) = QuicClient::connect(
+            addr,
+            fingerprint,
+            credentials,
+            test_identity(),
+            "Test Guest".to_string(),
+        )
+        .await
+        .expect("a join inside the invite window must succeed");
+
+        assert_eq!(accept.room_role, "guest");
+        client.heartbeat().await.expect("heartbeat");
+        client.wait_idle().await;
+        server_task.abort();
+    }
+
+    // ── MP-18: exactly one authenticated peer, race-safely ───────────────
+
+    #[test]
+    fn mp18_the_authenticated_peer_slot_is_single_and_survives_replacement() {
+        let peers = super::AuthenticatedPeers::default();
+        assert!(peers.is_free());
+
+        let first = peers
+            .claim("device-a")
+            .expect("the free slot must be claimable");
+        assert!(!peers.is_free());
+
+        assert!(
+            peers.claim("device-b").is_none(),
+            "a second, different device must not be given the slot"
+        );
+
+        let replacement = peers
+            .claim("device-a")
+            .expect("a re-authentication from the same device is a transport replacement");
+
+        drop(first);
+        assert!(
+            !peers.is_free(),
+            "a replaced connection's stale guard must not release its replacement's slot"
+        );
+
+        drop(replacement);
+        assert!(peers.is_free(), "dropping the holder must free the slot");
+    }
+
+    #[tokio::test]
+    async fn mp18_a_second_different_guest_is_refused() {
+        let credentials = RoomCredentials::new_for_tests();
+        let server = bind_test_server(&credentials);
+        let addr = server.local_addr().expect("addr");
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
+
+        let (first, _) = QuicClient::connect(
+            addr,
+            fingerprint.clone(),
+            credentials.clone(),
+            test_identity(),
+            "Guest A".to_string(),
+        )
+        .await
+        .expect("the first guest must be admitted");
+
+        let second_identity =
+            DeviceIdentity::from_seed_for_tests("0198c3d0-7c55-7f82-9af2-36c9946b2976", [12; 32]);
+        let result = QuicClient::connect(
+            addr,
+            fingerprint,
+            credentials,
+            second_identity,
+            "Guest B".to_string(),
+        )
+        .await;
+
+        match result {
+            Err(QuicError::Auth(code)) => assert_eq!(code, "SERVER_FULL"),
+            other => panic!("expected SERVER_FULL for a second guest, got {other:?}"),
+        }
+
+        // Refusing the newcomer must not disturb the admitted guest.
+        first
+            .heartbeat()
+            .await
+            .expect("the admitted guest must still be authenticated");
+        first.wait_idle().await;
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn mp18_the_same_guest_may_replace_its_own_transport() {
+        let credentials = RoomCredentials::new_for_tests();
+        let server = bind_test_server(&credentials);
+        let addr = server.local_addr().expect("addr");
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
+
+        let (first, _) = QuicClient::connect(
+            addr,
+            fingerprint.clone(),
+            credentials.clone(),
+            test_identity(),
+            "Test Guest".to_string(),
+        )
+        .await
+        .expect("first connection");
+
+        // The documented reconnect path opens a fresh connection while the old
+        // one may still be registered. It must not be mistaken for a second
+        // peer.
+        let (replacement, _) = QuicClient::connect(
+            addr,
+            fingerprint,
+            credentials,
+            test_identity(),
+            "Test Guest".to_string(),
+        )
+        .await
+        .expect("a reconnect from the same device must be admitted");
+
+        replacement
+            .heartbeat()
+            .await
+            .expect("the replacement transport must be authenticated");
+
+        drop(first);
+        replacement.wait_idle().await;
+        server_task.abort();
+    }
+
+    // ── MP-15: device id / public key binding ────────────────────────────
+
+    #[test]
+    fn mp15_a_guest_may_not_claim_the_hosts_device_id() {
+        let credentials = RoomCredentials::new_for_tests();
+        let impostor = host_impersonating_identity();
+
+        let response = super::validate_handshake(
+            &credentials,
+            &super::AuthReplayGuard::default(),
+            HelloPayload::local("Impostor".to_string(), &impostor),
+            signed_auth_request(&impostor, &credentials, "nonce"),
+            "Host".to_string(),
+            &super::HostAuthorization::for_tests(TEST_DEVICE_ID),
+        );
+
+        assert_eq!(
+            response,
+            ServerResponse::AuthReject {
+                code: "DEVICE_ID_IS_HOST".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn mp15_a_device_id_is_bound_to_the_first_public_key_seen() {
+        let credentials = RoomCredentials::new_for_tests();
+        let authorization = super::HostAuthorization::for_tests(TEST_DEVICE_ID);
+        let replay_guard = super::AuthReplayGuard::default();
+
+        // Same device id, two different key pairs. Both sign correctly *for
+        // that device id*, so only the binding can tell them apart.
+        let original = DeviceIdentity::from_seed_for_tests(TEST_GUEST_DEVICE_ID, [21; 32]);
+        let forger = DeviceIdentity::from_seed_for_tests(TEST_GUEST_DEVICE_ID, [22; 32]);
+        assert_ne!(original.public_key_base64(), forger.public_key_base64());
+
+        let authenticate = |identity: &DeviceIdentity, nonce: &str| {
+            super::validate_handshake(
+                &credentials,
+                &replay_guard,
+                HelloPayload::local("Test Guest".to_string(), identity),
+                signed_auth_request(identity, &credentials, nonce),
+                "Host".to_string(),
+                &authorization,
+            )
+        };
+
+        assert!(
+            matches!(
+                authenticate(&original, "nonce-1"),
+                ServerResponse::AuthAccept(_)
+            ),
+            "the first key for a device id must be accepted and bound"
+        );
+        assert_eq!(
+            authenticate(&forger, "nonce-2"),
+            ServerResponse::AuthReject {
+                code: "IDENTITY_KEY_MISMATCH".to_string()
+            },
+            "a second key for the same device id must be refused"
+        );
+        assert!(
+            matches!(
+                authenticate(&original, "nonce-3"),
+                ServerResponse::AuthAccept(_)
+            ),
+            "the original key must keep working — the binding must not lock the device out"
+        );
+    }
+
+    #[tokio::test]
+    async fn mp15_host_refuses_a_guest_claiming_its_device_id() {
+        let credentials = RoomCredentials::new_for_tests();
+        let server = bind_test_server(&credentials);
+        let addr = server.local_addr().expect("addr");
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
+
+        let result = QuicClient::connect(
+            addr,
+            fingerprint,
+            credentials,
+            host_impersonating_identity(),
+            "Impostor".to_string(),
+        )
+        .await;
+
+        match result {
+            Err(QuicError::Auth(code)) => assert_eq!(code, "DEVICE_ID_IS_HOST"),
+            other => panic!("expected DEVICE_ID_IS_HOST, got {other:?}"),
+        }
+        server_task.abort();
+    }
+
+    // ── MP-14: received chat/reaction validation at the host boundary ────
+
+    #[tokio::test]
+    async fn mp14_host_refuses_invalid_incoming_chat_and_reactions() {
+        let credentials = RoomCredentials::new_for_tests();
+        let server = bind_test_server(&credentials);
+        let addr = server.local_addr().expect("addr");
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
+
+        let (client, _) = QuicClient::connect(
+            addr,
+            fingerprint,
+            credentials,
+            test_identity(),
+            "Test Guest".to_string(),
+        )
+        .await
+        .expect("client");
+
+        let chat = |message_id: String, body: String| ClientRequest::ChatMessage {
+            seq: client.next_seq(),
+            sender: TEST_GUEST_DEVICE_ID.to_string(),
+            message_id,
+            body,
+            created_host_time_us: monotonic_us(),
+        };
+        let reaction = |reaction_id: String, reaction: String| ClientRequest::Reaction {
+            seq: client.next_seq(),
+            sender: TEST_GUEST_DEVICE_ID.to_string(),
+            reaction_id,
+            reaction,
+        };
+
+        // Oversized. Note this body is far below the 256 KiB control-frame
+        // limit, so a rejection here proves the *chat* cap is enforced on its
+        // own rather than only by framing.
+        let oversized = "a".repeat(crate::chat::MAX_CHAT_BODY_BYTES + 1);
+        let response = client
+            .send_control(chat(uuid::Uuid::now_v7().to_string(), oversized))
+            .await
+            .expect("response");
+        match response {
+            ServerResponse::ChatRejected { code, .. } => {
+                assert!(
+                    code.contains("MP-CHAT-002"),
+                    "expected the size code, got {code}"
+                );
+            }
+            other => panic!("an oversized chat message must be rejected, got {other:?}"),
+        }
+
+        // Well-formed body, malformed id.
+        let response = client
+            .send_control(chat("not-a-uuid".to_string(), "hello".to_string()))
+            .await
+            .expect("response");
+        match response {
+            ServerResponse::ChatRejected { code, .. } => {
+                assert!(
+                    code.contains("MP-CHAT-005"),
+                    "expected the id code, got {code}"
+                );
+            }
+            other => panic!("a malformed chat id must be rejected, got {other:?}"),
+        }
+
+        // Empty body.
+        let response = client
+            .send_control(chat(uuid::Uuid::now_v7().to_string(), "   ".to_string()))
+            .await
+            .expect("response");
+        match response {
+            ServerResponse::ChatRejected { code, .. } => {
+                assert!(
+                    code.contains("MP-CHAT-001"),
+                    "expected the empty code, got {code}"
+                );
+            }
+            other => panic!("an empty chat message must be rejected, got {other:?}"),
+        }
+
+        // A reaction outside the v1 set.
+        let response = client
+            .send_control(reaction(uuid::Uuid::now_v7().to_string(), "⭐".to_string()))
+            .await
+            .expect("response");
+        match response {
+            ServerResponse::ReactionRejected { code, .. } => {
+                assert!(
+                    code.contains("MP-CHAT-003"),
+                    "expected the reaction code, got {code}"
+                );
+            }
+            other => panic!("an unknown reaction must be rejected, got {other:?}"),
+        }
+
+        // Malformed reaction id.
+        let response = client
+            .send_control(reaction("not-a-uuid".to_string(), "🔥".to_string()))
+            .await
+            .expect("response");
+        match response {
+            ServerResponse::ReactionRejected { code, .. } => {
+                assert!(
+                    code.contains("MP-CHAT-006"),
+                    "expected the reaction-id code, got {code}"
+                );
+            }
+            other => panic!("a malformed reaction id must be rejected, got {other:?}"),
+        }
+
+        // The checks are not blanket refusals: valid input still goes through,
+        // and the body cap is inclusive at exactly its limit.
+        let accepted = client
+            .send_control(chat(uuid::Uuid::now_v7().to_string(), "hello".to_string()))
+            .await
+            .expect("response");
+        assert!(
+            matches!(accepted, ServerResponse::ChatAccepted { .. }),
+            "a valid chat message must be accepted, got {accepted:?}"
+        );
+
+        let at_limit = client
+            .send_control(chat(
+                uuid::Uuid::now_v7().to_string(),
+                "a".repeat(crate::chat::MAX_CHAT_BODY_BYTES),
+            ))
+            .await
+            .expect("response");
+        assert!(
+            matches!(at_limit, ServerResponse::ChatAccepted { .. }),
+            "a body at exactly the limit must be accepted, got {at_limit:?}"
+        );
+
+        let accepted = client
+            .send_control(reaction(uuid::Uuid::now_v7().to_string(), "🔥".to_string()))
+            .await
+            .expect("response");
+        assert!(
+            matches!(accepted, ServerResponse::ReactionAccepted { .. }),
+            "a valid reaction must be accepted, got {accepted:?}"
+        );
+
+        client.wait_idle().await;
+        server_task.abort();
+    }
+
+    // ── TLS policy: no 0-RTT, TLS 1.3, ALPN ─────────────────────────────
+
+    #[test]
+    fn tls_policy_disables_zero_rtt_on_both_sides() {
+        ensure_crypto_provider();
+
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("cert");
+        let server = super::server_crypto_config(
+            CertificateDer::from(cert.cert),
+            rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()),
+        )
+        .expect("server crypto");
+
+        // 0 means "early data is not accepted", i.e. no 0-RTT.
+        assert_eq!(
+            server.max_early_data_size, 0,
+            "the host must not accept 0-RTT early data"
+        );
+        // quinn requires TLS 1.3; a config that could not negotiate it is
+        // rejected by this conversion, so a successful conversion is the
+        // TLS-1.3 guarantee for the server side.
+        assert!(
+            quinn::crypto::rustls::QuicServerConfig::try_from(server).is_ok(),
+            "the server config must be TLS 1.3 capable"
+        );
+
+        let client = super::client_crypto_config("x".repeat(43));
+        assert!(
+            !client.enable_early_data,
+            "the guest must not offer 0-RTT early data"
+        );
+        assert!(
+            quinn::crypto::rustls::QuicClientConfig::try_from(client).is_ok(),
+            "the client config must be TLS 1.3 capable"
+        );
+    }
+
+    #[tokio::test]
+    async fn tls_negotiates_the_movie_party_alpn() {
+        let credentials = RoomCredentials::new_for_tests();
+        let server = bind_test_server(&credentials);
+        let addr = server.local_addr().expect("addr");
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
+
+        let (client, _) = QuicClient::connect(
+            addr,
+            fingerprint,
+            credentials,
+            test_identity(),
+            "Test Guest".to_string(),
+        )
+        .await
+        .expect("client");
+
+        // rustls fails the handshake when ALPN is configured on both sides and
+        // there is no overlap, so reaching here already implies agreement.
+        // Assert the negotiated value explicitly rather than relying on that.
+        let handshake = client
+            .connection
+            .handshake_data()
+            .expect("the handshake must have completed");
+        let data = handshake
+            .downcast::<quinn::crypto::rustls::HandshakeData>()
+            .expect("rustls handshake data");
+        assert_eq!(data.protocol.as_deref(), Some(&b"movieparty-v1"[..]));
+
+        client.wait_idle().await;
+        server_task.abort();
     }
 }

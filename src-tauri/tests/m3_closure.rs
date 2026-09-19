@@ -435,13 +435,20 @@ async fn reconnect_reuses_single_session_worker() {
     let credentials = invite_to_credentials(&invite);
 
     let guest = AppRuntime::new();
+    // MP-18: the host admits exactly one authenticated peer. A reconnect is the
+    // *same* guest, so both connections must present the same device identity —
+    // which is what production does, since the guest's identity is persisted
+    // rather than regenerated per connection. This fixture used to call
+    // `new_ephemeral()` inside the helper, making the "replacement" a second,
+    // different peer; the host now correctly refuses that.
+    let guest_identity = DeviceIdentity::new_ephemeral();
     async fn connect_guest(
         guest: AppRuntime,
+        identity: DeviceIdentity,
         addr: std::net::SocketAddr,
         fingerprint: String,
         credentials: movie_party_lib::network::quic::RoomCredentials,
     ) {
-        let identity = DeviceIdentity::new_ephemeral();
         let (client, _auth) = QuicClient::connect(
             addr,
             fingerprint,
@@ -457,6 +464,7 @@ async fn reconnect_reuses_single_session_worker() {
 
     connect_guest(
         guest.clone(),
+        guest_identity.clone(),
         addr,
         invite.server_certificate_fingerprint.clone(),
         credentials.clone(),
@@ -468,6 +476,7 @@ async fn reconnect_reuses_single_session_worker() {
     // must abort the old worker before installing a new one.
     connect_guest(
         guest.clone(),
+        guest_identity,
         addr,
         invite.server_certificate_fingerprint.clone(),
         credentials.clone(),

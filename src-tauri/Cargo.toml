@@ -40,6 +40,11 @@ rfd = "0.15"
 rusqlite = { version = "0.31", features = ["bundled"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "ansi", "env-filter"] }
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+# MP-19: a real URL parser for the provider/generic-link destination checks.
+# Splitting the authority text by hand let `https://x@127.0.0.1:8080/` read as
+# a public host. Already in the graph transitively (via tauri), so this adds
+# no new code to the build.
+url = "2"
 
 # Managed-Chrome process-tree ownership (see providers/chrome/process.rs).
 # Both crates are already in the dependency graph at these versions via
