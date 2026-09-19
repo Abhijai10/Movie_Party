@@ -323,11 +323,13 @@ Batches 7B's `BATCH7B_REAL_BETA_VALIDATION.md` (28 areas, T01–T28) remains the
 | | SHA | Pushed? |
 |---|---|---|
 | Baseline HEAD (audit target) | `e19c2eb` | yes (candidate branch) |
-| **This batch** | **`f280b6c`** | **no — local only** |
+| **This batch — code** | **`f280b6c`** | **no — local only** |
+| This batch — this report | `4d124cd` | no — local only |
 | Last CI-verified SHA | `a44542a` | yes — still the remote tip |
 
-`f280b6c` is one commit: 9 files, +1635 / −57. The audit report itself
-(`DEEP_PRODUCTION_READINESS_AUDIT.md`) is included in it.
+`f280b6c` is one commit: 9 files, +1635 / −57, and it includes
+`DEEP_PRODUCTION_READINESS_AUDIT.md`. `4d124cd` adds only this report.
+**`f280b6c` is the SHA that matters for verification** — it is the code state.
 
 Unchanged and confirmed after the commit: `main` = `2d5c833` (local) / `bb22577` (remote), all five
 tags, `v0.9.8` → `bb22577`, and no release created or modified.
