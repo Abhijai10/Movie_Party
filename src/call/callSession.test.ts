@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { isWellFormedSignal, nextPendingSignals } from "./callSession";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { isWellFormedSignal, nextPendingSignals, startRealCallSession } from "./callSession";
 
 const offer = (data = '{"type":"offer","sdp":"v=0\\r\\n"}') => ({
   signalType: "OFFER",
@@ -224,5 +224,154 @@ describe("trackConstraintsForTier — capture downscale", () => {
     expect(constraints.width).toEqual({ ideal: 1 });
     expect(constraints.height).toEqual({ ideal: 1 });
     expect(constraints.frameRate).toEqual({ ideal: 1 });
+  });
+});
+
+// ── MP-03: acquired media must never leak when startup throws ──────────────
+//
+// `startRealCallSession` acquires the camera/mic and only later returns the
+// session that owns them. If anything in between throws, the caller receives no
+// handle at all, so nothing downstream can release the devices — the OS camera
+// indicator stays lit with no call. These tests pin the ownership contract:
+// startup failure releases, success transfers ownership to `close()`.
+
+class FakeMediaTrack {
+  readonly kind: string;
+  enabled = true;
+  readyState: "live" | "ended" = "live";
+  stopped = false;
+
+  constructor(kind: string) {
+    this.kind = kind;
+  }
+
+  stop(): void {
+    this.stopped = true;
+    this.readyState = "ended";
+  }
+}
+
+class FakeMediaStream {
+  private readonly tracks: FakeMediaTrack[];
+
+  constructor(tracks: FakeMediaTrack[] = []) {
+    this.tracks = tracks;
+  }
+
+  getTracks(): FakeMediaTrack[] {
+    return [...this.tracks];
+  }
+
+  getAudioTracks(): FakeMediaTrack[] {
+    return this.tracks.filter((track) => track.kind === "audio");
+  }
+
+  getVideoTracks(): FakeMediaTrack[] {
+    return this.tracks.filter((track) => track.kind === "video");
+  }
+
+  addTrack(track: FakeMediaTrack): void {
+    this.tracks.push(track);
+  }
+}
+
+class FakePeerConnection {
+  connectionState = "new";
+  iceGatheringState = "complete";
+  signalingState = "stable";
+  localDescription: unknown = null;
+  ontrack: unknown = null;
+  onicecandidate: unknown = null;
+  closed = false;
+
+  addEventListener(): void {}
+  removeEventListener(): void {}
+
+  addTrack(track: FakeMediaTrack): { track: FakeMediaTrack } {
+    return { track };
+  }
+
+  getSenders(): Array<{ track: FakeMediaTrack }> {
+    return [];
+  }
+
+  createOffer(): Promise<{ type: string; sdp: string }> {
+    return Promise.resolve({ type: "offer", sdp: "v=0\r\n" });
+  }
+
+  setLocalDescription(description: unknown): Promise<void> {
+    this.localDescription = description;
+    return Promise.resolve();
+  }
+
+  close(): void {
+    this.closed = true;
+    this.connectionState = "closed";
+  }
+}
+
+/** Install the minimal browser surface `startRealCallSession` touches. */
+function stubCallEnvironment(acquired: FakeMediaStream): void {
+  vi.stubGlobal("MediaStream", FakeMediaStream);
+  vi.stubGlobal("RTCPeerConnection", FakePeerConnection);
+  vi.stubGlobal("window", {
+    setTimeout: globalThis.setTimeout,
+    clearTimeout: globalThis.clearTimeout,
+  });
+  vi.stubGlobal("navigator", {
+    mediaDevices: { getUserMedia: () => Promise.resolve(acquired) },
+  });
+}
+
+describe("MP-03 — acquired media ownership is exception-safe", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("stops every acquired track when startup throws after acquisition", async () => {
+    const video = new FakeMediaTrack("video");
+    const audio = new FakeMediaTrack("audio");
+    stubCallEnvironment(new FakeMediaStream([video, audio]));
+
+    const failure = new Error("submit_call_signal failed");
+    const error = await startRealCallSession(
+      "HOST",
+      "VIDEO_VOICE",
+      true,
+      true,
+      {
+        // The kickoff publishes the RENEGOTIATE marker; failing here is the
+        // real-world "startup throws after getUserMedia succeeded" path.
+        onSignal: () => Promise.reject(failure),
+        onStatusChange: () => undefined,
+      },
+    ).then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+
+    expect(error).toBe(failure);
+    expect(video.stopped).toBe(true);
+    expect(audio.stopped).toBe(true);
+  });
+
+  it("transfers ownership on success: tracks stay live until close()", async () => {
+    const video = new FakeMediaTrack("video");
+    const audio = new FakeMediaTrack("audio");
+    stubCallEnvironment(new FakeMediaStream([video, audio]));
+
+    const session = await startRealCallSession("HOST", "VIDEO_VOICE", true, true, {
+      onSignal: () => Promise.resolve(),
+      onStatusChange: () => undefined,
+    });
+
+    // A successful start must NOT tear down what it just acquired.
+    expect(session.usedRealMedia).toBe(true);
+    expect(video.stopped).toBe(false);
+    expect(audio.stopped).toBe(false);
+
+    session.close();
+    expect(video.stopped).toBe(true);
+    expect(audio.stopped).toBe(true);
   });
 });

@@ -205,13 +205,22 @@ impl MoviePartyDb {
         Ok(db)
     }
 
+    /// Run arbitrary SQL against the open connection.
+    ///
+    /// Test-only, and deliberately so: it is the only way to induce a *genuine*
+    /// storage failure (drop a table, break a constraint) so a failure-path
+    /// test asserts on a real error instead of a happy path dressed up as one.
+    #[cfg(test)]
+    pub fn execute_sql_for_test(&self, sql: &str) -> Result<(), StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        conn.execute_batch(sql)
+            .map_err(|e| StorageError::Sqlite(e.to_string()))
+    }
+
     /// Get the current schema version from the database.
     pub fn schema_version(&self) -> Result<i32, StorageError> {
         let conn = lock_mutex(&self.conn)?;
-        let version: i32 = conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
-        Ok(version)
+        read_schema_version(&conn)
     }
 
     /// Run all pending migrations.
@@ -235,9 +244,13 @@ impl MoviePartyDb {
     fn run_migrations(&self) -> Result<(), StorageError> {
         let conn = lock_mutex(&self.conn)?;
 
-        let current: i32 = conn
-            .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
-            .unwrap_or(0);
+        // Propagate the read failure — never default it to 0. A `unwrap_or(0)`
+        // here is worse than it looks: 0 is *below* every supported version, so
+        // a database whose version could not be read would sail straight past
+        // the `SchemaTooNew` guard below and have migrations run against a
+        // schema this build does not understand. Failing loudly keeps the guard
+        // meaningful.
+        let current = read_schema_version(&conn)?;
 
         if current > CURRENT_SCHEMA_VERSION {
             return Err(StorageError::SchemaTooNew {
@@ -330,12 +343,21 @@ impl MoviePartyDb {
     }
 
     /// Retrieve the stored device identity metadata, if any.
+    ///
+    /// Deterministic: the table is meant to hold exactly one row, but a failed
+    /// rotation delete can leave two, and an unordered `LIMIT 1` then returns
+    /// whichever row SQLite happens to visit first. That is how a stale identity
+    /// could be silently resurrected after a rotation. Newest first, with
+    /// `device_id` as a stable tie-break for two rows written in the same
+    /// millisecond.
     pub fn get_identity(&self) -> Result<Option<StoredIdentity>, StorageError> {
         let conn = lock_mutex(&self.conn)?;
         let mut stmt = conn
             .prepare(
                 "SELECT device_id, display_name, public_key, platform, created_at_ms, key_label
-                 FROM device_identity LIMIT 1",
+                 FROM device_identity
+                 ORDER BY created_at_ms DESC, device_id ASC
+                 LIMIT 1",
             )
             .map_err(|e| StorageError::Sqlite(e.to_string()))?;
         match stmt.query_row([], |row| {
@@ -1086,6 +1108,18 @@ UPDATE friends SET connection_state = 'MOVIE_PARTY_VERIFIED'
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
+/// Read the `user_version` schema header, propagating a read failure.
+///
+/// Deliberately NOT `.unwrap_or(0)`. `0` means "no schema yet" and is below
+/// every supported version, so coercing an unreadable header to 0 would let a
+/// database this build cannot understand pass the `SchemaTooNew` guard in
+/// [`MoviePartyDb::run_migrations`] and have migrations applied to it. This is
+/// a separate function so that contract is directly testable.
+fn read_schema_version(conn: &Connection) -> Result<i32, StorageError> {
+    conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+        .map_err(|e| StorageError::Sqlite(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1316,6 +1350,83 @@ mod tests {
         let conn = Connection::open(db_path).expect("open raw");
         conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
             .expect("user_version")
+    }
+
+    /// MP-11: a `PRAGMA user_version` read that FAILS must surface as an error,
+    /// never be coerced to 0.
+    ///
+    /// 0 is below every supported version, so a swallowed read failure would
+    /// let an unreadable database sail past the `SchemaTooNew` guard and have
+    /// migrations run against it. Asserting on `read_schema_version` directly
+    /// is what makes this test discriminating: a reintroduced `.unwrap_or(0)`
+    /// returns `Ok(0)` here and fails the assertion.
+    #[test]
+    fn schema_version_read_failure_is_propagated_not_defaulted_to_zero() {
+        let dir = std::env::temp_dir().join(format!("mp-notadb-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let db_path = dir.join("garbage.db");
+        // Not a SQLite file: the header read fails with SQLITE_NOTADB.
+        std::fs::write(&db_path, b"definitely not a sqlite database").expect("write");
+
+        // Opening is lazy, so this succeeds; the read is what must fail.
+        let conn = Connection::open(&db_path).expect("lazy open");
+
+        let result = read_schema_version(&conn);
+
+        assert!(
+            result.is_err(),
+            "an unreadable schema header must be an error, not version 0 (got {result:?})"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// MP-13: the identity lookup must be deterministic and must not let a
+    /// stale row win.
+    ///
+    /// The table is meant to hold exactly one row, but a failed rotation delete
+    /// can leave two. An unordered `LIMIT 1` then returns whichever row SQLite
+    /// visits first, which is how a rotated-away identity could be silently
+    /// resurrected on the next launch. Newest must win, repeatably.
+    #[test]
+    fn identity_lookup_is_deterministic_and_prefers_the_newest_row() {
+        let db = MoviePartyDb::open_in_memory().expect("open");
+
+        let stale = StoredIdentity {
+            device_id: "device-stale".to_string(),
+            display_name: "Old Name".to_string(),
+            public_key: "old-key".to_string(),
+            platform: "macos".to_string(),
+            created_at_ms: 1_000,
+            key_label: "label-stale".to_string(),
+        };
+        let fresh = StoredIdentity {
+            device_id: "device-fresh".to_string(),
+            display_name: "New Name".to_string(),
+            public_key: "new-key".to_string(),
+            platform: "macos".to_string(),
+            created_at_ms: 2_000,
+            key_label: "label-fresh".to_string(),
+        };
+
+        // Reproduces the two-row state a failed rotation delete would leave.
+        db.upsert_identity(&stale).expect("stale row");
+        db.upsert_identity(&fresh).expect("fresh row");
+
+        let first = db.get_identity().expect("lookup").expect("some row");
+        assert_eq!(
+            first.device_id, "device-fresh",
+            "the newest identity must win, not an arbitrary row"
+        );
+        // Repeatable: no dependence on physical row order.
+        for _ in 0..5 {
+            let again = db.get_identity().expect("lookup").expect("some row");
+            assert_eq!(again.device_id, first.device_id);
+        }
+
+        // With the stale row gone the answer is unchanged, and an empty table
+        // still reports "no identity".
+        db.delete_identity().expect("delete");
+        assert!(db.get_identity().expect("lookup").is_none());
     }
 
     /// A. Normal v4 → v5 upgrade.

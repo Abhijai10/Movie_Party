@@ -243,32 +243,97 @@ impl MessageType {
     }
 }
 
-/// §64: per-sender monotonic sequence enforcement. Zero is never valid
-/// (sequence starts at 1); duplicates and stale values are rejected.
+/// How far behind the high-water mark an out-of-order sequence may still be
+/// accepted. Bounds the reorder tolerance *and* the replay surface: a captured
+/// message can only be replayed while it is inside this window.
+pub const SEQUENCE_REORDER_WINDOW: u64 = 64;
+
+/// §64: per-sender sequence enforcement with a bounded reorder window.
+///
+/// The sender allocates one monotonically increasing `seq` per request, but
+/// each request travels on its **own** QUIC bidirectional stream
+/// (`QuicClient::send_request` → `open_bi`), and QUIC makes no ordering
+/// promise *between* streams. Two control messages written back-to-back can
+/// therefore be read and processed in the opposite order. A strict watermark
+/// (`seq <= last` → reject) then discards the legitimate earlier message as
+/// "stale" — observed as a permanently lost `READY_STATE` when it raced a
+/// `BUFFER_STATUS` from the same guest, which stalls the room outside
+/// `READYCHECK` forever because nothing retries.
+///
+/// `accept` is therefore a sliding replay window (the shape used by
+/// IPsec/DTLS anti-replay):
+///
+/// * `seq == 0` is never valid — sequences start at 1.
+/// * A sequence above the high-water mark is accepted and slides the window.
+/// * A sequence **inside** the window that has not been seen yet is accepted.
+///   This is the legitimate-cross-stream-reordering case.
+/// * A duplicate, or anything at/behind the window floor, is rejected.
+///
+/// Replay protection is preserved for everything that matters: a sequence is
+/// accepted at most once for the life of the window, and a replay older than
+/// the window is refused exactly as before. The window is deliberately small —
+/// the number of control requests one peer can have in flight at once is
+/// single-digit.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SequenceTracker {
-    last_seq_received: u64,
+    /// Highest sequence accepted so far; 0 means "nothing accepted yet".
+    highest_seq: u64,
+    /// Bit `i` records whether `highest_seq - i` has been accepted. Bit 0 is
+    /// always set once anything has been accepted.
+    received: u64,
 }
 
 impl SequenceTracker {
     pub fn accept(&mut self, seq: u64) -> bool {
-        if seq == 0 || seq <= self.last_seq_received {
+        if seq == 0 {
             return false;
         }
 
-        self.last_seq_received = seq;
+        if self.highest_seq == 0 {
+            self.highest_seq = seq;
+            self.received = 1;
+            return true;
+        }
+
+        if seq > self.highest_seq {
+            let advance = seq - self.highest_seq;
+            // Everything that falls off the top of the window is forgotten —
+            // and with it the replay record for those sequences.
+            self.received = if advance >= SEQUENCE_REORDER_WINDOW {
+                0
+            } else {
+                self.received << advance
+            };
+            self.received |= 1;
+            self.highest_seq = seq;
+            return true;
+        }
+
+        let age = self.highest_seq - seq;
+        if age >= SEQUENCE_REORDER_WINDOW {
+            // Behind the window floor: stale, or a replay of something we can
+            // no longer vouch for. Reject, exactly as the old watermark did.
+            return false;
+        }
+        let mask = 1_u64 << age;
+        if self.received & mask != 0 {
+            return false; // duplicate
+        }
+        self.received |= mask;
         true
     }
 
+    /// Highest sequence accepted so far (0 = nothing accepted yet).
     pub fn last_seq_received(&self) -> u64 {
-        self.last_seq_received
+        self.highest_seq
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        EnvelopeMetadata, MessageType, SequenceTracker, ENVELOPE_V_MINOR, MAX_CONTROL_MESSAGE_BYTES,
+        EnvelopeMetadata, MessageType, SequenceTracker, ENVELOPE_V_MINOR,
+        MAX_CONTROL_MESSAGE_BYTES, SEQUENCE_REORDER_WINDOW,
     };
 
     fn all_registered() -> Vec<MessageType> {
@@ -495,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn sequence_tracker_rejects_zero_duplicate_and_stale_sequences() {
+    fn sequence_tracker_rejects_zero_duplicates_and_out_of_window_replays() {
         let mut tracker = SequenceTracker::default();
 
         assert!(!tracker.accept(0));
@@ -504,5 +569,52 @@ mod tests {
         assert!(!tracker.accept(0));
         assert!(tracker.accept(2));
         assert_eq!(tracker.last_seq_received(), 2);
+
+        // Replay protection is preserved: once the high-water mark has moved
+        // past the window, an old sequence is refused exactly as before.
+        let far_ahead = 2 + SEQUENCE_REORDER_WINDOW + 1;
+        assert!(tracker.accept(far_ahead));
+        assert!(
+            !tracker.accept(2),
+            "a sequence behind the window floor must stay rejected (replay)"
+        );
+        assert!(!tracker.accept(far_ahead), "duplicate high-water mark");
+    }
+
+    /// Regression for the Windows `test_b` stall: the guest's `ReadyState` and
+    /// `BufferStatus` are two concurrent sends on independent QUIC streams, so
+    /// the *later* sequence can be processed first. The earlier one is not
+    /// stale — it must still be accepted, and exactly once.
+    #[test]
+    fn sequence_tracker_accepts_legitimate_cross_stream_reordering() {
+        let mut tracker = SequenceTracker::default();
+
+        // Stream A (seq 2) is processed before stream B (seq 1) purely by
+        // scheduling luck.
+        assert!(tracker.accept(2), "later sequence accepted first");
+        assert!(
+            tracker.accept(1),
+            "the earlier sequence must not be dropped as stale"
+        );
+
+        // ... but neither may be applied twice.
+        assert!(!tracker.accept(1), "out-of-order sequence must not repeat");
+        assert!(!tracker.accept(2), "high-water sequence must not repeat");
+    }
+
+    /// The window really is a window: unseen sequences inside it are accepted
+    /// in any order, and the floor moves as the high-water mark advances.
+    #[test]
+    fn sequence_tracker_window_slides_with_the_high_water_mark() {
+        let mut tracker = SequenceTracker::default();
+
+        assert!(tracker.accept(SEQUENCE_REORDER_WINDOW));
+        // Every sequence in (0, window] is still inside the window and unseen.
+        assert!(tracker.accept(1));
+        assert!(tracker.accept(SEQUENCE_REORDER_WINDOW - 1));
+        assert!(tracker.accept(SEQUENCE_REORDER_WINDOW / 2));
+        // ... while a sequence one step behind the floor is not.
+        assert!(tracker.accept(SEQUENCE_REORDER_WINDOW * 2));
+        assert!(!tracker.accept(SEQUENCE_REORDER_WINDOW / 2));
     }
 }

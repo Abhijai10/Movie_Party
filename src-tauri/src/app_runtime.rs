@@ -576,6 +576,23 @@ struct AppRuntimeState {
     /// Bumped on every committed play operation; carried in PlayCommit so
     /// presentation changes are unambiguous.
     presentation_epoch: u64,
+    /// Lifecycle identity of the current room/session (MP-01).
+    ///
+    /// A commit is applied by a task that sleeps until the shared deadline
+    /// (`play_lead_us`, up to 3 s) and only then takes the state lock, so the
+    /// room can end or be replaced in between. Each such task captures this
+    /// value at spawn time and re-checks it after waking: a mismatch means the
+    /// session it was scheduled for is gone and the task must not mutate the
+    /// room, dispatch to the player, or emit a snapshot. Bumped on every
+    /// session teardown and every session start, so both "ended" and
+    /// "replaced" are covered.
+    session_generation: u64,
+    /// Chrome/provider session identity, independent of `session_generation`
+    /// because a provider browser can be launched and closed many times inside
+    /// one room (MP-08). A CDP round-trip runs with the session temporarily
+    /// moved out of state, so it must only return the session it took — never
+    /// resurrect one that teardown already closed and dropped.
+    chrome_generation: u64,
     /// Guest-side calibration buffer (host: learned peer clock).
     clock_offset_to_host_us: i64,
     /// Host-side p95 RTT of the peer, used for play-lead sizing (§19).
@@ -846,6 +863,8 @@ impl AppRuntime {
                     last_committed_operation_id: None,
                     commit_scheduled_for: None,
                     presentation_epoch: 0,
+                    session_generation: 0,
+                    chrome_generation: 0,
                     clock_offset_to_host_us: 0,
                     peer_rtt_p95_us: None,
                     clock_calibrated: false,
@@ -1085,12 +1104,31 @@ impl AppRuntime {
             self.lock().error = Some(format!("MP-SECURE-001 rotation key store failed: {e}"));
             return;
         }
+        // Genuinely best-effort: the new seed is already stored under a NEW
+        // label, so a leftover entry under the old label is inert — it can
+        // never be selected for the rotated identity. Logged, not silently
+        // discarded.
         if let Some(old_label) = old_key_label {
-            let _ = self.inner.key_store.delete_seed(old_label);
+            if let Err(error) = self.inner.key_store.delete_seed(old_label) {
+                eprintln!(
+                    "MovieParty: MP-SECURE-001 rotation could not remove the previous key entry: {error}"
+                );
+            }
         }
-        // Drop the old metadata row so the rotated identity becomes the
-        // single stored source of truth.
-        let _ = db.delete_identity();
+        // NOT best-effort, despite what the old `let _ =` implied. Clearing the
+        // old metadata row is what makes the rotated identity the single stored
+        // source of truth: `upsert_identity` is `INSERT OR REPLACE` keyed on
+        // `device_id`, so writing a NEW device id while the old row survives
+        // leaves TWO rows — and a stale identity can then win the lookup. Abort
+        // rather than claim a half-state. (The rotated seed stays in the key
+        // store under its own label, unused, which is inert.)
+        if let Err(error) = db.delete_identity() {
+            self.lock().error = Some(storage_failure_message(
+                "rotation could not clear the previous identity",
+                &error,
+            ));
+            return;
+        }
         self.persist_identity(db, &identity, display_name, &key_label);
     }
 
@@ -1110,8 +1148,11 @@ impl AppRuntime {
             created_at_ms: now_ms,
             key_label: key_label.to_string(),
         };
-        if let Err(e) = db.upsert_identity(&stored) {
-            self.lock().error = Some(format!("MP-STORE-001 failed to persist identity: {e}"));
+        if let Err(error) = db.upsert_identity(&stored) {
+            self.lock().error = Some(storage_failure_message(
+                "failed to persist identity",
+                &error,
+            ));
             return;
         }
         self.inner.replace_identity(identity.clone());
@@ -1470,7 +1511,13 @@ impl AppRuntime {
                 .find(|p| p.dns_name == friend.peer_key)
                 .and_then(|p| p.usable_ipv4())
             {
-                let _ = db.mark_friend_joined(&friend.peer_key, &ip.to_string());
+                // Logged, deliberately not surfaced: this is a connectivity
+                // refresh that recomputes the same state on the next poll, so a
+                // transient failure self-heals and a user-visible error would
+                // only flap. The point is that it is no longer silent.
+                if let Err(error) = db.mark_friend_joined(&friend.peer_key, &ip.to_string()) {
+                    eprintln!("MovieParty: MP-STORE-001 failed to record a joined friend: {error}");
+                }
             }
         }
         self.list_friends()
@@ -1592,7 +1639,19 @@ impl AppRuntime {
     /// M6: Store an owned Chrome session in AppRuntime, replacing any previous one.
     /// The old session is dropped (killing the Chrome process) if present.
     pub fn store_chrome_session(&self, session: crate::providers::chrome::ManagedChromeSession) {
-        self.lock().chrome_session = Some(session);
+        // MP-07: swap the browser in under the lock, then close any replaced
+        // session with the lock released — dropping a ManagedChromeSession runs
+        // a blocking graceful close.
+        // MP-08: bump the provider-session identity so an in-flight CDP
+        // round-trip still holding the previous browser cannot restore it.
+        let previous = {
+            let mut state = self.lock();
+            bump_chrome_generation(&mut state);
+            let previous = state.chrome_session.take();
+            state.chrome_session = Some(session);
+            previous
+        };
+        drop(previous);
         self.spawn_chrome_crash_watcher();
     }
 
@@ -1623,6 +1682,9 @@ impl AppRuntime {
                     // path does not operate on a corpse (it would only
                     // wait on an already-exited child).
                     state.chrome_session = None;
+                    // MP-08: the browser identity moved on — a CDP round-trip
+                    // still holding this session must not put it back.
+                    bump_chrome_generation(&mut state);
                     let plan = recovery_plan(FailureEvent::ChromeCrash);
                     apply_recovery_to_state(&mut state, FailureEvent::ChromeCrash, plan);
                     let out = snapshot_from_state(&state);
@@ -1688,7 +1750,15 @@ impl AppRuntime {
         // profile locked, making the next launch of that provider fail
         // or show a restore banner. The session is taken OUT of the
         // lock first so a slow close (up to 3s) never freezes the UI.
-        if let Some(mut session) = self.lock().chrome_session.take() {
+        //
+        // MP-08: bump the provider-session identity first, so a CDP round-trip
+        // already in flight cannot put this session back after we close it.
+        let session = {
+            let mut state = self.lock();
+            bump_chrome_generation(&mut state);
+            state.chrome_session.take()
+        };
+        if let Some(mut session) = session {
             session.close_gracefully();
         }
     }
@@ -1700,11 +1770,20 @@ impl AppRuntime {
         session: crate::providers::chrome::ManagedChromeSession,
     ) -> AppSnapshot {
         let cdp_port = session.plan.cdp_port;
-        let mut state = self.lock();
-        state.chrome_session = Some(session);
+        // MP-07/MP-08: swap the browser in under the lock, close any replaced
+        // session with the lock released, and move the provider-session
+        // identity so an in-flight CDP round-trip holding the old browser
+        // cannot restore it.
+        let previous = {
+            let mut state = self.lock();
+            bump_chrome_generation(&mut state);
+            let previous = state.chrome_session.take();
+            state.chrome_session = Some(session);
+            previous
+        };
+        drop(previous);
         // the provider browser is the room media — start the
         // position/buffer watch worker (idempotent replace).
-        drop(state);
         self.spawn_provider_watch_worker();
         let mut state = self.lock();
         state.provider.mode = "PROVIDER_SYNC".to_string();
@@ -1741,8 +1820,17 @@ impl AppRuntime {
         session: crate::providers::chrome::ManagedChromeSession,
     ) -> AppSnapshot {
         let cdp_port = session.plan.cdp_port;
+        // MP-07/MP-08: same swap-then-close-outside-the-lock + identity bump
+        // as store_launched_provider.
+        let previous = {
+            let mut state = self.lock();
+            bump_chrome_generation(&mut state);
+            let previous = state.chrome_session.take();
+            state.chrome_session = Some(session);
+            previous
+        };
+        drop(previous);
         let mut state = self.lock();
-        state.chrome_session = Some(session);
         state.provider.mode = "GENERIC_LINK".to_string();
         state.provider.provider_id = None;
         state.provider.url = Some(url);
@@ -1776,8 +1864,21 @@ impl AppRuntime {
         session: crate::providers::chrome::ManagedChromeSession,
     ) -> AppSnapshot {
         let url = session.plan.url.clone();
+        // MP-07/MP-08: swap the browser in under the lock, close any replaced
+        // session with the lock released, and move the provider-session identity
+        // so an in-flight CDP round-trip holding the old browser cannot restore
+        // it. Plain `state.chrome_session = Some(session)` would drop the
+        // previous session — a CDP round-trip plus a whole-tree teardown — while
+        // the global mutex was held.
+        let previous = {
+            let mut state = self.lock();
+            bump_chrome_generation(&mut state);
+            let previous = state.chrome_session.take();
+            state.chrome_session = Some(session);
+            previous
+        };
+        drop(previous);
         let mut state = self.lock();
-        state.chrome_session = Some(session);
         state.provider.mode = "PROVIDER_SYNC".to_string();
         state.provider.provider_id = Some(provider_id);
         state.provider.url = Some(url);
@@ -2653,7 +2754,7 @@ impl AppRuntime {
         // Lifecycle hygiene: a duplicate create call (double-tap, stale UI)
         // must never leave the previous host server running. Abort any
         // existing server and guest client before starting a fresh session.
-        {
+        let teardown = {
             let mut state = self.lock();
             if let Some(host) = state.host_session.take() {
                 host.server_handle.abort();
@@ -2703,26 +2804,24 @@ impl AppRuntime {
             if let Some(range) = state.range_server_handle.take() {
                 range.shutdown();
             }
-            if let Some(player) = state.player.take() {
-                player
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .close();
-            }
             state.guest_cache = None;
             state.media = None;
             state.transfer = None;
             state.player_snapshot = PlayerSnapshot::default();
-            if let Some(mut session) = state.chrome_session.take() {
-                // Graceful: Browser.close lets Chrome flush the provider
-                // profile (SIGKILL could leave it locked → next launch fails).
-                session.close_gracefully();
-            }
             state.chat.clear();
             state.reactions.clear();
             state.invite = None;
             state.credentials = None;
-        }
+            // MP-01: a fresh room is starting — anything still sleeping
+            // towards a deadline from the previous session must abort.
+            bump_session_generation(&mut state);
+            // MP-07: hand the blocking teardown to the caller so it runs with
+            // the lock released.
+            DeferredTeardown::take(&mut state)
+        };
+
+        // MP-07: blocking Chrome/player teardown happens with the lock free.
+        teardown.run();
 
         let identity = self.inner.identity();
         let credentials = RoomCredentials::generate();
@@ -2962,7 +3061,7 @@ impl AppRuntime {
         // any existing host server and stale guest session before connecting,
         // so the new room never leaks the old server/client/workers or carries
         // stale media/provider state.
-        {
+        let teardown = {
             let mut state = self.lock();
             if let Some(host) = state.host_session.take() {
                 host.server_handle.abort();
@@ -3016,12 +3115,6 @@ impl AppRuntime {
             if let Some(range) = state.range_server_handle.take() {
                 range.shutdown();
             }
-            if let Some(mut session) = state.chrome_session.take() {
-                // Graceful: Browser.close lets Chrome flush the provider
-                // profile (SIGKILL could leave it locked → next launch fails).
-                session.close_gracefully();
-            }
-            state.player = None;
             state.guest_cache = None;
             state.media = None;
             state.transfer = None;
@@ -3048,7 +3141,16 @@ impl AppRuntime {
             state.player_snapshot = PlayerSnapshot::default();
             state.call_signals.clear();
             state.call_signal_ledger.reset();
-        }
+            // MP-01: a fresh guest session is starting — commit tasks still
+            // sleeping from the previous room must abort instead of mutating
+            // the new one.
+            bump_session_generation(&mut state);
+            // MP-07: blocking Chrome/player teardown is deferred past the lock.
+            DeferredTeardown::take(&mut state)
+        };
+
+        // MP-07: run the blocking teardown with the state lock released.
+        teardown.run();
 
         if !crate::network::tailscale::dev_loopback_enabled() {
             let readiness = crate::network::tailscale::local_readiness().await;
@@ -3306,10 +3408,15 @@ impl AppRuntime {
             } => {
                 let db = self.lock().db.clone();
                 if let Some(db) = db {
-                    if accepted {
-                        let _ = db.update_schedule_status(&schedule_id, "Accepted");
-                    } else {
-                        let _ = db.update_schedule_status(&schedule_id, "Declined");
+                    let status = if accepted { "Accepted" } else { "Declined" };
+                    // Not swallowed. If this write fails the host keeps showing
+                    // the schedule as awaiting confirmation, so the answer the
+                    // guest just gave silently disagrees with what is stored.
+                    if let Err(error) = db.update_schedule_status(&schedule_id, status) {
+                        self.lock().error = Some(storage_failure_message(
+                            "failed to record your answer to the schedule",
+                            &error,
+                        ));
                     }
                 }
                 let snapshot = self.snapshot();
@@ -3325,7 +3432,7 @@ impl AppRuntime {
         if !ready {
             return;
         }
-        let (op_id, target, execute_at, commit_scheduled) = {
+        let (op_id, target, execute_at, commit_scheduled, session_generation) = {
             let mut state = self.lock();
             if state.pending_operation_id.as_deref() != Some(operation_id) {
                 return;
@@ -3345,6 +3452,7 @@ impl AppRuntime {
                 state.pending_operation_target_ms,
                 execute_at,
                 deadline,
+                state.session_generation,
             )
         };
         let _ = position_ms;
@@ -3364,6 +3472,12 @@ impl AppRuntime {
             let _ =
                 tokio::time::sleep_until(tokio::time::Instant::from_std(commit_scheduled)).await;
             let mut state = runtime.lock();
+            // MP-01: this commit was scheduled for a specific room/session.
+            // If that session has since ended or been replaced, the task owns
+            // nothing and must not touch the room.
+            if state.session_generation != session_generation {
+                return;
+            }
             let scheduled = state
                 .sync_coordinator
                 .lock()
@@ -3407,7 +3521,7 @@ impl AppRuntime {
         if !ready {
             return;
         }
-        let (op_id, target, execute_at, commit_scheduled) = {
+        let (op_id, target, execute_at, commit_scheduled, session_generation) = {
             let mut state = self.lock();
             if state.pending_operation_id.as_deref() != Some(operation_id) {
                 return;
@@ -3426,6 +3540,7 @@ impl AppRuntime {
                 state.pending_operation_target_ms,
                 execute_at,
                 deadline,
+                state.session_generation,
             )
         };
         let event = QuicServerEvent::PauseCommit {
@@ -3439,6 +3554,12 @@ impl AppRuntime {
             let _ =
                 tokio::time::sleep_until(tokio::time::Instant::from_std(commit_scheduled)).await;
             let mut state = runtime.lock();
+            // MP-01: the pause commit belongs to the session that scheduled
+            // it. A room that ended or was replaced in the meantime must not
+            // be forced back to PAUSED.
+            if state.session_generation != session_generation {
+                return;
+            }
             state
                 .sync_coordinator
                 .lock()
@@ -3477,7 +3598,7 @@ impl AppRuntime {
         if !ready {
             return;
         }
-        let (op_id, target, execute_at, resume_after_seek, commit_scheduled) = {
+        let (op_id, target, execute_at, resume_after_seek, commit_scheduled, session_generation) = {
             let mut state = self.lock();
             if state.pending_operation_id.as_deref() != Some(operation_id) {
                 return;
@@ -3497,6 +3618,7 @@ impl AppRuntime {
                 execute_at,
                 state.pending_operation_resume_after,
                 deadline,
+                state.session_generation,
             )
         };
         let event = QuicServerEvent::SeekCommit {
@@ -3512,6 +3634,12 @@ impl AppRuntime {
                 tokio::time::sleep_until(tokio::time::Instant::from_std(commit_scheduled)).await;
             {
                 let mut state = runtime.lock();
+                // MP-01: a seek commit (and the play protocol it may chain
+                // into) must not run against a room that has ended or been
+                // replaced since the deadline was scheduled.
+                if state.session_generation != session_generation {
+                    return;
+                }
                 state
                     .sync_coordinator
                     .lock()
@@ -4030,11 +4158,17 @@ impl AppRuntime {
                         target_position_ms,
                         execute_at_host_mono_us,
                     };
+                    // MP-01: remember which session scheduled this commit so
+                    // the delayed task can prove it still owns the room.
+                    let session_generation = state.session_generation;
                     let inner_for_task = inner.clone();
                     tokio::spawn(async move {
                         let _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline))
                             .await;
                         let mut state = inner_for_task.lock();
+                        if state.session_generation != session_generation {
+                            return;
+                        }
                         let _ = state
                             .sync_coordinator
                             .lock()
@@ -4098,11 +4232,16 @@ impl AppRuntime {
                     let offset = state.clock_offset_to_host_us;
                     let deadline = instant_for_host_mono(execute_at_host_mono_us, offset);
                     state.commit_scheduled_for = Some(deadline);
+                    // MP-01: bind the delayed commit to this session.
+                    let session_generation = state.session_generation;
                     let inner_for_task = inner.clone();
                     tokio::spawn(async move {
                         let _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline))
                             .await;
                         let mut state = inner_for_task.lock();
+                        if state.session_generation != session_generation {
+                            return;
+                        }
                         state
                             .sync_coordinator
                             .lock()
@@ -4176,11 +4315,16 @@ impl AppRuntime {
                     let offset = state.clock_offset_to_host_us;
                     let deadline = instant_for_host_mono(execute_at_host_mono_us, offset);
                     state.commit_scheduled_for = Some(deadline);
+                    // MP-01: bind the delayed commit to this session.
+                    let session_generation = state.session_generation;
                     let inner_for_task = inner.clone();
                     tokio::spawn(async move {
                         let _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline))
                             .await;
                         let mut state = inner_for_task.lock();
+                        if state.session_generation != session_generation {
+                            return;
+                        }
                         state
                             .sync_coordinator
                             .lock()
@@ -4520,14 +4664,33 @@ impl AppRuntime {
                     scheduled_start_utc_ms,
                 } => {
                     if let Some(db) = state.db.clone() {
-                        let _ = db.update_schedule_media(&schedule_id, &media_id);
-                        let _ = db.update_schedule_preload(&schedule_id, planned_preload_utc_ms);
-                        let _ = db.update_schedule_start(&schedule_id, scheduled_start_utc_ms);
+                        // Each of these is the guest's stored copy of the
+                        // host's authoritative schedule. A swallowed failure
+                        // leaves the two silently disagreeing, so the Upcoming
+                        // card shows a title or time the host never set. All
+                        // three are still attempted; the first failure is
+                        // reported.
+                        let updates = [
+                            db.update_schedule_media(&schedule_id, &media_id),
+                            db.update_schedule_preload(&schedule_id, planned_preload_utc_ms),
+                            db.update_schedule_start(&schedule_id, scheduled_start_utc_ms),
+                        ];
+                        if let Some(error) = updates.into_iter().find_map(Result::err) {
+                            state.error = Some(storage_failure_message(
+                                "failed to record a schedule change from the host",
+                                &error,
+                            ));
+                        }
                     }
                 }
                 QuicServerEvent::ScheduleCancel { schedule_id } => {
                     if let Some(db) = state.db.clone() {
-                        let _ = db.update_schedule_status(&schedule_id, "Cancelled");
+                        if let Err(error) = db.update_schedule_status(&schedule_id, "Cancelled") {
+                            state.error = Some(storage_failure_message(
+                                "failed to record a cancelled schedule",
+                                &error,
+                            ));
+                        }
                     }
                 }
                 // §57: preload progress from the host drives the Home
@@ -5158,41 +5321,64 @@ impl AppRuntime {
 
                 // CDP round-trip out of the state lock (same take/execute/
                 // return pattern as dispatch_provider_commit).
+                //
+                // MP-08: the round-trip is blocking TCP and used to run
+                // directly on this async worker, parking a runtime thread for
+                // up to the CDP read timeout on every poll. It now runs on the
+                // blocking pool. The provider-session identity is captured
+                // together with the session so a browser torn down while the
+                // poll was in flight is closed here instead of being
+                // resurrected into state.
                 let inner = runtime.inner.clone();
-                let session_taken = { runtime.lock().chrome_session.take() };
-                let poll_result = match session_taken {
-                    Some(session) => {
-                        let execution = match session.connect_page() {
-                            Ok(mut page) => {
-                                let position_cmd = position_command(provider, command_id);
-                                let buffer_cmd = buffer_command(provider, command_id + 1);
-                                let position = page.execute(&position_cmd);
-                                let buffer = page.execute(&buffer_cmd);
-                                match (position, buffer) {
-                                    (Ok(p), Ok(b)) => {
-                                        let seconds = p["result"]["value"].as_f64().or_else(|| {
-                                            p["result"]["value"].as_i64().map(|v| v as f64)
-                                        });
-                                        let buffered_end =
-                                            b["result"]["value"].as_f64().or_else(|| {
-                                                b["result"]["value"].as_i64().map(|v| v as f64)
-                                            });
-                                        Ok((seconds, buffered_end))
-                                    }
-                                    (Err(e), _) | (_, Err(e)) => Err(e),
-                                }
-                            }
-                            Err(error) => Err(error),
-                        };
-                        // Return the session to the state.
-                        let mut state = inner.lock();
-                        if state.chrome_session.is_none() {
-                            state.chrome_session = Some(session);
-                        }
-                        execution
-                    }
-                    None => continue,
+                let (session_taken, chrome_generation) = {
+                    let mut state = runtime.lock();
+                    (state.chrome_session.take(), state.chrome_generation)
                 };
+                let Some(session) = session_taken else {
+                    continue;
+                };
+                let polled = tokio::task::spawn_blocking(move || {
+                    let execution = match session.connect_page() {
+                        Ok(mut page) => {
+                            let position_cmd = position_command(provider, command_id);
+                            let buffer_cmd = buffer_command(provider, command_id + 1);
+                            let position = page.execute(&position_cmd);
+                            let buffer = page.execute(&buffer_cmd);
+                            match (position, buffer) {
+                                (Ok(p), Ok(b)) => {
+                                    let seconds = p["result"]["value"].as_f64().or_else(|| {
+                                        p["result"]["value"].as_i64().map(|v| v as f64)
+                                    });
+                                    let buffered_end =
+                                        b["result"]["value"].as_f64().or_else(|| {
+                                            b["result"]["value"].as_i64().map(|v| v as f64)
+                                        });
+                                    Ok((seconds, buffered_end))
+                                }
+                                (Err(e), _) | (_, Err(e)) => Err(e),
+                            }
+                        }
+                        Err(error) => Err(error),
+                    };
+                    (execution, session)
+                })
+                .await;
+                // A join failure means the blocking task panicked; its session
+                // died with it (Drop closes the browser). Nothing to restore.
+                let Ok((poll_result, session)) = polled else {
+                    continue;
+                };
+                // Return the session to the state only while it is still the
+                // one this poll started from.
+                let mut stale = Some(session);
+                {
+                    let mut state = inner.lock();
+                    if chrome_session_may_be_reinserted(&state, chrome_generation) {
+                        state.chrome_session = stale.take();
+                    }
+                }
+                // A session that lost the race is closed here, lock released.
+                drop(stale);
 
                 match poll_result {
                     Ok((Some(position_seconds), Some(buffered_end_seconds))) => {
@@ -5329,9 +5515,15 @@ impl AppRuntime {
             // concurrent dispatch during the window sees no session and
             // honestly reports the browser as closed; canonical commits
             // are serialized by the coordinator, so this window is rare.
-            let session_taken = {
+            //
+            // MP-08: the provider-session identity is captured together with
+            // it. If teardown closed the browser while the CDP round-trip was
+            // in flight, the generation has moved on and the session must NOT
+            // be put back — resurrecting a closed Chrome leaves every later
+            // provider command targeting a dead process.
+            let (session_taken, chrome_generation) = {
                 let mut state = inner.lock();
-                state.chrome_session.take()
+                (state.chrome_session.take(), state.chrome_generation)
             };
             let result = match session_taken {
                 Some(session) => {
@@ -5343,13 +5535,20 @@ impl AppRuntime {
                         }
                         Err(error) => Err(error),
                     };
-                    // Return the session to the state regardless of the
-                    // command outcome: only the RESULT is a failure, the
-                    // browser itself may be perfectly alive.
-                    let mut state = inner.lock();
-                    if state.chrome_session.is_none() {
-                        state.chrome_session = Some(session);
+                    // Return the session to the state only while it is still
+                    // the session this round-trip started from and the slot is
+                    // still empty. Only the RESULT is a failure; the browser
+                    // itself may be perfectly alive.
+                    let mut stale = Some(session);
+                    {
+                        let mut state = inner.lock();
+                        if chrome_session_may_be_reinserted(&state, chrome_generation) {
+                            state.chrome_session = stale.take();
+                        }
                     }
+                    // If teardown or a replacement won the race, the session
+                    // is still ours: close it here, with the lock released.
+                    drop(stale);
                     execution
                 }
                 None => Err(crate::providers::chrome::ManagedChromeError::Process(
@@ -6068,12 +6267,12 @@ impl AppRuntime {
         if let Some(range) = state.range_server_handle.take() {
             range.shutdown();
         }
-        if let Some(mut session) = state.chrome_session.take() {
-            // Graceful: Browser.close lets Chrome flush the provider
-            // profile (SIGKILL could leave it locked → next launch fails).
-            session.close_gracefully();
-        }
-        state.player = None;
+        // MP-07: the Chrome session and the live player are moved out of the
+        // state here and torn down only *after* the lock is released (see the
+        // tail of this function) — closing them performs a CDP round-trip and
+        // a libmpv teardown that can block for seconds, and doing that under
+        // the global lock freezes every other task that needs the room.
+        let teardown = DeferredTeardown::take(&mut state);
         // §52: a GUEST who received the movie over Local Perfect gets the
         // retention question (keep / remove / save-as) — never silent
         // deletion, never silent keeping. The HOST keeps its own source
@@ -6146,8 +6345,16 @@ impl AppRuntime {
         state.pending_operation_kind = None;
         state.commit_scheduled_for = None;
         state.pending_guest_request_id = None;
+        // MP-01: the session is over. Bump the lifecycle identity so every
+        // commit task still sleeping towards its deadline can see that the
+        // room it was scheduled for is gone and refuse to mutate it.
+        bump_session_generation(&mut state);
         sync_room_snapshot(&mut state);
-        snapshot_from_state(&state)
+        let snapshot = snapshot_from_state(&state);
+        // MP-07: release the global state lock BEFORE the blocking teardown.
+        drop(state);
+        teardown.run();
+        snapshot
     }
 
     pub fn handle_failure_event(&self, event: FailureEvent) -> AppSnapshot {
@@ -7113,6 +7320,95 @@ fn movie_bitrate_estimate_bps(state: &AppRuntimeState) -> u64 {
         }
     }
     FALLBACK_MOVIE_BITRATE_BPS
+}
+
+/// Bump the room/session lifecycle identity (MP-01 / MP-08).
+///
+/// Called from every session teardown *and* every session start. A delayed
+/// commit task compares it after waking so it can never mutate a room it no
+/// longer owns; an in-flight CDP round-trip compares it so it can never
+/// reinsert a Chrome session that teardown already closed and dropped.
+fn bump_session_generation(state: &mut AppRuntimeState) {
+    state.session_generation = state.session_generation.wrapping_add(1);
+    state.chrome_generation = state.chrome_generation.wrapping_add(1);
+}
+
+/// Bump only the Chrome/provider lifecycle identity (MP-08). Used when a
+/// provider browser is replaced or closed inside a still-live room, which must
+/// not invalidate the room's own commit tasks.
+fn bump_chrome_generation(state: &mut AppRuntimeState) {
+    state.chrome_generation = state.chrome_generation.wrapping_add(1);
+}
+
+/// MP-08: may a Chrome session that was taken out of the state for a blocking
+/// CDP round-trip be put back?
+///
+/// Only when BOTH hold:
+/// * the provider generation is unchanged — i.e. no teardown, replacement, or
+///   fresh launch happened while the round-trip was in flight; and
+/// * the slot is still empty — i.e. nobody else already installed a session.
+///
+/// Otherwise the caller's session is obsolete: it is dropped (its `Drop` closes
+/// the browser) instead of being resurrected over a newer or deliberately
+/// closed provider. Without this, an in-flight poll could reinsert a browser
+/// that teardown had already shut down, leaving the runtime pointing at a dead
+/// CDP endpoint.
+fn chrome_session_may_be_reinserted(state: &AppRuntimeState, taken_generation: u64) -> bool {
+    state.chrome_generation == taken_generation && state.chrome_session.is_none()
+}
+
+/// Blocking teardown artifacts that must not be closed while the global state
+/// mutex is held (MP-07).
+///
+/// `ManagedChromeSession::close_gracefully` performs a CDP round-trip and then
+/// waits up to `GRACEFUL_CLOSE_TIMEOUT` for the child to exit, and
+/// `LocalPlayer::close` tears down libmpv — both can block for seconds. Every
+/// caller therefore takes these out of the state *under* the lock, releases
+/// the lock, and only then runs the teardown; otherwise every other task that
+/// needs the state (the QUIC event listeners, the UI's snapshot reads) stalls
+/// behind it.
+#[must_use = "the deferred teardown must run after the state lock is released"]
+struct DeferredTeardown {
+    chrome_session: Option<crate::providers::chrome::ManagedChromeSession>,
+    player: Option<Arc<Mutex<dyn LocalPlayer + Send + Sync>>>,
+}
+
+impl DeferredTeardown {
+    fn take(state: &mut AppRuntimeState) -> Self {
+        Self {
+            chrome_session: state.chrome_session.take(),
+            player: state.player.take(),
+        }
+    }
+
+    /// Run the blocking teardown. MUST be called with the state lock released.
+    fn run(self) {
+        if let Some(mut session) = self.chrome_session {
+            // Graceful: Browser.close lets Chrome flush the provider profile
+            // (SIGKILL could leave it locked → the next launch fails).
+            session.close_gracefully();
+        }
+        if let Some(player) = self.player {
+            player
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .close();
+        }
+    }
+}
+
+/// Builds the user-facing message for a storage write that failed on a path
+/// which cannot return an error to a caller (a QUIC event handler, a refresh).
+///
+/// Keeps the established `MP-STORE-001` vocabulary — the frontend already maps
+/// that code to plain language — but deliberately keeps the raw SQLite text
+/// **out** of the message: it is logged instead, where it is useful for
+/// diagnosis and invisible to the user. `StorageError::Sqlite` embeds the raw
+/// rusqlite string, so interpolating it here would put engine internals on
+/// screen.
+fn storage_failure_message(context: &str, error: &crate::storage::StorageError) -> String {
+    eprintln!("MovieParty: MP-STORE-001 {context}: {error}");
+    format!("MP-STORE-001 {context}")
 }
 
 fn snapshot_from_state(state: &AppRuntimeState) -> AppSnapshot {
@@ -10311,6 +10607,91 @@ mod scheduling_tests {
         );
     }
 
+    /// MP-10: a storage write that fails inside a QUIC event handler must be
+    /// surfaced, not swallowed.
+    ///
+    /// The guest's stored schedule is its copy of the host's authoritative
+    /// state. Before this fix each write was `let _ = db.update_…(…)`, so a
+    /// failure left the two silently disagreeing — the Upcoming card would show
+    /// a title or time the host never set, with nothing anywhere saying so.
+    #[test]
+    fn schedule_update_write_failure_is_surfaced_not_swallowed() {
+        let (runtime, dir) = runtime_with_db();
+        let inner = runtime.inner_for_events();
+
+        // Induce a genuine storage failure rather than asserting a happy path.
+        {
+            let state = runtime.lock();
+            let db = state.db.as_ref().expect("db");
+            db.execute_sql_for_test("DROP TABLE schedules")
+                .expect("drop schedules");
+        }
+
+        let __ev = ServerEvent::ScheduleUpdate {
+            schedule_id: "sched-mp10".to_string(),
+            media_id: "m".to_string(),
+            planned_preload_utc_ms: 1,
+            scheduled_start_utc_ms: 2,
+        };
+        super::AppRuntime::apply_peer_event_pub(&inner, envelope(__ev.clone()), __ev);
+
+        let error = runtime.lock().error.clone().unwrap_or_default();
+        assert!(
+            error.starts_with("MP-STORE-001"),
+            "a failed schedule write must surface MP-STORE-001; got {error:?}"
+        );
+        let lowered = error.to_lowercase();
+        assert!(
+            !lowered.contains("sqlite") && !lowered.contains("no such table"),
+            "the user-facing message must not leak raw SQLite internals; got {error:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// MP-13: a rotation whose "clear the previous identity" step fails must
+    /// abort rather than carry on.
+    ///
+    /// `upsert_identity` is `INSERT OR REPLACE` keyed on `device_id`, so writing
+    /// the NEW device id while the old row survives leaves TWO rows — and a
+    /// stale identity can then win the lookup, silently resurrecting the
+    /// identity the user just rotated away from. The delete error used to be
+    /// discarded with `let _ =`.
+    #[test]
+    fn identity_rotation_aborts_when_the_previous_row_cannot_be_cleared() {
+        let runtime = AppRuntime::new_with_key_store_for_test(std::sync::Arc::new(
+            crate::secure::FakeKeyStore::new(),
+        ));
+        let dir = std::env::temp_dir().join(format!("mp-rotation-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        runtime.init_db_at_path(&dir.join("mp.db"));
+        let db = runtime.lock().db.clone().expect("db");
+
+        // Force `delete_identity` to fail for real: the table is gone.
+        db.execute_sql_for_test("DROP TABLE device_identity")
+            .expect("drop device_identity");
+
+        let before = runtime.lock().local_participant.id.clone();
+        runtime.rotate_identity(&db, "Abhijai", None);
+        let after = runtime.lock().local_participant.id.clone();
+
+        let error = runtime.lock().error.clone().unwrap_or_default();
+        assert!(
+            error.starts_with("MP-STORE-001"),
+            "the rotation failure must use the existing vocabulary; got {error:?}"
+        );
+        assert!(
+            error.contains("clear the previous identity"),
+            "the delete guard specifically must have fired; got {error:?}"
+        );
+        assert_eq!(
+            before, after,
+            "a rotation that could not clear the old row must not claim a new identity"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Host: GuestScheduleAccept flips the stored status to Accepted.
     #[test]
     fn host_marks_schedule_accepted_on_guest_ack() {
@@ -10901,5 +11282,319 @@ mod friends_tests {
         assert_eq!(runtime.lock().local_participant.display_name, current);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod session_lifecycle_tests {
+    use super::{
+        bump_chrome_generation, bump_session_generation, chrome_session_may_be_reinserted,
+        AppRuntime, DeferredTeardown,
+    };
+    use crate::media::player::{LocalPlayer, PlayerError, PlayerSnapshot};
+    use crate::network::quic::monotonic_us;
+    use crate::sync::local::ScheduledPlayback;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use uuid::Uuid;
+
+    /// A player whose `close()` parks until the test releases it, so a test can
+    /// observe what the runtime is (or is not) holding while the blocking
+    /// teardown is in flight.
+    struct ParkedClosePlayer {
+        close_entered: Arc<AtomicBool>,
+        release: Arc<AtomicBool>,
+        closed: Arc<AtomicBool>,
+    }
+
+    impl LocalPlayer for ParkedClosePlayer {
+        fn open(&mut self, _path: &Path) -> Result<(), PlayerError> {
+            Ok(())
+        }
+        fn play(&mut self) -> Result<(), PlayerError> {
+            Ok(())
+        }
+        fn pause(&mut self) -> Result<(), PlayerError> {
+            Ok(())
+        }
+        fn seek(&mut self, _position_ms: u64) -> Result<(), PlayerError> {
+            Ok(())
+        }
+        fn set_volume(&mut self, _volume: f32) -> Result<(), PlayerError> {
+            Ok(())
+        }
+        fn set_playback_rate(&mut self, _rate: f32) -> Result<(), PlayerError> {
+            Ok(())
+        }
+        fn snapshot(&self) -> PlayerSnapshot {
+            PlayerSnapshot::default()
+        }
+        fn duration(&self) -> Option<u64> {
+            None
+        }
+        fn buffered_ahead_ms(&self) -> Option<u64> {
+            None
+        }
+        fn error_message(&self) -> Option<String> {
+            None
+        }
+        fn close(&mut self) {
+            self.close_entered.store(true, Ordering::SeqCst);
+            // Bounded park: this must never be able to hang the suite, even if
+            // the assertion it exists to enable fails.
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            while !self.release.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            self.closed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// A runtime holding a pending PLAY operation whose commit deadline is
+    /// `execute_in` from now, plus a matching `pending_scheduled` entry in the
+    /// coordinator.
+    ///
+    /// Seeding the coordinator matters: the commit task returns early when
+    /// `pending_scheduled` is `None` or carries a different operation id. With
+    /// it seeded and matching, the MP-01 session-generation guard is the ONLY
+    /// thing that can stop the commit from mutating state — which is what makes
+    /// the stale-task tests discriminating rather than accidentally passing.
+    fn runtime_with_pending_play(execute_in: Duration) -> (AppRuntime, Uuid) {
+        let runtime = AppRuntime::new();
+        let operation_id = Uuid::now_v7();
+        let execute_at_host_mono_us = monotonic_us() + execute_in.as_micros() as u64;
+        {
+            let mut state = runtime.lock();
+            state.pending_operation_id = Some(operation_id.to_string());
+            state.pending_operation_kind = Some("PLAY".to_string());
+            state.pending_operation_target_ms = 5_000;
+            state.pending_operation_execute_at_us = execute_at_host_mono_us;
+            state.pending_operation_resume_after = false;
+            state.commit_scheduled_for = None;
+            state.last_committed_operation_id = None;
+            state.sync.position_ms = 0;
+            state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .pending_scheduled = Some(ScheduledPlayback {
+                operation_id,
+                target_position_ms: 5_000,
+                execute_at_host_mono_us,
+            });
+        }
+        (runtime, operation_id)
+    }
+
+    /// MP-01: a delayed PLAY commit whose room ENDED before the deadline must
+    /// be a complete no-op — no position move, no pending-operation clear, no
+    /// "committed" record.
+    #[tokio::test]
+    async fn play_commit_after_session_teardown_is_a_noop() {
+        let (runtime, operation_id) = runtime_with_pending_play(Duration::from_millis(120));
+        let scheduled_generation = runtime.lock().session_generation;
+
+        // The guest answered PLAY_READY, so the host spawns the commit task.
+        runtime.on_guest_play_ready(&operation_id.to_string(), true, 0);
+        assert!(
+            runtime.lock().commit_scheduled_for.is_some(),
+            "the commit must actually have been scheduled, or this test proves nothing"
+        );
+
+        // Teardown lands before the task wakes. No `await` has happened since
+        // the spawn, so the task provably has not run yet.
+        {
+            let mut state = runtime.lock();
+            bump_session_generation(&mut state);
+            assert_ne!(state.session_generation, scheduled_generation);
+        }
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        let state = runtime.lock();
+        assert_eq!(
+            state.pending_operation_id.as_deref(),
+            Some(operation_id.to_string().as_str()),
+            "a stale commit must not clear the pending operation it no longer owns"
+        );
+        assert_eq!(
+            state.sync.position_ms, 0,
+            "a stale commit must not move the room's position"
+        );
+        assert!(
+            state.last_committed_operation_id.is_none(),
+            "a stale commit must not be recorded as committed"
+        );
+    }
+
+    /// Control for the teardown test: identical setup, no teardown, and the
+    /// commit DOES fire. Without this, `play_commit_after_session_teardown_is_a_noop`
+    /// could be passing for an unrelated reason (bad seeding, an early return
+    /// elsewhere) instead of because of the generation guard.
+    #[tokio::test]
+    async fn play_commit_fires_while_the_session_is_still_live() {
+        let (runtime, operation_id) = runtime_with_pending_play(Duration::from_millis(120));
+        runtime.on_guest_play_ready(&operation_id.to_string(), true, 0);
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        let state = runtime.lock();
+        assert!(
+            state.pending_operation_id.is_none(),
+            "a live commit must consume the pending operation"
+        );
+        assert_eq!(
+            state.last_committed_operation_id.as_deref(),
+            Some(operation_id.to_string().as_str())
+        );
+        assert_eq!(state.sync.position_ms, 5_000);
+    }
+
+    /// MP-01: a stale commit from a REPLACED room must not clobber the new
+    /// room's pending operation. The old task wakes, finds a different session
+    /// generation, and leaves the replacement untouched.
+    #[tokio::test]
+    async fn play_commit_after_room_replacement_leaves_the_new_operation_alone() {
+        let (runtime, old_operation) = runtime_with_pending_play(Duration::from_millis(120));
+        runtime.on_guest_play_ready(&old_operation.to_string(), true, 0);
+
+        // A replacement session starts: the generation bumps and a NEW
+        // operation takes over the pending slot.
+        let new_operation = Uuid::now_v7();
+        {
+            let mut state = runtime.lock();
+            bump_session_generation(&mut state);
+            state.pending_operation_id = Some(new_operation.to_string());
+            state.pending_operation_kind = Some("PLAY".to_string());
+            state.pending_operation_target_ms = 9_000;
+            state.commit_scheduled_for = None;
+            state.last_committed_operation_id = None;
+        }
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        let state = runtime.lock();
+        assert_eq!(
+            state.pending_operation_id.as_deref(),
+            Some(new_operation.to_string().as_str()),
+            "the stale task must not clear the replacement room's operation"
+        );
+        assert_eq!(
+            state.pending_operation_target_ms, 9_000,
+            "the stale task must not retarget the replacement room"
+        );
+        assert!(
+            state.last_committed_operation_id.is_none(),
+            "the stale task must not record its own operation as committed"
+        );
+        assert_eq!(
+            state.sync.position_ms, 0,
+            "the stale task must not move the replacement room"
+        );
+    }
+
+    /// MP-08: a Chrome session taken out of state for a CDP round-trip must not
+    /// be put back once teardown has bumped the provider generation. Putting it
+    /// back would leave the runtime pointing at a browser that was already
+    /// closed, so every later command would fail against a dead CDP endpoint.
+    #[test]
+    fn chrome_session_cannot_resurrect_after_teardown() {
+        let runtime = AppRuntime::new();
+        let taken_generation = runtime.lock().chrome_generation;
+
+        // Teardown (or a provider replacement) happens while the round-trip is
+        // still in flight.
+        bump_chrome_generation(&mut runtime.lock());
+
+        assert!(
+            !chrome_session_may_be_reinserted(&runtime.lock(), taken_generation),
+            "an obsolete Chrome session must not be reinserted after teardown"
+        );
+    }
+
+    /// MP-08 control: the guard is not a blanket refusal. While the provider
+    /// generation is unchanged and the slot is still empty, the session IS
+    /// reinserted — that is the normal, successful round-trip.
+    ///
+    /// The second half of the guard (`chrome_session.is_none()`, i.e. "nobody
+    /// already installed a newer session") cannot be exercised here without
+    /// launching a real Chrome process, because `ManagedChromeSession` owns a
+    /// real process tree. It is a plain emptiness check at both production call
+    /// sites.
+    #[test]
+    fn chrome_session_reinserts_while_the_generation_is_unchanged() {
+        let runtime = AppRuntime::new();
+        let generation = runtime.lock().chrome_generation;
+
+        assert!(
+            chrome_session_may_be_reinserted(&runtime.lock(), generation),
+            "a successful round-trip must still be able to return its session"
+        );
+    }
+
+    /// MP-07: the blocking player teardown must run with the global state lock
+    /// RELEASED. While the player's `close()` is parked, another caller must
+    /// still be able to take the lock.
+    ///
+    /// If `DeferredTeardown::run` were invoked with the lock held, this test
+    /// blocks on `runtime.lock()` until the park deadline expires, then finds
+    /// `closed == true` and fails — the bounded park means it fails rather than
+    /// hanging.
+    #[tokio::test]
+    async fn deferred_teardown_runs_outside_the_global_lock() {
+        let runtime = AppRuntime::new();
+        let close_entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let closed = Arc::new(AtomicBool::new(false));
+        {
+            let mut state = runtime.lock();
+            state.player = Some(Arc::new(Mutex::new(ParkedClosePlayer {
+                close_entered: close_entered.clone(),
+                release: release.clone(),
+                closed: closed.clone(),
+            })));
+        }
+
+        // The production pattern: take the blocking artifacts OUT under the
+        // lock, release the lock, then run the teardown.
+        let teardown = {
+            let mut state = runtime.lock();
+            DeferredTeardown::take(&mut state)
+        };
+        assert!(
+            runtime.lock().player.is_none(),
+            "take() must remove the player from the locked state"
+        );
+
+        // spawn_blocking mirrors production: the blocking close runs on the
+        // blocking pool, never on an async worker.
+        let teardown_task = tokio::task::spawn_blocking(move || teardown.run());
+
+        let wait_deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !close_entered.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < wait_deadline,
+                "the player's close() was never entered"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        // THE ASSERTION: the global lock is free while close() is blocked.
+        let position_ms = runtime.lock().sync.position_ms;
+        assert_eq!(position_ms, 0);
+        assert!(
+            !closed.load(Ordering::SeqCst),
+            "close() must still be parked — otherwise this test proves nothing \
+             (it means the lock was held until close() finished)"
+        );
+
+        release.store(true, Ordering::SeqCst);
+        teardown_task.await.expect("teardown task must not panic");
+        assert!(
+            closed.load(Ordering::SeqCst),
+            "teardown must complete once the player is released"
+        );
     }
 }

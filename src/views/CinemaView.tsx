@@ -70,6 +70,8 @@ const privacyNoticeMs = 2_200;
 const ghostNoticeMs = 800;
 /** camera-degradation notice duration (movie-first policy). */
 const cameraNoticeMs = 3_200;
+/** How long a failed control action's explanation stays on screen. */
+const controlNoticeMs = 2_600;
 /**
  * F30: bounded retry for a failed call start. One automatic retry covers the
  * transient cases (a device briefly busy, a dismissed-then-granted prompt)
@@ -238,11 +240,14 @@ export function CinemaView({
       const bounds = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
       const request = attached ? resizeNativeVideoSurface(bounds) : attachNativeVideoSurface(bounds);
       attached = true;
-      void request.then((next) => {
-        if (next) {
-          onSnapshot(next);
-        }
-      });
+      void request
+        .then(onSnapshot)
+        .catch((error: unknown) => {
+          // A failed surface update is retried on the next observer tick, so it
+          // is logged rather than surfaced — but it is no longer silently
+          // treated as "nothing happened".
+          console.error("native video surface update failed", error);
+        });
     };
     updateSurface();
     const observer = new ResizeObserver(updateSurface);
@@ -253,11 +258,13 @@ export function CinemaView({
       // remembered); the returned snapshot keeps AppShell in sync so a
       // later re-attach — StrictMode remount, re-entering Cinema — is a
       // clean handoff instead of "cannot move to another native surface".
-      void detachNativeVideoSurface().then((next) => {
-        if (next) {
-          onSnapshot(next);
-        }
-      });
+      void detachNativeVideoSurface()
+        .then(onSnapshot)
+        .catch((error: unknown) => {
+          // Best-effort cleanup on unmount: the surface is going away either
+          // way, so this is logged rather than surfaced.
+          console.error("detach_native_video_surface failed", error);
+        });
     };
   }, [localMediaId, onSnapshot, snapshot.provider.mode]);
 
@@ -437,9 +444,7 @@ export function CinemaView({
         localMicrophoneEnabled,
         async (signal) => {
           const next = await submitCallSignal(signal);
-          if (next) {
-            onSnapshot(next);
-          }
+          onSnapshot(next);
         },
         controller.signal,
       ).then((result) => {
@@ -470,9 +475,7 @@ export function CinemaView({
       {
         onSignal: async (signal) => {
           const next = await submitCallSignal(signal);
-          if (next) {
-            onSnapshot(next);
-          }
+          onSnapshot(next);
         },
         onStatusChange: (status) => {
           if (status === "degraded") {
@@ -657,6 +660,19 @@ export function CinemaView({
     return undefined;
   }, [snapshot.call.cameraNotice]);
 
+  /**
+   * Surfaces a failed control action through the existing cinematic notice
+   * surface, so a button that could not do its job says so instead of looking
+   * like it did nothing. Auto-clears like the other transient notices, and only
+   * if the same message is still showing (a newer notice is left alone).
+   */
+  const showControlNotice = (message: string) => {
+    setPrivacyNotice(message);
+    window.setTimeout(() => {
+      setPrivacyNotice((current) => (current === message ? "" : current));
+    }, controlNoticeMs);
+  };
+
   useEffect(() => {
     let noticeTimeout: number | undefined;
     const showNotice = (message: string, durationMs: number) => {
@@ -687,9 +703,7 @@ export function CinemaView({
         }
 
         void setGhostMode(!isGhostMode).then((next) => {
-          if (next) {
-            onSnapshot(next);
-          }
+          onSnapshot(next);
           showNotice(!isGhostMode ? "Ghost Mode on" : "Ghost Mode off", ghostNoticeMs);
         });
         return;
@@ -698,9 +712,7 @@ export function CinemaView({
       if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "p") {
         event.preventDefault();
         void setPrivacyMode(!isPrivacyMode).then((next) => {
-          if (next) {
-            onSnapshot(next);
-          }
+          onSnapshot(next);
           if (isPrivacyMode) {
             showNotice(
               "Privacy Mode ended. Camera and microphone remain disabled.",
@@ -752,21 +764,17 @@ export function CinemaView({
 
     const sentBody = draft.trim();
     void sendChatMessage(sentBody).then((next) => {
-      if (next) {
-        previousChatLength.current = next.chat.length;
-        onSnapshot(next);
-        setDraft("");
-        // §34/§35: the sender must SEE where the message went. The
-        // incoming-message effect skips while the compose bar is open
-        // (manualOpen), so the sender's own words would otherwise vanish
-        // until they opened history. Echo the sent message as a lower-third
-        // ephemeral bubble — same surface the peer's messages use.
-        const lastMessage = next.chat[next.chat.length - 1];
-        if (lastMessage != null && lastMessage.body === sentBody) {
-          setBubbleQueue((current) =>
-            enqueueChatBubble(current, lastMessage, Date.now()),
-          );
-        }
+      previousChatLength.current = next.chat.length;
+      onSnapshot(next);
+      setDraft("");
+      // §34/§35: the sender must SEE where the message went. The
+      // incoming-message effect skips while the compose bar is open
+      // (manualOpen), so the sender's own words would otherwise vanish
+      // until they opened history. Echo the sent message as a lower-third
+      // ephemeral bubble — same surface the peer's messages use.
+      const lastMessage = next.chat[next.chat.length - 1];
+      if (lastMessage != null && lastMessage.body === sentBody) {
+        setBubbleQueue((current) => enqueueChatBubble(current, lastMessage, Date.now()));
       }
     });
   };
@@ -779,13 +787,12 @@ export function CinemaView({
     setReactionWarning("");
     void sendBackendReaction(reaction).then(
       (next) => {
-        if (next) {
-          onSnapshot(next);
-          return;
-        }
-        setReactionWarning("Reaction limit reached");
+        onSnapshot(next);
       },
       () => {
+        // The backend drops a reaction over the rate limit; that rejection is
+        // still the "limit reached" signal (the old `if (next)` branch never
+        // fired, because a failed command resolved to null only on IPC failure).
         setReactionWarning("Reaction limit reached");
       },
     );
@@ -920,11 +927,12 @@ export function CinemaView({
                     if (path == null) {
                       return;
                     }
-                    void createLocalParty(path).then((next) => {
-                      if (next) {
-                        onSnapshot(next);
-                      }
-                    });
+                    void createLocalParty(path)
+                      .then(onSnapshot)
+                      .catch((error: unknown) => {
+                        console.error("create_local_party failed", error);
+                        showControlNotice("Movie Party could not start that party.");
+                      });
                   });
                 },
               },
@@ -938,11 +946,12 @@ export function CinemaView({
               // retreat the Ready Check uses: it retracts readiness, clears any
               // pending countdown and returns the room to the lobby without
               // ending the party.
-              void backToLobby().then((next) => {
-                if (next) {
-                  onSnapshot(next);
-                }
-              });
+              void backToLobby()
+                .then(onSnapshot)
+                .catch((error: unknown) => {
+                  console.error("back_to_lobby failed", error);
+                  showControlNotice("Movie Party could not return to the lobby.");
+                });
             }}
           />
         ) : null}
@@ -956,12 +965,15 @@ export function CinemaView({
             setReconnectDismissed(true);
           }}
           onContinueWithoutGuest={() => {
-            void continueWithoutGuest().then((next) => {
-              if (next) {
+            void continueWithoutGuest()
+              .then((next) => {
                 setReconnectDismissed(false);
                 onSnapshot(next);
-              }
-            });
+              })
+              .catch((error: unknown) => {
+                console.error("continue_without_guest failed", error);
+                showControlNotice("Movie Party could not resume without your guest.");
+              });
           }}
         />
         <ProviderStatusOverlay snapshot={snapshot} />
@@ -979,19 +991,21 @@ export function CinemaView({
           currentMs={snapshot.player.positionMs}
           durationMs={snapshot.player.durationMs}
           onSeekRelative={(deltaMs) => {
-            void seekRelative(deltaMs).then((next) => {
-              if (next) {
-                onSnapshot(next);
-              }
-            });
+            void seekRelative(deltaMs)
+              .then(onSnapshot)
+              .catch((error: unknown) => {
+                console.error("seek failed", error);
+                showControlNotice("Movie Party could not seek.");
+              });
           }}
           onTogglePlayback={() => {
             const action = snapshot.sync.roomState === "PLAYING" ? pausePlayback : resumePlayback;
-            void action().then((next) => {
-              if (next) {
-                onSnapshot(next);
-              }
-            });
+            void action()
+              .then(onSnapshot)
+              .catch((error: unknown) => {
+                console.error("playback toggle failed", error);
+                showControlNotice("Movie Party could not change playback.");
+              });
           }}
           microphoneEnabled={localMicrophoneEnabled}
           onToggleMicrophone={() => {
@@ -1000,11 +1014,12 @@ export function CinemaView({
             if (snapshotMicrophoneEnabled === nextEnabled) {
               return;
             }
-            void setMicrophoneEnabled(nextEnabled).then((next) => {
-              if (next) {
-                onSnapshot(next);
-              }
-            });
+            void setMicrophoneEnabled(nextEnabled)
+              .then(onSnapshot)
+              .catch((error: unknown) => {
+                console.error("set_microphone_enabled failed", error);
+                showControlNotice("Movie Party could not change the microphone.");
+              });
           }}
           cameraEnabled={localCameraEnabled}
           onToggleCamera={() => {
@@ -1013,11 +1028,12 @@ export function CinemaView({
             if (snapshotCameraEnabled === nextEnabled) {
               return;
             }
-            void setCameraEnabled(nextEnabled).then((next) => {
-              if (next) {
-                onSnapshot(next);
-              }
-            });
+            void setCameraEnabled(nextEnabled)
+              .then(onSnapshot)
+              .catch((error: unknown) => {
+                console.error("set_camera_enabled failed", error);
+                showControlNotice("Movie Party could not change the camera.");
+              });
           }}
           chatOpen={isComposing || isHistoryOpen}
           hasUnreadChat={hasUnreadChat}
@@ -1051,11 +1067,12 @@ export function CinemaView({
           }}
           sharedControls={sharedControls}
           onToggleSharedControls={() => {
-            void setSharedControls(!sharedControls).then((next) => {
-              if (next) {
-                onSnapshot(next);
-              }
-            });
+            void setSharedControls(!sharedControls)
+              .then(onSnapshot)
+              .catch((error: unknown) => {
+                console.error("set_shared_controls failed", error);
+                showControlNotice("Movie Party could not change who can control playback.");
+              });
           }}
           onLeave={onLeave}
         />

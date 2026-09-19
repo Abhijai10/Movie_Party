@@ -1,9 +1,11 @@
+mod process;
+
 use std::{
     fs,
     io::{Read, Write},
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::Command,
     thread,
     time::{Duration, Instant},
 };
@@ -11,6 +13,13 @@ use std::{
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::json;
 use thiserror::Error;
+
+use process::ChildPoll;
+pub use process::{install_shutdown_hardening, ChromeProcessOwner};
+
+/// How long a freshly launched Chrome gets to open its CDP endpoint before the
+/// launch is declared failed. See [`launch_managed_chrome`].
+const CDP_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub const CDP_BIND_HOST: &str = "127.0.0.1";
 pub const DEFAULT_CDP_PORT: u16 = 9222;
@@ -75,9 +84,14 @@ pub struct CdpTarget {
     pub web_socket_debugger_url: String,
 }
 
+/// A live managed Chrome, owned end to end.
+///
+/// The browser is never held as a bare `Child`: [`ChromeProcessOwner`] owns the
+/// whole process tree (browser + renderer/GPU/utility children) and is the only
+/// thing allowed to signal or reap it. See `process.rs` for why that matters.
 #[derive(Debug)]
 pub struct ManagedChromeSession {
-    child: Child,
+    process: ChromeProcessOwner,
     pub plan: ChromeLaunchPlan,
 }
 
@@ -178,20 +192,44 @@ pub fn close_browser_command(id: u64) -> CdpCommand {
     }
 }
 
+/// Launches a managed Chrome and waits for its CDP endpoint to come up.
+///
+/// **Every** failure after the spawn kills and reaps the tree (MP-20).
+/// Previously the `Child` was dropped bare on the CDP-timeout and child-exit
+/// paths, which leaked a running Chrome *and* left an unreaped zombie — because
+/// `ManagedChromeSession`'s `Drop` never runs for a session that was never
+/// constructed.
 pub fn launch_managed_chrome(
     plan: ChromeLaunchPlan,
+) -> Result<ManagedChromeSession, ManagedChromeError> {
+    launch_managed_chrome_with_timeout(plan, CDP_STARTUP_TIMEOUT)
+}
+
+/// [`launch_managed_chrome`] with an explicit CDP startup budget, so the
+/// failure paths can be tested without waiting the full production timeout.
+pub fn launch_managed_chrome_with_timeout(
+    plan: ChromeLaunchPlan,
+    cdp_startup_timeout: Duration,
 ) -> Result<ManagedChromeSession, ManagedChromeError> {
     validate_cdp_bind(plan.cdp_host)?;
     fs::create_dir_all(&plan.profile_path)
         .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
-    let mut child = chrome_command(&plan)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| ManagedChromeError::Process(error.to_string()))?;
-    wait_for_cdp_or_child_exit(&mut child, plan.cdp_port, Duration::from_secs(10))?;
-    Ok(ManagedChromeSession { child, plan })
+
+    // The owner takes responsibility the instant the process exists, so no
+    // later `?` can drop a live tree on the floor. It also publishes the tree
+    // for the signal/panic shutdown paths.
+    let mut process = ChromeProcessOwner::spawn(&plan)?;
+
+    if let Err(error) = wait_for_cdp_or_child_exit(&mut process, plan.cdp_port, cdp_startup_timeout)
+    {
+        // This launch owns the tree and nothing else has ever seen it, so it is
+        // killed and reaped right here — the session that would have taken
+        // ownership does not exist, so its `Drop` will never run.
+        process.terminate_tree();
+        return Err(error);
+    }
+
+    Ok(ManagedChromeSession { process, plan })
 }
 
 impl ManagedChromeSession {
@@ -214,33 +252,32 @@ impl ManagedChromeSession {
     }
 
     /// Graceful shutdown in place: asks Chrome to close itself over CDP
-    /// (`Browser.close` lets Chrome flush profile state — a SIGKILL can
-    /// leave the dedicated profile locked and make the NEXT launch of
-    /// that profile fail or show a "restore pages" banner), waits up to
-    /// GRACEFUL_CLOSE_TIMEOUT_MS for a clean exit, and only falls back
-    /// to kill() when Chrome does not exit in time. Never returns Err:
-    /// teardown must not abort the caller's cleanup path.
+    /// (`Browser.close` lets Chrome flush the dedicated profile — a hard kill
+    /// can leave it locked and make the NEXT launch of that provider fail or
+    /// show a "restore pages" banner), waits up to `GRACEFUL_CLOSE_TIMEOUT` for
+    /// the browser to exit, then hands the whole tree to the owner, which
+    /// guarantees a terminate **and a reap**.
+    ///
+    /// Never returns Err: teardown must not abort the caller's cleanup path.
+    /// Safe to call repeatedly — the owner's teardown is idempotent.
     pub fn close_gracefully(&mut self) {
-        if !self.is_alive() {
-            // Already exited (user closed the window, or a crash — the
-            // profile flush happened or is moot); reap to avoid a zombie.
-            let _ = self.child.wait();
-            return;
-        }
-        if let Ok(mut page) = self.connect_page() {
-            let id = page.next_command_id();
-            let _ = page.execute(&close_browser_command(id));
-        }
-        let start = Instant::now();
-        while start.elapsed() < GRACEFUL_CLOSE_TIMEOUT {
-            match self.child.try_wait() {
-                Ok(Some(_)) => return, // clean exit
-                Ok(None) => thread::sleep(Duration::from_millis(100)),
-                Err(_) => break, // cannot wait; fall through to kill
+        if self.process.is_alive() {
+            if let Ok(mut page) = self.connect_page() {
+                let id = page.next_command_id();
+                let _ = page.execute(&close_browser_command(id));
+            }
+            let start = Instant::now();
+            while start.elapsed() < GRACEFUL_CLOSE_TIMEOUT {
+                if !self.process.is_alive() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
             }
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // Unconditional, including when the browser had already exited: the
+        // browser exiting does not mean its renderer/GPU children exited, and
+        // those are exactly what a single-PID kill leaked (MP-22).
+        self.process.terminate_tree();
     }
 
     pub fn close(mut self) -> Result<(), ManagedChromeError> {
@@ -257,13 +294,41 @@ const GRACEFUL_CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 fn chrome_command(plan: &ChromeLaunchPlan) -> Command {
     let mut command = Command::new(&plan.executable);
     command.args(plan.args());
+    configure_process_isolation(&mut command);
     command
+}
+
+/// Puts the browser in its own process group / job, so teardown can address the
+/// whole Chrome tree and nothing else (MP-22).
+///
+/// POSIX: a new process group whose id is the child's pid. That is what makes
+/// `killpg` reach every descendant without any risk of reaching a process Movie
+/// Party does not own.
+///
+/// Windows: a new process group, so a console Ctrl+C never reaches Chrome, plus
+/// — assigned at spawn time by `ChromeProcessOwner` — a kill-on-close job
+/// object, which is the part that actually guarantees tree termination.
+fn configure_process_isolation(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        command.process_group(0);
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
+
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
 }
 
 impl ManagedChromeSession {
     /// Check if the Chrome process is still alive.
     pub fn is_alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        self.process.is_alive()
     }
 
     /// Full health check: verify Chrome is alive and CDP is responsive.
@@ -381,7 +446,7 @@ fn is_valid_provider_id(provider_id: &str) -> bool {
 /// polling for the full timeout after that only produces a misleading
 /// CdpTimeout error 10 seconds later).
 fn wait_for_cdp_or_child_exit(
-    child: &mut Child,
+    process: &mut ChromeProcessOwner,
     port: u16,
     timeout: Duration,
 ) -> Result<(), ManagedChromeError> {
@@ -390,18 +455,18 @@ fn wait_for_cdp_or_child_exit(
         if http_get(port, "/json/version").is_ok() {
             return Ok(());
         }
-        match child.try_wait() {
-            // Chrome exited before CDP came up: surface the real cause,
-            // not a timeout. This is the "Chrome exits unexpectedly"
-            // launch-time symptom.
-            Ok(Some(status)) => {
+        match process.poll() {
+            // Chrome exited before CDP came up: surface the real cause, not a
+            // timeout. This is the "Chrome exits unexpectedly" launch-time
+            // symptom.
+            ChildPoll::Exited(status) => {
                 return Err(ManagedChromeError::Process(format!(
                     "Chrome exited during launch with status {status}"
                 )));
             }
-            Ok(None) => {}
-            Err(error) => {
-                return Err(ManagedChromeError::Io(error.to_string()));
+            ChildPoll::Running => {}
+            ChildPoll::Failed(error) => {
+                return Err(ManagedChromeError::Io(error));
             }
         }
         if start.elapsed() >= timeout {
@@ -573,20 +638,28 @@ fn parse_ws_url(url: &str) -> Result<(String, u16, String), ManagedChromeError> 
 mod tests {
     use super::*;
     use crate::providers::youtube::{is_youtube_url, YoutubeAdapter};
+    use std::process::{Child, Stdio};
 
-    /// A dead child (Chrome exited/crashed) must be reaped, not kill'd:
-    /// close_gracefully's already-exited path skips the CDP attempt and
-    /// the kill fallback entirely.
-    #[test]
-    fn close_gracefully_reaps_an_already_exited_child() {
-        // A process that exits immediately on spawn (macOS `sleep 0`).
-        let child = std::process::Command::new("sleep")
-            .arg("0")
+    /// Spawns a child with the same process-group isolation production applies,
+    /// so these tests exercise the real group rather than one that does not
+    /// exist.
+    #[cfg(unix)]
+    fn spawn_isolated(program: &str, arg: &str) -> Child {
+        let mut command = Command::new(program);
+        command
+            .arg(arg)
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .spawn()
-            .expect("spawn sleep");
-        let mut session = ManagedChromeSession {
-            child,
+            .stderr(Stdio::null());
+        configure_process_isolation(&mut command);
+        command.spawn().expect("spawn test child")
+    }
+
+    /// Wraps an isolated child in a session, standing in for a real Chrome.
+    #[cfg(unix)]
+    fn session_over(child: Child) -> ManagedChromeSession {
+        ManagedChromeSession {
+            process: ChromeProcessOwner::adopt(child),
             plan: build_launch_plan(
                 PathBuf::from("/bin/true"),
                 Path::new("/tmp/MoviePartyProfiles"),
@@ -595,7 +668,50 @@ mod tests {
                 "about:blank",
             )
             .expect("plan"),
-        };
+        }
+    }
+
+    /// True while `pid` exists. Signal 0 only performs the permission and
+    /// existence check — it never delivers anything.
+    #[cfg(unix)]
+    fn process_exists(pid: i32) -> bool {
+        // SAFETY: `kill` with signal 0 is a pure liveness probe.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[cfg(unix)]
+    fn wait_for_process_exit(pid: i32, timeout: Duration) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if !process_exists(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        !process_exists(pid)
+    }
+
+    /// Writes an executable stand-in for Chrome. The Chrome flags arrive as
+    /// `$@` and are ignored; only the scripted `body` matters.
+    #[cfg(unix)]
+    fn fake_chrome(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join("fake-chrome");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fake chrome");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake chrome");
+        path
+    }
+
+    /// A dead child (Chrome exited/crashed) must be reaped, not kill'd — and the
+    /// teardown must still run, because the browser exiting does not mean its
+    /// children exited.
+    #[cfg(unix)]
+    #[test]
+    fn close_gracefully_reaps_an_already_exited_child() {
+        // A process that exits immediately on spawn (macOS `sleep 0`).
+        let mut session = session_over(spawn_isolated("sleep", "0"));
         // Let the child exit before asserting.
         std::thread::sleep(Duration::from_millis(100));
         assert!(!session.is_alive());
@@ -605,33 +721,151 @@ mod tests {
     }
 
     /// A child that ignores Browser.close (CDP unreachable here) is still
-    /// terminated by the kill fallback after the graceful timeout — the
-    /// fallback is what guarantees the Chrome process never leaks.
+    /// terminated by the kill fallback after the graceful timeout — the fallback
+    /// is what guarantees the Chrome process never leaks.
+    #[cfg(unix)]
     #[test]
     fn close_gracefully_falls_back_to_kill_when_cdp_is_unreachable() {
-        // `sleep 30` never exits on its own and has no CDP endpoint, so
-        // the graceful path times out and the kill fallback fires.
-        let child = std::process::Command::new("sleep")
-            .arg("30")
-            .stdout(Stdio::null())
-            .spawn()
-            .expect("spawn sleep");
-        let mut session = ManagedChromeSession {
-            child,
-            plan: build_launch_plan(
-                PathBuf::from("/bin/true"),
-                Path::new("/tmp/MoviePartyProfiles"),
-                "youtube",
-                9222, // nothing listens here in the test env
-                "about:blank",
-            )
-            .expect("plan"),
-        };
+        // `sleep 30` never exits on its own and has no CDP endpoint, so the
+        // graceful path times out and the kill fallback fires.
+        let mut session = session_over(spawn_isolated("sleep", "30"));
         let started = Instant::now();
         session.close_gracefully();
         // Exited via the fallback, bounded by the graceful timeout.
         assert!(!session.is_alive());
         assert!(started.elapsed() >= GRACEFUL_CLOSE_TIMEOUT);
+    }
+
+    /// Repeated cleanup must be a no-op, not a panic or a second signal — every
+    /// teardown path (leave, restart, shutdown, `Drop`) may run it.
+    #[cfg(unix)]
+    #[test]
+    fn close_gracefully_is_idempotent() {
+        let mut session = session_over(spawn_isolated("sleep", "30"));
+
+        session.close_gracefully();
+        session.close_gracefully();
+        session.close_gracefully();
+
+        assert!(!session.is_alive());
+    }
+
+    /// MP-20: a launch that never reaches CDP must not leave the browser or its
+    /// children running. This is the path that used to drop the `Child` bare.
+    #[cfg(unix)]
+    #[test]
+    fn launch_timeout_kills_and_reaps_the_whole_tree() {
+        let root = std::env::temp_dir().join(format!(
+            "movie-party-chrome-timeout-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(&root).expect("profile dir");
+        let pid_file = root.join("pids");
+
+        // Records its own pid and its child's, then stays alive without ever
+        // opening a CDP endpoint.
+        let executable = fake_chrome(
+            &root,
+            &format!(
+                "echo $$ > {pids}\nsleep 300 &\necho $! >> {pids}\nwait",
+                pids = pid_file.display()
+            ),
+        );
+        let plan = build_launch_plan(
+            executable,
+            &root,
+            "youtube",
+            allocate_local_cdp_port().expect("cdp port"),
+            "about:blank",
+        )
+        .expect("plan");
+
+        let error = launch_managed_chrome_with_timeout(plan, Duration::from_millis(800))
+            .expect_err("a browser that never opens CDP must fail the launch");
+        assert_eq!(error, ManagedChromeError::CdpTimeout);
+
+        let pids = recorded_pids(&pid_file, 2);
+        assert_eq!(
+            pids.len(),
+            2,
+            "expected the browser pid and its child's, got {pids:?}"
+        );
+        for pid in pids {
+            assert!(
+                wait_for_process_exit(pid, Duration::from_secs(5)),
+                "pid {pid} survived a failed launch — the tree leaked (MP-20)"
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// MP-20: when the browser dies during launch, the real cause must surface
+    /// and the tree must still be cleaned up — a browser that exits can leave a
+    /// child behind, and the old code had no notion of a tree at all.
+    #[cfg(unix)]
+    #[test]
+    fn launch_child_exit_is_reaped_not_leaked() {
+        let root =
+            std::env::temp_dir().join(format!("movie-party-chrome-exit-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).expect("profile dir");
+        let pid_file = root.join("pids");
+
+        // Records itself and a child, then exits on its own. The child outlives
+        // it — exactly the orphan a single-PID teardown leaves behind.
+        let executable = fake_chrome(
+            &root,
+            &format!(
+                "echo $$ > {pids}\nsleep 300 &\necho $! >> {pids}\nexit 3",
+                pids = pid_file.display()
+            ),
+        );
+        let plan = build_launch_plan(
+            executable,
+            &root,
+            "youtube",
+            allocate_local_cdp_port().expect("cdp port"),
+            "about:blank",
+        )
+        .expect("plan");
+
+        let error = launch_managed_chrome_with_timeout(plan, Duration::from_secs(5))
+            .expect_err("a browser that exits immediately must fail the launch");
+        assert!(
+            matches!(error, ManagedChromeError::Process(_)),
+            "the child-exit path must report the exit, not a timeout; got {error:?}"
+        );
+
+        let pids = recorded_pids(&pid_file, 2);
+        assert_eq!(
+            pids.len(),
+            2,
+            "expected the browser pid and its child's, got {pids:?}"
+        );
+        for pid in pids {
+            assert!(
+                wait_for_process_exit(pid, Duration::from_secs(5)),
+                "pid {pid} survived a launch that failed because the browser exited (MP-20)"
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Reads the pids a fake Chrome recorded, tolerating a write that has not
+    /// landed yet.
+    #[cfg(unix)]
+    fn recorded_pids(pid_file: &Path, expected: usize) -> Vec<i32> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let recorded = std::fs::read_to_string(pid_file).unwrap_or_default();
+            let pids: Vec<i32> = recorded
+                .lines()
+                .filter_map(|line| line.trim().parse().ok())
+                .collect();
+            if pids.len() >= expected || Instant::now() >= deadline {
+                return pids;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]

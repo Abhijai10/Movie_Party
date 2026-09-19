@@ -3486,10 +3486,12 @@ mod tests {
         assert!(serde_json::from_slice::<ClientRequest>(negative_seq).is_err());
     }
 
-    /// §67 + §64: syntactically valid frames with a zero or stale sequence
-    /// must be rejected by the authenticated-sequence gate.
+    /// §67 + §64: syntactically valid frames with a zero sequence, a duplicate,
+    /// or a sequence behind the reorder window must be rejected by the
+    /// authenticated-sequence gate — while a legitimate out-of-order sequence
+    /// (the cross-stream case) is accepted.
     #[tokio::test]
-    async fn rejects_zero_and_stale_sequences_on_authenticated_requests() {
+    async fn sequence_gate_rejects_zero_duplicates_and_out_of_window_replays() {
         let credentials = RoomCredentials::new_for_tests();
         let server = QuicServer::bind(
             loopback_bind_addr(),
@@ -3511,14 +3513,16 @@ mod tests {
         .await
         .expect("client");
 
+        let ready = |client: &QuicClient, seq: u64| ClientRequest::ReadyState {
+            seq,
+            sender: client.identity.device_id.clone(),
+            ready: true,
+            buffer_ahead_ms: 1_000,
+        };
+
         // Sequence zero is never valid (§64: starts at 1).
         let zero = client
-            .send_control(ClientRequest::ReadyState {
-                seq: 0,
-                sender: client.identity.device_id.clone(),
-                ready: true,
-                buffer_ahead_ms: 1_000,
-            })
+            .send_control(ready(&client, 0))
             .await
             .expect("response for seq=0");
         assert!(
@@ -3526,28 +3530,148 @@ mod tests {
             "seq=0 must be rejected as INVALID_SEQUENCE"
         );
 
-        // A future high seq then a stale lower seq must also reject.
-        let _ = client
-            .send_control(ClientRequest::ReadyState {
-                seq: 50,
-                sender: client.identity.device_id.clone(),
-                ready: true,
-                buffer_ahead_ms: 1_000,
-            })
+        // A high seq then a *far* lower seq: the lower one is behind the
+        // reorder window, so it stays rejected exactly as before.
+        let high = 1 + crate::protocol::SEQUENCE_REORDER_WINDOW + 10;
+        let accepted = client
+            .send_control(ready(&client, high))
             .await
-            .expect("response for seq=50");
+            .expect("response for the high seq");
+        assert!(
+            matches!(accepted, ServerResponse::ReadyAck { .. }),
+            "a fresh high sequence must be accepted"
+        );
         let stale = client
-            .send_control(ClientRequest::ReadyState {
-                seq: 49,
-                sender: client.identity.device_id.clone(),
-                ready: true,
-                buffer_ahead_ms: 1_000,
-            })
+            .send_control(ready(&client, 1))
             .await
-            .expect("response for seq=49");
+            .expect("response for the stale seq");
         assert!(
             matches!(stale, ServerResponse::AuthReject { code } if code == "INVALID_SEQUENCE"),
-            "stale seq must be rejected as INVALID_SEQUENCE"
+            "a sequence behind the reorder window must be rejected as INVALID_SEQUENCE"
+        );
+
+        // A duplicate is still a replay, however close to the mark it sits.
+        let duplicate = client
+            .send_control(ready(&client, high))
+            .await
+            .expect("response for the duplicate seq");
+        assert!(
+            matches!(duplicate, ServerResponse::AuthReject { code } if code == "INVALID_SEQUENCE"),
+            "a replayed sequence must be rejected as INVALID_SEQUENCE"
+        );
+
+        client.wait_idle().await;
+        server_task.abort();
+    }
+
+    /// §64 regression for the Windows `test_b` stall.
+    ///
+    /// The guest's `ReadyState` and `BufferStatus` are independent sends, each
+    /// on its own QUIC bidirectional stream, and `ready_both` fires them
+    /// concurrently. Whichever stream the host's accept loop reaches first gets
+    /// processed first, so the higher sequence regularly arrives first. The
+    /// strict watermark used to reject the loser as `INVALID_SEQUENCE`, the
+    /// guest ignored the rejection (`let _ =`), nothing retried, and the host
+    /// never recorded guest readiness — the room sat outside `READYCHECK`
+    /// until the 30 s poll deadline.
+    ///
+    /// This test drives the *hostile* order deterministically (higher sequence
+    /// first) and also exercises genuine concurrency, asserting both that no
+    /// message is rejected and that the host coordinator actually records the
+    /// guest's readiness.
+    #[tokio::test]
+    async fn ready_state_and_buffer_status_survive_cross_stream_reordering() {
+        use crate::sync::local::LocalSyncCoordinator;
+
+        let credentials = RoomCredentials::new_for_tests();
+        let coordinator = Arc::new(std::sync::Mutex::new(LocalSyncCoordinator::new()));
+        let server = QuicServer::bind(
+            loopback_bind_addr(),
+            credentials.clone(),
+            "Host".to_string(),
+            TEST_DEVICE_ID.to_string(),
+        )
+        .expect("server");
+        let addr = server.local_addr().expect("addr");
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(Some(coordinator.clone())));
+        let (client, _) = QuicClient::connect(
+            addr,
+            fingerprint,
+            credentials,
+            test_identity(),
+            "Test Guest".to_string(),
+        )
+        .await
+        .expect("client");
+
+        // 1. Genuine concurrency, exactly the production shape: two control
+        //    messages written back-to-back on independent bidirectional
+        //    streams, in the client's natural sequence range. QUIC promises
+        //    nothing about the order *between* streams, so the server may read
+        //    them either way round — and neither may be rejected.
+        //
+        //    This part runs FIRST so the client's own counter still starts at
+        //    1: `send_control` with an explicit `seq` does not advance it, so
+        //    hand-written sequences below would collide with these.
+        let (ready_result, buffer_result) = tokio::join!(
+            client.send_ready_state(true, 5_000),
+            client.send_buffer_status(0, 8_000, false),
+        );
+        assert!(
+            matches!(ready_result, Ok(ServerResponse::ReadyAck { .. })),
+            "concurrent ReadyState must never be rejected, got {ready_result:?}"
+        );
+        assert!(
+            matches!(buffer_result, Ok(ServerResponse::BufferAck { .. })),
+            "concurrent BufferStatus must never be rejected, got {buffer_result:?}"
+        );
+
+        // The host coordinator must have genuinely recorded guest readiness —
+        // that is the state `READYCHECK` consensus depends on. Without it the
+        // room sits outside READYCHECK forever, which is the reported Windows
+        // CI failure.
+        let guest_ready = coordinator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .guest_ready;
+        assert!(
+            guest_ready.player_ready,
+            "host coordinator must record the guest as ready after ReadyState"
+        );
+
+        // 2. Hostile but deterministic: the higher sequence is delivered and
+        //    processed first, then the lower one arrives. High explicit values
+        //    keep this range disjoint from the client's own counter above, so
+        //    the pair cannot collide with anything already accepted.
+        let sender = client.identity.device_id.clone();
+        let later = client
+            .send_control(ClientRequest::ReadyState {
+                seq: 100,
+                sender: sender.clone(),
+                ready: true,
+                buffer_ahead_ms: 5_000,
+            })
+            .await
+            .expect("ReadyState seq=100 response");
+        assert!(
+            matches!(later, ServerResponse::ReadyAck { ready: true }),
+            "the later sequence must be accepted first"
+        );
+
+        let earlier = client
+            .send_control(ClientRequest::BufferStatus {
+                seq: 99,
+                sender: sender.clone(),
+                position_ms: 0,
+                buffer_ahead_ms: 8_000,
+                stalled: false,
+            })
+            .await
+            .expect("BufferStatus seq=99 response");
+        assert!(
+            matches!(earlier, ServerResponse::BufferAck { accepted: true }),
+            "the earlier sequence must not be dropped as stale"
         );
 
         client.wait_idle().await;

@@ -310,6 +310,25 @@ export async function startRealCallSession(
   const remoteStream = new MediaStream();
   let closed = false;
 
+  /**
+   * MP-03: the acquired camera/mic tracks are owned by THIS function until the
+   * `LiveCallSession` below is returned to the caller. If startup throws in
+   * between, the caller never receives a handle and so could never release the
+   * devices — the OS camera indicator would stay lit with no call. The failure
+   * paths therefore release them here, through the same implementation the
+   * success path's `close()` uses, so ownership is explicit and
+   * exception-safe instead of duplicated.
+   */
+  const releaseAcquiredMedia = () => {
+    peerConnection.ontrack = null;
+    stopCallStream(localStream);
+    try {
+      peerConnection.close();
+    } catch {
+      // close() on an already-closed connection is best-effort teardown.
+    }
+  };
+
   const statusOf = (): CallConnectionStatus => {
     if (closed) {
       return "ended";
@@ -385,11 +404,19 @@ export async function startRealCallSession(
   // F29: remember the video sender so the camera toggle can swap tracks
   // without renegotiating — a same-kind `replaceTrack` needs no re-offer.
   let videoSender: RTCRtpSender | null = null;
-  for (const track of localStream.getTracks()) {
-    const sender = peerConnection.addTrack(track, localStream);
-    if (track.kind === "video") {
-      videoSender = sender;
+  try {
+    for (const track of localStream.getTracks()) {
+      const sender = peerConnection.addTrack(track, localStream);
+      if (track.kind === "video") {
+        videoSender = sender;
+      }
     }
+  } catch (error) {
+    // MP-03: the devices are already open but no session will be returned —
+    // release them before propagating the failure.
+    closed = true;
+    releaseAcquiredMedia();
+    throw error;
   }
 
   // The wire-driven re-offer path (distinct from the RENEGOTIATE poke in
@@ -680,14 +707,8 @@ export async function startRealCallSession(
         return;
       }
       closed = true;
-      peerConnection.ontrack = null;
       window.clearTimeout(disconnectGraceTimer);
-      stopCallStream(localStream);
-      try {
-        peerConnection.close();
-      } catch {
-        // close() on an already-closed connection is best-effort teardown.
-      }
+      releaseAcquiredMedia();
       events.onStatusChange("ended");
     },
     status: statusOf,
@@ -707,12 +728,23 @@ export async function startRealCallSession(
   // sees its own marker — the host drops it by markerId (see
   // nextPendingSignals), and the guest drops all markers by role (its
   // RENEGOTIATE arm never runs).
-  await events.onSignal({
-    signalType: "RENEGOTIATE",
-    data: JSON.stringify({ request: "renegotiate", v: 1, id: markerId }),
-  });
-  if (role === "HOST") {
-    await publishOffer();
+  try {
+    await events.onSignal({
+      signalType: "RENEGOTIATE",
+      data: JSON.stringify({ request: "renegotiate", v: 1, id: markerId }),
+    });
+    if (role === "HOST") {
+      await publishOffer();
+    }
+  } catch (error) {
+    // MP-03: startup failed after the camera/mic were already acquired. The
+    // caller has no session handle, so nothing downstream can release the
+    // devices — release them here, then rethrow so the caller still sees the
+    // real failure (and can retry with the devices free).
+    closed = true;
+    window.clearTimeout(disconnectGraceTimer);
+    releaseAcquiredMedia();
+    throw error;
   }
 
   reportStatus();

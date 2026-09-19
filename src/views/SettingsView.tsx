@@ -6,6 +6,7 @@ import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
 import {
   checkProviderStatus,
+  commandErrorMessage,
   listProviderDiagnostics,
   runProviderSharedDiagnostic,
   type StoredProviderDiagnostic,
@@ -49,7 +50,7 @@ type SettingsViewProps = {
   snapshot: AppSnapshot;
   onBack: () => void;
   /** Applied after a successful rename so the whole app sees the new name. */
-  onSnapshot?: (next: AppSnapshot | null) => void;
+  onSnapshot?: (next: AppSnapshot) => void;
 };
 
 type SettingsSection =
@@ -130,14 +131,19 @@ export function SettingsView({ snapshot, onBack, onSnapshot }: SettingsViewProps
     }
     setNameSaving(true);
     setNameError(null);
-    void setDisplayName(trimmed).then((next) => {
-      setNameSaving(false);
-      if (next) {
+    void setDisplayName(trimmed)
+      .then((next) => {
+        setNameSaving(false);
         onSnapshot?.(next);
-      } else {
-        setNameError("Could not save the name right now.");
-      }
-    });
+      })
+      .catch((error: unknown) => {
+        // Failures reject now, so the error lives here. The old `else` branch
+        // could only ever fire because a failed command resolved to null —
+        // which is exactly the null-as-success bug: any *other* failure
+        // (including a successful save) was indistinguishable from it.
+        setNameSaving(false);
+        setNameError(commandErrorMessage(error, "Could not save the name right now."));
+      });
   }, [nameDraft, snapshot.participants, onSnapshot]);
 
   const [capabilities, setCapabilities] = useState<ProviderCapability[]>([]);

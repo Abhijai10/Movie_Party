@@ -51,11 +51,27 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
       # Tests are serialized on hosted runners: the lib and integration
       # suites include AppRuntime tests that spin real loopback QUIC
-      # endpoints + wake loops; on small virtualized runners (3-core
-      # macOS) parallel execution starves the timing windows the strict-
-      # sync liveness rules depend on, and even 30s poll deadlines bust
-      # (observed on test_b twice). --test-threads=1 changes scheduling,
-      # never assertions. Windows CI + local runs verified green.
+      # endpoints + wake loops, and serial execution keeps their timing
+      # windows comfortable on small virtualized runners.
+      # --test-threads=1 changes scheduling, never assertions.
+      #
+      # NOTE (corrected root cause): `test_b_play_transitions_both_to_playing`
+      # used to fail here with "host predicate not satisfied within 30s".
+      # That was NOT a scheduling artifact and NOT a flake. SequenceTracker
+      # (src-tauri/src/protocol/mod.rs) enforced a strict watermark
+      # (`seq <= last` -> reject), while the sender allocates one `seq` per
+      # request and each request travels on its OWN QUIC bidirectional stream
+      # (QuicClient::send_request -> open_bi) — and QUIC guarantees no ordering
+      # BETWEEN streams. `ready_both()` fires ReadyState + BufferStatus
+      # concurrently, so the higher seq regularly arrived first, the loser was
+      # rejected INVALID_SEQUENCE, the guest ignored it (`let _ =`), nothing
+      # retried, and the host never recorded guest readiness. The 30s deadline
+      # was a symptom.
+      #
+      # Fixed by a bounded reorder window (SEQUENCE_REORDER_WINDOW = 64) that
+      # accepts a legitimate in-window reorder while still rejecting duplicates
+      # and anything older than the window. If this test fails again, look for a
+      # dropped message — do NOT raise the timeout.
       - run: cargo test -- --test-threads=1
 
   # Dependency audits — ADVISORY, non-blocking by design. Failures surface

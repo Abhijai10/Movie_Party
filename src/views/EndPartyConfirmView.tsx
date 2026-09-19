@@ -11,6 +11,11 @@ type EndPartyConfirmViewProps = {
   isHost: boolean;
   onCancel: () => void;
   onConfirm: () => void;
+  /**
+   * A failed end/leave. MP-02: the user stays on this screen and is told why,
+   * instead of the shell navigating Home as though the party had ended.
+   */
+  error?: string | null;
 };
 
 /** Title/body/action copy for the leave-or-end confirmation (F6). */
@@ -33,7 +38,12 @@ export function endPartyConfirmCopy(isHost: boolean): {
   };
 }
 
-export function EndPartyConfirmView({ isHost, onCancel, onConfirm }: EndPartyConfirmViewProps) {
+export function EndPartyConfirmView({
+  isHost,
+  onCancel,
+  onConfirm,
+  error,
+}: EndPartyConfirmViewProps) {
   const copy = endPartyConfirmCopy(isHost);
   return (
     <main className="centered-shell">
@@ -41,6 +51,11 @@ export function EndPartyConfirmView({ isHost, onCancel, onConfirm }: EndPartyCon
         <h1 id="end-title">{copy.title}</h1>
         <div className="modal-body">
           <p>{copy.body}</p>
+          {error ? (
+            <p role="alert" className="mt-4 text-sm text-[#FCA5A5]">
+              {error}
+            </p>
+          ) : null}
         </div>
         <div className="action-row">
           <Button variant="secondary" onClick={onCancel}>

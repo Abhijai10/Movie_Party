@@ -2492,6 +2492,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "ed25519-dalek",
+ "libc",
  "libloading 0.8.9",
  "qrcode",
  "quinn",
@@ -2512,6 +2513,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

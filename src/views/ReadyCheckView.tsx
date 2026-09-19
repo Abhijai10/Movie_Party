@@ -18,6 +18,11 @@ type ReadyCheckViewProps = {
   onStarted: () => void;
   /** Leave Ready Check and return to the lobby (cleanup is backend-owned). */
   onBack: () => void;
+  /**
+   * MP-06: a failed countdown/back command. Surfaced here rather than vanishing
+   * into an unhandled rejection while the button appears to do nothing.
+   */
+  error?: string | null;
   callTileSession: CallTileSessionState;
   onCallTileSessionChange: (next: CallTileSessionState) => void;
 };
@@ -27,6 +32,7 @@ export function ReadyCheckView({
   onRequestCountdown,
   onStarted,
   onBack,
+  error,
   callTileSession,
   onCallTileSessionChange,
 }: ReadyCheckViewProps) {
@@ -128,6 +134,11 @@ export function ReadyCheckView({
       </header>
 
       <main className="relative z-10 max-w-[1300px] mx-auto px-12 h-[calc(100vh-100px)] flex flex-col items-center justify-center text-center">
+        {error ? (
+          <p role="alert" className="mb-4 text-sm text-[#FCA5A5]">
+            {error}
+          </p>
+        ) : null}
         <motion.span
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}

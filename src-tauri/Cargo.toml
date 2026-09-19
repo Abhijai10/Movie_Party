@@ -40,3 +40,21 @@ rfd = "0.15"
 rusqlite = { version = "0.31", features = ["bundled"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "ansi", "env-filter"] }
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+
+# Managed-Chrome process-tree ownership (see providers/chrome/process.rs).
+# Both crates are already in the dependency graph at these versions via
+# transitive dependencies, so this adds no new code to the build — it only
+# makes the ones we actually call explicit.
+[target.'cfg(unix)'.dependencies]
+# killpg/signal/getpgrp for whole-tree teardown of the Chrome process group.
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# A kill-on-close job object is the only mechanism that terminates the Chrome
+# tree when Movie Party itself dies without running cleanup (MP-23).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

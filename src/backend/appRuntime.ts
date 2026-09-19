@@ -229,7 +229,7 @@ export type RuntimeFailureEvent =
   | "CACHE_CORRUPTION"
   | "MISSING_LOCAL_FILE";
 
-export async function getAppSnapshot(): Promise<AppSnapshot | null> {
+export async function getAppSnapshot(): Promise<AppSnapshot> {
   return invokeSnapshot("get_app_snapshot");
 }
 
@@ -509,20 +509,20 @@ export function tailscaleSetupOpenErrorMessage(error: unknown): string {
   return "Movie Party could not open Tailscale setup. If Tailscale is installed, open it yourself, then check again.";
 }
 
-export async function showHome(): Promise<AppSnapshot | null> {
+export async function showHome(): Promise<AppSnapshot> {
   return invokeSnapshot("show_home");
 }
 
-export async function showJoinParty(): Promise<AppSnapshot | null> {
+export async function showJoinParty(): Promise<AppSnapshot> {
   return invokeSnapshot("show_join_party");
 }
 
-export async function requestEndParty(): Promise<AppSnapshot | null> {
+export async function requestEndParty(): Promise<AppSnapshot> {
   return invokeSnapshot("request_end_party");
 }
 
-export async function createLocalParty(mediaPath: string | null): Promise<AppSnapshot | null> {
-  return invokeSnapshotOrThrow("create_local_party", {
+export async function createLocalParty(mediaPath: string | null): Promise<AppSnapshot> {
+  return invokeSnapshot("create_local_party", {
     mediaPath: mediaPath && mediaPath.trim().length > 0 ? mediaPath : null,
   });
 }
@@ -548,34 +548,34 @@ export async function launchProvider(
   providerId: string,
   url: string,
   mode: ProviderMode,
-): Promise<AppSnapshot | null> {
-  return invokeSnapshotOrThrow("launch_provider", { providerId, url, mode });
+): Promise<AppSnapshot> {
+  return invokeSnapshot("launch_provider", { providerId, url, mode });
 }
 
-export async function openProviderBrowser(providerId: string): Promise<AppSnapshot | null> {
-  return invokeSnapshotOrThrow("open_provider_browser", { providerId });
+export async function openProviderBrowser(providerId: string): Promise<AppSnapshot> {
+  return invokeSnapshot("open_provider_browser", { providerId });
 }
 
-export async function checkProviderStatus(providerId: string): Promise<AppSnapshot | null> {
-  return invokeSnapshotOrThrow("check_provider_status", { providerId });
+export async function checkProviderStatus(providerId: string): Promise<AppSnapshot> {
+  return invokeSnapshot("check_provider_status", { providerId });
 }
 
 export async function navigateProviderTitle(
   providerId: string,
   title: string,
-): Promise<AppSnapshot | null> {
-  return invokeSnapshotOrThrow("navigate_provider_title", {
+): Promise<AppSnapshot> {
+  return invokeSnapshot("navigate_provider_title", {
     providerId,
     title,
   });
 }
 
-export async function launchGenericLink(url: string): Promise<AppSnapshot | null> {
-  return invokeSnapshotOrThrow("launch_generic_link", { url });
+export async function launchGenericLink(url: string): Promise<AppSnapshot> {
+  return invokeSnapshot("launch_generic_link", { url });
 }
 
-export async function joinParty(inviteCode: string): Promise<AppSnapshot | null> {
-  return invokeSnapshotOrThrow("join_party", { inviteCode });
+export async function joinParty(inviteCode: string): Promise<AppSnapshot> {
+  return invokeSnapshot("join_party", { inviteCode });
 }
 
 /** §16 invitation: render the invite link as a scannable QR (SVG). */
@@ -639,7 +639,7 @@ export async function listenToDeepLinks(onDeepLink: (url: string) => void): Prom
   });
 }
 
-export async function markReady(): Promise<AppSnapshot | null> {
+export async function markReady(): Promise<AppSnapshot> {
   return invokeSnapshot("mark_ready");
 }
 
@@ -649,30 +649,30 @@ export async function markReady(): Promise<AppSnapshot | null> {
  * the device id and signing key — and therefore the peer trust chain —
  * are untouched.
  */
-export async function setDisplayName(displayName: string): Promise<AppSnapshot | null> {
+export async function setDisplayName(displayName: string): Promise<AppSnapshot> {
   return invokeSnapshot("set_display_name", { displayName });
 }
 
 /** Ready Check "Back to lobby": retract readiness, return to the lobby. */
-export async function backToLobby(): Promise<AppSnapshot | null> {
+export async function backToLobby(): Promise<AppSnapshot> {
   return invokeSnapshot("back_to_lobby");
 }
 
-export async function enterCinema(): Promise<AppSnapshot | null> {
+export async function enterCinema(): Promise<AppSnapshot> {
   return invokeSnapshot("enter_cinema");
 }
 
 
 /** §25: host starts the backend-driven 3-2-1 countdown. The snapshot
  *  returns the pending operation whose deadline the UI animates from. */
-export async function requestPlayCountdown(): Promise<AppSnapshot | null> {
-  return invoke<AppSnapshot>("request_play_countdown");
+export async function requestPlayCountdown(): Promise<AppSnapshot> {
+  return invokeSnapshot("request_play_countdown");
 }
 
 /** §40: host-only Continue Without Guest — the explicit user override of
  *  the strict-sync guest gate. */
-export async function continueWithoutGuest(): Promise<AppSnapshot | null> {
-  return invoke<AppSnapshot>("continue_without_guest");
+export async function continueWithoutGuest(): Promise<AppSnapshot> {
+  return invokeSnapshot("continue_without_guest");
 }
 
 /** the persisted per-provider Shared diagnostic record. */
@@ -732,56 +732,52 @@ function enqueueSurfaceOp<T>(op: () => Promise<T>): Promise<T> {
 
 export async function attachNativeVideoSurface(
   bounds: NativeVideoBounds,
-): Promise<AppSnapshot | null> {
+): Promise<AppSnapshot> {
   return enqueueSurfaceOp(() => invokeSnapshot("attach_native_video_surface", { bounds }));
 }
 
 export async function resizeNativeVideoSurface(
   bounds: NativeVideoBounds,
-): Promise<AppSnapshot | null> {
+): Promise<AppSnapshot> {
   return enqueueSurfaceOp(() => invokeSnapshot("resize_native_video_surface", { bounds }));
 }
 
-export async function detachNativeVideoSurface(): Promise<AppSnapshot | null> {
-  return enqueueSurfaceOp(async () => {
-    try {
-      return await invokeSnapshot("detach_native_video_surface");
-    } catch (error) {
-      console.error("detach_native_video_surface failed", error);
-      return null;
-    }
-  });
+export async function detachNativeVideoSurface(): Promise<AppSnapshot> {
+  // No local catch: `invokeSnapshot` already logs and rejects, and a cleanup
+  // call that reported `null` on failure was indistinguishable from one that
+  // succeeded. Callers decide whether a failed detach is actionable.
+  return enqueueSurfaceOp(() => invokeSnapshot("detach_native_video_surface"));
 }
 
-export async function pausePlayback(): Promise<AppSnapshot | null> {
+export async function pausePlayback(): Promise<AppSnapshot> {
   return invokeSnapshot("pause_playback");
 }
 
-export async function resumePlayback(): Promise<AppSnapshot | null> {
+export async function resumePlayback(): Promise<AppSnapshot> {
   return invokeSnapshot("resume_playback");
 }
 
-export async function seekRelative(deltaMs: number): Promise<AppSnapshot | null> {
+export async function seekRelative(deltaMs: number): Promise<AppSnapshot> {
   return invokeSnapshot("seek_relative", { deltaMs });
 }
 
-export async function handleFailureEvent(event: RuntimeFailureEvent): Promise<AppSnapshot | null> {
+export async function handleFailureEvent(event: RuntimeFailureEvent): Promise<AppSnapshot> {
   return invokeSnapshot("handle_failure_event", { event });
 }
 
-export async function leaveParty(): Promise<AppSnapshot | null> {
+export async function leaveParty(): Promise<AppSnapshot> {
   return invokeSnapshot("leave_party");
 }
 
-export async function sendChatMessage(body: string): Promise<AppSnapshot | null> {
+export async function sendChatMessage(body: string): Promise<AppSnapshot> {
   return invokeSnapshot("send_chat_message", { body });
 }
 
-export async function sendReaction(reaction: string): Promise<AppSnapshot | null> {
+export async function sendReaction(reaction: string): Promise<AppSnapshot> {
   return invokeSnapshot("send_reaction", { reaction });
 }
 
-export async function setSharedControls(enabled: boolean): Promise<AppSnapshot | null> {
+export async function setSharedControls(enabled: boolean): Promise<AppSnapshot> {
   return invokeSnapshot("set_shared_controls", { enabled });
 }
 
@@ -789,7 +785,7 @@ export async function reportBufferStatus(
   positionMs: number,
   bufferAheadMs: number,
   stalled: boolean,
-): Promise<AppSnapshot | null> {
+): Promise<AppSnapshot> {
   return invokeSnapshot("report_buffer_status", {
     positionMs,
     bufferAheadMs,
@@ -797,43 +793,55 @@ export async function reportBufferStatus(
   });
 }
 
-export async function setCallMode(mode: CallMode): Promise<AppSnapshot | null> {
+export async function setCallMode(mode: CallMode): Promise<AppSnapshot> {
   return invokeSnapshot("set_call_mode", { mode });
 }
 
 export async function submitCallSignal(signal: {
   signalType: "OFFER" | "ANSWER" | "ICE" | "RENEGOTIATE";
   data: string;
-}): Promise<AppSnapshot | null> {
+}): Promise<AppSnapshot> {
   return invokeSnapshot("submit_call_signal", { signal });
 }
 
-export async function setMicrophoneEnabled(enabled: boolean): Promise<AppSnapshot | null> {
+export async function setMicrophoneEnabled(enabled: boolean): Promise<AppSnapshot> {
   return invokeSnapshot("set_microphone_enabled", { enabled });
 }
 
-export async function setCameraEnabled(enabled: boolean): Promise<AppSnapshot | null> {
+export async function setCameraEnabled(enabled: boolean): Promise<AppSnapshot> {
   return invokeSnapshot("set_camera_enabled", { enabled });
 }
 
-export async function setPrivacyMode(enabled: boolean): Promise<AppSnapshot | null> {
+export async function setPrivacyMode(enabled: boolean): Promise<AppSnapshot> {
   return invokeSnapshot("set_privacy_mode", { enabled });
 }
 
-export async function setGhostMode(enabled: boolean): Promise<AppSnapshot | null> {
+export async function setGhostMode(enabled: boolean): Promise<AppSnapshot> {
   return invokeSnapshot("set_ghost_mode", { enabled });
 }
 
+/**
+ * Runs a snapshot command and returns its snapshot, or throws
+ * [`BackendCommandError`].
+ *
+ * There is deliberately ONE wrapper, not a swallowing and a throwing variant.
+ * Every snapshot command returns a bare `AppSnapshot` on the Rust side — never
+ * `Option`, never `Result` — so a *resolved* call always yields an object, and a
+ * `null` could only ever have meant "the command failed". Handing that back as a
+ * value invited callers to treat failure as "nothing happened", which is how a
+ * failed `leave_party` could still navigate Home. Failure is a rejection now, so
+ * it cannot be mistaken for success.
+ */
 async function invokeSnapshot(
   command: string,
   args?: Record<string, unknown>,
-): Promise<AppSnapshot | null> {
+): Promise<AppSnapshot> {
   try {
     return await invoke<AppSnapshot>(command, args);
   } catch (error) {
     const commandError = toBackendCommandError(command, error);
     console.error(commandError.message, commandError);
-    return null;
+    throw commandError;
   }
 }
 
@@ -924,21 +932,8 @@ export async function cancelAndBroadcastSchedule(scheduleId: string): Promise<bo
 export async function guestAcceptSchedule(
   scheduleId: string,
   accepted: boolean,
-): Promise<AppSnapshot | null> {
+): Promise<AppSnapshot> {
   return invokeSnapshot("guest_accept_schedule", { scheduleId, accepted });
-}
-
-async function invokeSnapshotOrThrow(
-  command: string,
-  args?: Record<string, unknown>,
-): Promise<AppSnapshot | null> {
-  try {
-    return await invoke<AppSnapshot>(command, args);
-  } catch (error) {
-    const commandError = toBackendCommandError(command, error);
-    console.error(commandError.message, commandError);
-    throw commandError;
-  }
 }
 
 function toBackendCommandError(command: string, error: unknown): BackendCommandError {

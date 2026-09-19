@@ -175,6 +175,14 @@ pub fn run() {
         ])
         .build(tauri::generate_context!());
 
+    // MP-23: Chrome cleanup used to run only from `RunEvent::Exit`, so a signal
+    // or a panic could orphan a whole Chrome tree — and on macOS there is no
+    // kernel-level parent-death signal to fall back on. Installing the hardening
+    // before the event loop starts gives every shutdown path a way to find and
+    // kill the live tree; on Windows the kill-on-close job object covers it
+    // instead, so this is a no-op there.
+    crate::providers::chrome::install_shutdown_hardening();
+
     match result {
         Ok(app) => app.run(|app_handle, event| {
             // Graceful teardown on app exit: close the managed Chrome

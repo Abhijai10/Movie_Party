@@ -55,6 +55,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { handleFailureEvent } from "../backend/appRuntime";
 import { createSingleFlight, isTailscaleReady, pollIntervalMs } from "../backend/tailscaleOnboarding";
 import { resolveAppScreen } from "./appRouting";
+import { createFlowToken, evaluateSnapshotOutcome } from "../views/commandOutcome";
 
 type LocalScreen = "CREATE_PARTY" | "SETTINGS" | "SCHEDULE" | "FRIENDS" | "FIRST_RUN" | null;
 
@@ -73,6 +74,14 @@ export function AppShell() {
   const [createError, setCreateError] = useState<string | null>(null);
   const [joinError, setJoinError] = useState<string | null>(null);
   const [joinFailureCode, setJoinFailureCode] = useState<string | null>(null);
+  /**
+   * A fire-and-forget command that failed. Surfaced so a failed operation is
+   * never a silent no-op — the screens that can trigger one render this.
+   */
+  const [commandError, setCommandError] = useState<string | null>(null);
+  /** MP-05: identifies the user's current create/join intent. */
+  const createFlow = useRef(createFlowToken());
+  const joinFlow = useRef(createFlowToken());
   const [providerCapabilities, setProviderCapabilities] = useState<ProviderCapability[]>([]);
   const [pendingInvite, setPendingInvite] = useState("");
   const [devScreen, setDevScreen] = useState<DevScreen>(null);
@@ -143,17 +152,86 @@ export function AppShell() {
     };
   }, []);
 
+  /**
+   * Applies a CONFIRMED snapshot.
+   *
+   * Takes a non-null snapshot deliberately. This used to be
+   * `if (next) setSnapshot(next)`, and that silent no-op was half of the
+   * null-as-success bug: a failed command resolved to `null`, nothing was
+   * applied, and the caller carried on as though it had worked. Failures now
+   * reject, so there is nothing here to mistake for success.
+   */
   const applySnapshot = useCallback(
-    (next: AppSnapshot | null) => {
-      if (next) {
-        setSnapshot(next);
-      }
+    (next: AppSnapshot) => {
+      setSnapshot(next);
     },
     [setSnapshot],
   );
 
+  /**
+   * The single path for fire-and-forget snapshot commands: apply the confirmed
+   * result, or make the failure visible. Every `void someCommand()` in this
+   * shell routes through here, so none of them can fail silently.
+   */
+  const runSnapshotCommand = useCallback(
+    (command: () => Promise<AppSnapshot>, fallbackMessage: string) => {
+      void command()
+        .then((next) => {
+          // A later success clears a stale failure notice.
+          setCommandError(null);
+          applySnapshot(next);
+        })
+        .catch((error: unknown) => {
+          const outcome = evaluateSnapshotOutcome(null, error, fallbackMessage);
+          if (!outcome.ok) {
+            setCommandError(outcome.message);
+          }
+        });
+    },
+    [applySnapshot],
+  );
+
+  /**
+   * MP-02: runs a command that must SUCCEED before the UI moves on. The
+   * follow-up runs only on a confirmed result; a failure is surfaced and the
+   * navigation never happens.
+   */
+  const runConfirmedCommand = useCallback(
+    (command: () => Promise<AppSnapshot>, followUp: () => void, fallbackMessage: string) => {
+      void command()
+        .then((result) => {
+          const outcome = evaluateSnapshotOutcome(result, null, fallbackMessage);
+          if (!outcome.ok) {
+            setCommandError(outcome.message);
+            return;
+          }
+          applySnapshot(outcome.snapshot);
+          followUp();
+        })
+        .catch((error: unknown) => {
+          const outcome = evaluateSnapshotOutcome(null, error, fallbackMessage);
+          if (!outcome.ok) {
+            setCommandError(outcome.message);
+          }
+        });
+    },
+    [applySnapshot],
+  );
+
+  /**
+   * MP-05: the user is changing where they want to be, so any in-flight
+   * create/join attempt is abandoned — its late result must not drag them back.
+   */
+  const abandonFlows = useCallback(() => {
+    createFlow.current.invalidate();
+    joinFlow.current.invalidate();
+  }, []);
+
   const openJoinWithInvite = useCallback(
     (rawInvite: string) => {
+      // A deep link is the user choosing a destination, so any in-flight
+      // create/join attempt is abandoned (MP-05).
+      abandonFlows();
       // Friend invites open the Friends tab and are accepted there — the
       // payload names the inviter so they land in the list directly.
       if (rawInvite.trim().toLowerCase().startsWith("movieparty://friend/")) {
@@ -171,16 +249,16 @@ export function AppShell() {
         setPendingInvite(rawInvite.trim());
         setJoinError(parsed.message);
         setJoinFailureCode(null);
-        void showJoinParty().then(applySnapshot);
+        runSnapshotCommand(showJoinParty, "Movie Party could not open the join screen.");
         return;
       }
 
       setPendingInvite(parsed.invite);
       setJoinError(null);
       setJoinFailureCode(null);
-      void showJoinParty().then(applySnapshot);
+      runSnapshotCommand(showJoinParty, "Movie Party could not open the join screen.");
     },
-    [applySnapshot],
+    [abandonFlows, runSnapshotCommand],
   );
 
   useEffect(() => {
@@ -319,14 +397,17 @@ export function AppShell() {
       // Only a real gap (≥ 5 s) is a sleep/wake — quick app switches are
       // not; firing SLEEP_WAKE for those would pointlessly pause both.
       if (hiddenAt != null && Date.now() - hiddenAt >= 5_000) {
-        void handleFailureEvent("SLEEP_WAKE").then(applySnapshot);
+        runSnapshotCommand(
+          () => handleFailureEvent("SLEEP_WAKE"),
+          "Movie Party could not re-check the party after waking.",
+        );
       }
     };
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [applySnapshot, snapshot?.screen]);
+  }, [applySnapshot, runSnapshotCommand, snapshot?.screen]);
 
   // NETWORK_CHANGE / WIFI_DISCONNECT: browser online/offline events map to
   // the modeled network revalidation plans (revalidate + rebuild buffers
@@ -340,10 +421,16 @@ export function AppShell() {
       return undefined;
     }
     const onOnline = () => {
-      void handleFailureEvent("NETWORK_CHANGE").then(applySnapshot);
+      runSnapshotCommand(
+        () => handleFailureEvent("NETWORK_CHANGE"),
+        "Movie Party could not re-check the party after the network changed.",
+      );
     };
     const onOffline = () => {
-      void handleFailureEvent("WIFI_DISCONNECT").then(applySnapshot);
+      runSnapshotCommand(
+        () => handleFailureEvent("WIFI_DISCONNECT"),
+        "Movie Party could not re-check the party after losing the network.",
+      );
     };
     window.addEventListener("online", onOnline);
     window.addEventListener("offline", onOffline);
@@ -351,7 +438,7 @@ export function AppShell() {
       window.removeEventListener("online", onOnline);
       window.removeEventListener("offline", onOffline);
     };
-  }, [applySnapshot, snapshot?.screen]);
+  }, [applySnapshot, runSnapshotCommand, snapshot?.screen]);
 
   const requestLeaveOrEnd = useCallback(() => {
     const isHost = snapshot?.room.role === "HOST";
@@ -412,6 +499,8 @@ export function AppShell() {
   }, [tailscaleReady, refreshConnectivity]);
 
   const goHome = () => {
+    abandonFlows();
+    setCommandError(null);
     setDevScreen(null);
     setLocalScreen(null);
     setCreateError(null);
@@ -419,10 +508,12 @@ export function AppShell() {
     setJoinFailureCode(null);
     setPendingInvite("");
     setCallTileSession(createCallTileSessionState());
-    void showHome().then(applySnapshot);
+    runSnapshotCommand(showHome, "Movie Party could not return to the home screen.");
   };
 
   const goCreateParty = () => {
+    abandonFlows();
+    setCommandError(null);
     setDevScreen(null);
     setCreateError(null);
     setCallTileSession(createCallTileSessionState());
@@ -431,16 +522,22 @@ export function AppShell() {
 
   // navigation helpers.
   const goSettings = () => {
+    abandonFlows();
+    setCommandError(null);
     setDevScreen(null);
     setLocalScreen("SETTINGS");
   };
 
   const goSchedule = () => {
+    abandonFlows();
+    setCommandError(null);
     setDevScreen(null);
     setLocalScreen("SCHEDULE");
   };
 
   const goFriends = () => {
+    abandonFlows();
+    setCommandError(null);
     setDevScreen(null);
     setLocalScreen("FRIENDS");
   };
@@ -504,6 +601,10 @@ export function AppShell() {
 
     setCreateError(null);
     setIsCreating(true);
+    // MP-05: this attempt owns the create flow until the user starts another one
+    // or navigates away. Every `await` below is a point where that can happen,
+    // so each result is checked before it is allowed to move the user.
+    const token = createFlow.current.begin();
 
     try {
       if (request.source === "provider") {
@@ -514,16 +615,18 @@ export function AppShell() {
           return false;
         }
         const partySnapshot = await createLocalParty(null);
-        if (partySnapshot?.screen !== "LOBBY") {
+        if (!createFlow.current.isCurrent(token)) return false;
+        if (partySnapshot.screen !== "LOBBY") {
           applySnapshot(partySnapshot);
-          setCreateError(partySnapshot?.error ?? "Movie Party could not create the room.");
+          setCreateError(partySnapshot.error ?? "Movie Party could not create the room.");
           return false;
         }
 
         const providerSnapshot = await launchProvider(request.providerId, source, request.mode);
-        if (!providerSnapshot || providerSnapshot.error) {
+        if (!createFlow.current.isCurrent(token)) return false;
+        if (providerSnapshot.error) {
           applySnapshot(partySnapshot);
-          setCreateError(providerSnapshot?.error ?? "Movie Party could not prepare that provider.");
+          setCreateError(providerSnapshot.error);
           return false;
         }
 
@@ -534,16 +637,18 @@ export function AppShell() {
 
       if (request.source === "link") {
         const partySnapshot = await createLocalParty(null);
-        if (partySnapshot?.screen !== "LOBBY") {
+        if (!createFlow.current.isCurrent(token)) return false;
+        if (partySnapshot.screen !== "LOBBY") {
           applySnapshot(partySnapshot);
-          setCreateError(partySnapshot?.error ?? "Movie Party could not create the room.");
+          setCreateError(partySnapshot.error ?? "Movie Party could not create the room.");
           return false;
         }
 
         const linkSnapshot = await launchGenericLink(source);
-        if (!linkSnapshot || linkSnapshot.error) {
+        if (!createFlow.current.isCurrent(token)) return false;
+        if (linkSnapshot.error) {
           applySnapshot(partySnapshot);
-          setCreateError(linkSnapshot?.error ?? "Movie Party could not prepare that link.");
+          setCreateError(linkSnapshot.error);
           return false;
         }
 
@@ -553,9 +658,10 @@ export function AppShell() {
       }
 
       const next = await createLocalParty(source);
-      if (next?.screen !== "LOBBY") {
+      if (!createFlow.current.isCurrent(token)) return false;
+      if (next.screen !== "LOBBY") {
         applySnapshot(next);
-        setCreateError(next?.error ?? "Movie Party could not create the room.");
+        setCreateError(next.error ?? "Movie Party could not create the room.");
         return false;
       }
 
@@ -563,6 +669,7 @@ export function AppShell() {
       setLocalScreen(null);
       return true;
     } catch (error) {
+      if (!createFlow.current.isCurrent(token)) return false;
       setCreateError(createRoomErrorMessage(error));
       return false;
     } finally {
@@ -574,8 +681,8 @@ export function AppShell() {
     setCreateError(null);
     try {
       const next = await openProviderBrowser(providerId);
-      if (!next || next.error) {
-        setCreateError(next?.error ?? "Movie Party could not open that provider.");
+      if (next.error) {
+        setCreateError(next.error);
         return false;
       }
       applySnapshot(next);
@@ -590,8 +697,8 @@ export function AppShell() {
     setCreateError(null);
     try {
       const next = await checkProviderStatus(providerId);
-      if (!next || next.error) {
-        setCreateError(next?.error ?? "Movie Party could not check that provider.");
+      if (next.error) {
+        setCreateError(next.error);
         return false;
       }
       applySnapshot(next);
@@ -606,8 +713,8 @@ export function AppShell() {
     setCreateError(null);
     try {
       const next = await navigateProviderTitle(providerId, title);
-      if (!next || next.error) {
-        setCreateError(next?.error ?? "Movie Party could not open that title.");
+      if (next.error) {
+        setCreateError(next.error);
         return false;
       }
       applySnapshot(next);
@@ -625,7 +732,7 @@ export function AppShell() {
     setJoinFailureCode(null);
     setPendingInvite("");
     setCallTileSession(createCallTileSessionState());
-    void showJoinParty().then(applySnapshot);
+    runSnapshotCommand(showJoinParty, "Movie Party could not open the join screen.");
   };
 
   const submitJoin = async (inviteCode: string): Promise<boolean> => {
@@ -640,17 +747,22 @@ export function AppShell() {
     setJoinError(null);
     setJoinFailureCode(null);
     setIsJoining(true);
+    // MP-05: same ownership rule as createParty — a result that arrives after
+    // the user has moved on must not move them back.
+    const token = joinFlow.current.begin();
     try {
       const next = await joinParty(parsed.invite);
-      if (next?.screen !== "LOBBY") {
+      if (!joinFlow.current.isCurrent(token)) return false;
+      if (next.screen !== "LOBBY") {
         applySnapshot(next);
-        setJoinError(next?.error ?? "Movie Party could not join that invite.");
+        setJoinError(next.error ?? "Movie Party could not join that invite.");
         return false;
       }
 
       applySnapshot(next);
       return true;
     } catch (error) {
+      if (!joinFlow.current.isCurrent(token)) return false;
       setJoinFailureCode(error instanceof BackendCommandError ? error.code : null);
       setJoinError(joinFailureMessage(error));
       return false;
@@ -660,22 +772,38 @@ export function AppShell() {
   };
 
   const goReadyCheck = () => {
-    void markReady().then(applySnapshot);
+    runSnapshotCommand(markReady, "Movie Party could not mark this device ready.");
   };
 
   const goCinema = () => {
-    void enterCinema().then(applySnapshot);
+    runSnapshotCommand(enterCinema, "Movie Party could not enter the cinema.");
   };
 
   const handleToggleSharedControls = (enabled: boolean) => {
-    void setSharedControls(enabled).then(applySnapshot);
+    runSnapshotCommand(
+      () => setSharedControls(enabled),
+      "Movie Party could not change who can control playback.",
+    );
   };
 
+  /**
+   * MP-02: navigate Home only once the backend has CONFIRMED the party ended.
+   *
+   * This used to be `void leaveParty().then((ended) => { applySnapshot(ended);
+   * void showHome().then(applySnapshot); })`. `leaveParty` resolved to `null` on
+   * failure while `applySnapshot(null)` was a silent no-op, so a FAILED leave
+   * still navigated Home: the user landed on the home screen with the room
+   * possibly still live, and nothing anywhere said the leave had failed.
+   */
   const confirmEndParty = () => {
-    void leaveParty().then((ended) => {
-      applySnapshot(ended);
-      void showHome().then(applySnapshot);
-    });
+    setCommandError(null);
+    runConfirmedCommand(
+      leaveParty,
+      () => {
+        runSnapshotCommand(showHome, "Movie Party could not return to the home screen.");
+      },
+      "Movie Party could not end the party.",
+    );
   };
 
   /**
@@ -889,6 +1017,7 @@ export function AppShell() {
           onCinema={goCinema}
           onToggleSharedControls={handleToggleSharedControls}
           onSnapshot={applySnapshot}
+          error={commandError}
           callTileSession={callTileSession}
           onCallTileSessionChange={setCallTileSession}
         />
@@ -914,12 +1043,16 @@ export function AppShell() {
       <ReadyCheckView
         snapshot={snapshot}
         onRequestCountdown={() => {
-          void requestPlayCountdown().then(applySnapshot);
+          runSnapshotCommand(
+            requestPlayCountdown,
+            "Movie Party could not start the countdown. Try again.",
+          );
         }}
         onStarted={goCinema}
         onBack={() => {
-          void backToLobby().then(applySnapshot);
+          runSnapshotCommand(backToLobby, "Movie Party could not return to the lobby.");
         }}
+        error={commandError}
         callTileSession={callTileSession}
         onCallTileSessionChange={setCallTileSession}
       />
@@ -944,6 +1077,7 @@ export function AppShell() {
         isHost={snapshot.room.role === "HOST"}
         onCancel={goCinema}
         onConfirm={confirmEndParty}
+        error={commandError}
       />
     );
   }
@@ -970,7 +1104,7 @@ export function AppShell() {
           mediaId={retentionPrompt.mediaId}
           filename={retentionPrompt.filename}
           onDecided={() => {
-            void showHome().then(applySnapshot);
+            runSnapshotCommand(showHome, "Movie Party could not return to the home screen.");
           }}
         />
       ) : null}

@@ -24,7 +24,12 @@ type LobbyViewProps = {
   onReady: () => void;
   onCinema: () => void;
   onToggleSharedControls: (enabled: boolean) => void;
-  onSnapshot: (snapshot: AppSnapshot | null) => void;
+  onSnapshot: (snapshot: AppSnapshot) => void;
+  /**
+   * MP-06: a failed Ready/Cinema command. Without this the button looked like it
+   * had done nothing, because the failure was an unhandled rejection.
+   */
+  error?: string | null;
   callTileSession: CallTileSessionState;
   onCallTileSessionChange: (next: CallTileSessionState) => void;
 };
@@ -42,6 +47,7 @@ export function LobbyView({
   onCinema,
   onToggleSharedControls,
   onSnapshot,
+  error,
   callTileSession,
   onCallTileSessionChange,
 }: LobbyViewProps) {
@@ -105,16 +111,18 @@ export function LobbyView({
     }
 
     const sentBody = draft.trim();
-    void sendChatMessage(sentBody).then((next) => {
-      if (next) {
+    void sendChatMessage(sentBody)
+      .then((next) => {
         onSnapshot(next);
         setDraft("");
         const lastMessage = next.chat[next.chat.length - 1];
         if (lastMessage != null && lastMessage.body === sentBody) {
           setLobbyBubbles((current) => enqueueChatBubble(current, lastMessage, Date.now()));
         }
-      }
-    });
+      })
+      .catch((error: unknown) => {
+        console.error("send_chat_message failed", error);
+      });
   };
 
   return (
@@ -124,6 +132,16 @@ export function LobbyView({
       }`}
     >
       <SilkBackground variant="calm" />
+
+      {error ? (
+        <p
+          role="alert"
+          data-testid="lobby-command-error"
+          className="relative z-10 px-12 pt-4 text-sm text-[#FCA5A5]"
+        >
+          {error}
+        </p>
+      ) : null}
 
       <header className="relative z-10 flex items-center justify-between px-12 pt-8">
         <button

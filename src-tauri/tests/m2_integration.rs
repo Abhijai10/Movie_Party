@@ -25,8 +25,15 @@ fn write_temp_media(path: &std::path::PathBuf) {
 }
 
 /// Poll host.snapshot() until predicate satisfied or deadline hit.
-/// snapshot() is synchronous — no async runtime required.
-fn poll_host(
+///
+/// `snapshot()` is synchronous, but the WAIT must not be: these helpers are
+/// awaited from inside `#[tokio::test(flavor = "multi_thread",
+/// worker_threads = 2)]` bodies, so a blocking `std::thread::sleep` parks a
+/// runtime worker for the whole poll. With only two workers that starves the
+/// very background tasks the predicate is waiting on (the QUIC accept loop, the
+/// peer-event listener) — a scheduling hazard, never a product assertion.
+/// `tokio::time::sleep` yields the worker instead.
+async fn poll_host(
     host: &AppRuntime,
     deadline: std::time::Duration,
     mut predicate: impl FnMut(&movie_party_lib::app_runtime::AppSnapshot) -> bool,
@@ -40,13 +47,14 @@ fn poll_host(
         if std::time::Instant::now() - start > deadline {
             panic!("host predicate not satisfied within {:?}", deadline);
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
 
 /// Poll guest.snapshot() until predicate satisfied or deadline hit.
 /// Guest state converges asynchronously via the QUIC event listener.
-fn poll_guest(
+/// Non-blocking wait — see `poll_host`.
+async fn poll_guest(
     guest: &AppRuntime,
     deadline: std::time::Duration,
     mut predicate: impl FnMut(&movie_party_lib::app_runtime::AppSnapshot) -> bool,
@@ -60,7 +68,7 @@ fn poll_guest(
         if std::time::Instant::now() - start > deadline {
             panic!("guest predicate not satisfied within {:?}", deadline);
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
 
@@ -89,8 +97,10 @@ async fn setup_host_guest() -> (AppRuntime, AppRuntime, String) {
         .expect("guest join_party");
     drop(_env_guard);
 
-    // Allow background peer_event_listener + wake loop to settle
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    // Allow background peer_event_listener + wake loop to settle. Non-blocking
+    // wait: this is an async test body, so `std::thread::sleep` would park a
+    // runtime worker and starve exactly those listeners.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     (host, guest, invite)
 }
@@ -102,18 +112,27 @@ async fn setup_host_guest() -> (AppRuntime, AppRuntime, String) {
 /// async media fetch must have landed before either side presses Ready, and the
 /// guest must report genuine buffer through the real buffer-status path before
 /// the play protocol can commit.
-fn ready_both(host: &AppRuntime, guest: &AppRuntime) {
+///
+/// Determinism note: `report_buffer_status` and `set_ready` each fire an
+/// independent QUIC request on its own bidirectional stream, so the host may
+/// legitimately process the later sequence first. That is exactly the ordering
+/// the protocol must tolerate (§64 sliding reorder window) — the harness
+/// deliberately does NOT serialize the two sends, because production code has
+/// no way to serialize them either.
+async fn ready_both(host: &AppRuntime, guest: &AppRuntime) {
     let _ = poll_guest(guest, std::time::Duration::from_secs(30), |s| {
         s.participants
             .iter()
             .any(|p| p.role == "Guest" && p.media_ready)
-    });
+    })
+    .await;
     guest.report_buffer_status(0, 8_000, false);
     guest.set_ready();
     host.set_ready();
     let _ = poll_host(host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "READYCHECK"
-    });
+    })
+    .await;
 }
 
 /// Press the guest's Ready only after its media is genuinely prepared (V1
@@ -135,7 +154,8 @@ async fn test_a_ready_reaches_host() {
             && s.participants
                 .iter()
                 .any(|p| p.role == "Guest" && p.connected)
-    });
+    })
+    .await;
 
     // Guest marks ready
     guest.set_ready();
@@ -143,11 +163,12 @@ async fn test_a_ready_reaches_host() {
     // READY_CHECK consensus lands once the guest's ReadyState round-trips
     let _ = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "READYCHECK"
-    });
+    })
+    .await;
 
     // Readiness consensus must NOT auto-commit playback: both sides stay at
     // READYCHECK until the host runs the distributed play protocol.
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert_eq!(host.snapshot().room.state, "READYCHECK");
     assert_eq!(guest.snapshot().room.state, "READYCHECK");
 
@@ -155,10 +176,12 @@ async fn test_a_ready_reaches_host() {
     let _ = host.host_play();
     let _playing = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
     let guest_snap = poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
     assert_eq!(guest_snap.room.state, "PLAYING");
 }
 
@@ -172,7 +195,7 @@ async fn test_a_ready_reaches_host() {
 async fn test_b_play_transitions_both_to_playing() {
     let (host, guest, _invite) = setup_host_guest().await;
 
-    ready_both(&host, &guest);
+    ready_both(&host, &guest).await;
 
     // host_play only PREPARES: no PLAYING until the guest answers PLAY_READY
     let play_snap = host.host_play();
@@ -184,10 +207,12 @@ async fn test_b_play_transitions_both_to_playing() {
     // Both sides converge on PLAYING at the shared deadline
     let host_playing = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
     let guest_playing = poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
     assert_eq!(
         guest_playing.sync.position_ms, host_playing.sync.position_ms,
         "guest position_ms must match host after play commit; host={} guest={}",
@@ -210,14 +235,16 @@ async fn test_c_pause_is_canonical() {
     let (host, guest, _invite) = setup_host_guest().await;
 
     // Both to PLAYING via the play protocol
-    ready_both(&host, &guest);
+    ready_both(&host, &guest).await;
     let _ = host.host_play();
     let playing = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
     let _ = poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
 
     let pause_snap = host.host_pause();
     assert_eq!(
@@ -227,12 +254,14 @@ async fn test_c_pause_is_canonical() {
 
     let host_paused = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PAUSED"
-    });
+    })
+    .await;
     assert_eq!(host_paused.sync.position_ms, playing.sync.position_ms);
 
     let guest_snap = poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PAUSED"
-    });
+    })
+    .await;
     assert_eq!(guest_snap.room.state, "PAUSED");
     assert_eq!(guest_snap.sync.position_ms, pause_snap.sync.position_ms);
     assert!(
@@ -251,7 +280,7 @@ async fn test_c_pause_is_canonical() {
 async fn test_d_seek_sets_canonical_position_on_both() {
     let (host, guest, _invite) = setup_host_guest().await;
 
-    ready_both(&host, &guest);
+    ready_both(&host, &guest).await;
 
     let target_pos = 42_000u64;
     let seek_snap = host.host_seek(target_pos, true);
@@ -264,12 +293,14 @@ async fn test_d_seek_sets_canonical_position_on_both() {
     // through the play protocol so both sides end PLAYING at the target.
     let host_snap = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING" && s.sync.position_ms == target_pos
-    });
+    })
+    .await;
     assert_eq!(host_snap.sync.position_ms, target_pos);
 
     let guest_snap = poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.sync.position_ms == target_pos
-    });
+    })
+    .await;
     assert_eq!(
         guest_snap.sync.position_ms, target_pos,
         "guest must match host seek target; got {}",
@@ -286,12 +317,13 @@ async fn test_d_seek_sets_canonical_position_on_both() {
 async fn test_e_coordinator_state_is_canonical() {
     let (host, guest, _invite) = setup_host_guest().await;
 
-    ready_both(&host, &guest);
+    ready_both(&host, &guest).await;
 
     let _ = host.host_play();
     let playing = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
     assert_eq!(playing.room.state, "PLAYING");
 
     // Coordinators must agree on position
@@ -301,11 +333,13 @@ async fn test_e_coordinator_state_is_canonical() {
     let _ = host.host_pause();
     let _ = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PAUSED"
-    });
+    })
+    .await;
 
     let guest_after_pause = poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PAUSED"
-    });
+    })
+    .await;
     assert_eq!(guest_after_pause.room.state, "PAUSED");
 }
 
@@ -322,7 +356,8 @@ async fn test_f_disconnect_triggers_host_pause() {
     // Host sees LOBBY with authenticated guest
     let _lobby = poll_host(&host, std::time::Duration::from_secs(3), |s| {
         s.network.connected && s.room.state == "LOBBY"
-    });
+    })
+    .await;
     assert!(
         _lobby
             .participants
@@ -337,7 +372,8 @@ async fn test_f_disconnect_triggers_host_pause() {
     // Host detects peer leave: network.connected=false AND room in a pause state
     let after_disconnect = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         !s.network.connected
-    });
+    })
+    .await;
     assert!(!after_disconnect.network.connected);
 
     let final_snap = host.snapshot();
@@ -379,7 +415,7 @@ async fn test_h_host_chat_reaches_guest() {
     let body = "m2 host says hi".to_string();
     host.host_send_chat(body.clone()).expect("host_send_chat");
 
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     let guest_snap = guest.snapshot();
     assert!(
@@ -405,7 +441,8 @@ async fn test_i_guest_chat_reaches_host() {
     // Poll until host's coordinator receives the chat event via QUIC
     let _ = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.chat.iter().any(|m| m.body == body)
-    });
+    })
+    .await;
 
     let host_snap = host.snapshot();
     assert_eq!(host_snap.chat.len(), 1);
@@ -450,25 +487,28 @@ async fn test_k_guest_buffer_starvation_pauses_and_recovers() {
     let (host, guest, _invite) = setup_host_guest().await;
 
     // Consensus → PLAYING via play protocol
-    ready_both(&host, &guest);
+    ready_both(&host, &guest).await;
     let _ = host.host_play();
     let playing = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
     let position = playing.sync.position_ms;
 
     // Guest stalls: strict-sync input must pause the HOST (§14)
     guest.report_buffer_status(position, 0, true);
     let host_buffering = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "BUFFERING"
-    });
+    })
+    .await;
     assert_eq!(host_buffering.room.state, "BUFFERING");
     assert!(host_buffering.sync.strict_sync_paused);
     assert_eq!(host_buffering.sync.position_ms, position);
 
     let guest_buffering = poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.room.state == "BUFFERING"
-    });
+    })
+    .await;
     assert_eq!(guest_buffering.sync.position_ms, position);
 
     // Guest recovers: the room may return to READY_CHECK, but MUST NOT
@@ -476,7 +516,8 @@ async fn test_k_guest_buffer_starvation_pauses_and_recovers() {
     guest.report_buffer_status(position, 5_000, false);
     let host_readycheck = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "READYCHECK"
-    });
+    })
+    .await;
     assert_eq!(host_readycheck.room.state, "READYCHECK");
     assert!(
         host_readycheck.sync.strict_sync_paused,
@@ -484,20 +525,23 @@ async fn test_k_guest_buffer_starvation_pauses_and_recovers() {
     );
     let guest_readycheck = poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.room.state == "READYCHECK"
-    });
+    })
+    .await;
     assert_eq!(guest_readycheck.room.state, "READYCHECK");
 
     // Host resumes through the play protocol → both PLAYING at same position
     let _ = host.host_play();
     let host_playing = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
     assert_eq!(host_playing.room.state, "PLAYING");
     assert!(!host_playing.sync.strict_sync_paused);
 
     let guest_playing = poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
     assert_eq!(guest_playing.room.state, "PLAYING");
     assert_eq!(guest_playing.sync.position_ms, position);
 }
@@ -507,18 +551,20 @@ async fn test_k2_host_buffer_starvation_broadcasts_to_guest() {
     let (host, guest, _invite) = setup_host_guest().await;
 
     // Consensus → PLAYING via play protocol
-    ready_both(&host, &guest);
+    ready_both(&host, &guest).await;
     let _ = host.host_play();
     let playing = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
     let position = playing.sync.position_ms;
 
     // Host stalls → guest must stop too
     host.report_buffer_low(position, 0);
     let guest_buffering = poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.room.state == "BUFFERING"
-    });
+    })
+    .await;
     assert_eq!(guest_buffering.room.state, "BUFFERING");
     assert_eq!(guest_buffering.sync.position_ms, position);
     assert_eq!(
@@ -531,13 +577,15 @@ async fn test_k2_host_buffer_starvation_broadcasts_to_guest() {
     host.report_buffer_recovered(5_000);
     let guest_readycheck = poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.room.state == "READYCHECK"
-    });
+    })
+    .await;
     assert_eq!(guest_readycheck.room.state, "READYCHECK");
 
     let _ = host.host_play();
     let guest_playing = poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
     assert_eq!(guest_playing.room.state, "PLAYING");
 }
 
@@ -551,9 +599,9 @@ async fn test_k2_host_buffer_starvation_broadcasts_to_guest() {
 async fn test_l_ready_does_not_bypass_play_protocol() {
     let (host, guest, _invite) = setup_host_guest().await;
 
-    ready_both(&host, &guest);
+    ready_both(&host, &guest).await;
 
-    std::thread::sleep(std::time::Duration::from_millis(700));
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
     assert_eq!(host.snapshot().room.state, "READYCHECK");
     assert_eq!(guest.snapshot().room.state, "READYCHECK");
 
@@ -561,10 +609,12 @@ async fn test_l_ready_does_not_bypass_play_protocol() {
     let _ = host.host_play();
     let _ = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
     let guest_snap = poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
     assert_eq!(guest_snap.room.state, "PLAYING");
 }
 
@@ -578,7 +628,7 @@ async fn test_l_ready_does_not_bypass_play_protocol() {
 async fn test_m_play_commit_respects_deadline() {
     let (host, guest, _invite) = setup_host_guest().await;
 
-    ready_both(&host, &guest);
+    ready_both(&host, &guest).await;
 
     let prepared_at = std::time::Instant::now();
     let _ = host.host_play();
@@ -591,7 +641,8 @@ async fn test_m_play_commit_respects_deadline() {
 
     let host_playing = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
     let elapsed = prepared_at.elapsed();
     assert_eq!(host_playing.room.state, "PLAYING");
     assert!(
@@ -612,7 +663,8 @@ async fn test_n_clock_calibration_wires_host_and_guest() {
 
     let guest_snap = poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.network.rtt_ms.is_some()
-    });
+    })
+    .await;
     assert!(
         guest_snap.network.rtt_ms.is_some(),
         "guest must measure RTT via CLOCK_PING"
@@ -620,7 +672,8 @@ async fn test_n_clock_calibration_wires_host_and_guest() {
 
     let host_snap = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.network.rtt_ms.is_some()
-    });
+    })
+    .await;
     assert!(
         host_snap.network.rtt_ms.is_some(),
         "host must learn peer RTT via ClockResult"
@@ -639,12 +692,14 @@ async fn test_o_shared_controls_denied_by_default() {
 
     let _ = poll_host(&host, std::time::Duration::from_secs(3), |s| {
         s.room.state == "LOBBY"
-    });
+    })
+    .await;
 
     let _ = guest.pause_playback();
     let guest_snap = poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.error.is_some()
-    });
+    })
+    .await;
     assert!(
         guest_snap
             .error
@@ -672,11 +727,12 @@ async fn test_p_shared_controls_granted_request_reaches_both() {
     let (host, guest, _invite) = setup_host_guest().await;
 
     // Consensus → PLAYING via play protocol
-    ready_both(&host, &guest);
+    ready_both(&host, &guest).await;
     let _ = host.host_play();
     let playing = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
     let position = playing.sync.position_ms;
 
     // Host enables Shared Controls
@@ -687,12 +743,14 @@ async fn test_p_shared_controls_granted_request_reaches_both() {
     let _ = guest.pause_playback();
     let host_paused = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PAUSED"
-    });
+    })
+    .await;
     assert_eq!(host_paused.sync.position_ms, position);
 
     let guest_paused = poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PAUSED"
-    });
+    })
+    .await;
     assert_eq!(guest_paused.room.state, "PAUSED");
     assert_eq!(guest_paused.sync.position_ms, position);
     assert!(
@@ -738,18 +796,20 @@ async fn test_r_reconnect_requires_fresh_consensus() {
     let (host, guest, invite) = setup_host_guest().await;
 
     // Play first
-    ready_both(&host, &guest);
+    ready_both(&host, &guest).await;
     let _ = host.host_play();
     let playing = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
     assert_eq!(playing.room.state, "PLAYING");
 
     // Drop the guest; host must stop
     guest.leave_party();
     let _ = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         !s.network.connected
-    });
+    })
+    .await;
     let reconnecting = host.snapshot();
     assert!(
         reconnecting.room.state == "RECONNECTING" || reconnecting.room.state == "PAUSED",
@@ -762,11 +822,12 @@ async fn test_r_reconnect_requires_fresh_consensus() {
         .join_party(invite.clone())
         .await
         .expect("guest rejoin");
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     let reconnected = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.network.connected
-    });
+    })
+    .await;
     assert!(reconnected.network.connected);
     // No blind resume: the room must NOT be PLAYING immediately after rejoin.
     assert!(
@@ -776,15 +837,17 @@ async fn test_r_reconnect_requires_fresh_consensus() {
     );
 
     // Fresh readiness + fresh play protocol restart playback
-    ready_both(&host, &guest);
+    ready_both(&host, &guest).await;
     let _ = host.host_play();
     let resumed = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
     assert_eq!(resumed.room.state, "PLAYING");
     let guest_snap = poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
     assert_eq!(guest_snap.room.state, "PLAYING");
 }
 
@@ -799,7 +862,7 @@ async fn test_r_reconnect_requires_fresh_consensus() {
 async fn test_s_stale_and_duplicate_ops_are_ignored() {
     let (host, guest, _invite) = setup_host_guest().await;
 
-    ready_both(&host, &guest);
+    ready_both(&host, &guest).await;
 
     // A stale PLAY_READY for an unknown op must not derail the protocol
     if let Some(client) = guest.client_for_test() {
@@ -812,11 +875,13 @@ async fn test_s_stale_and_duplicate_ops_are_ignored() {
     let _ = host.host_play();
     let host_playing = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
     assert_eq!(host_playing.room.state, "PLAYING");
     let guest_playing = poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
     assert_eq!(guest_playing.room.state, "PLAYING");
 
     // A duplicate PLAY_READY for the same op after commit must not double-commit
@@ -825,7 +890,7 @@ async fn test_s_stale_and_duplicate_ops_are_ignored() {
             .send_play_ready("bogus-operation-id".to_string(), true, 0, 5_000)
             .await;
     }
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert_eq!(host.snapshot().room.state, "PLAYING");
     assert_eq!(guest.snapshot().room.state, "PLAYING");
 }
@@ -840,11 +905,12 @@ async fn test_s_stale_and_duplicate_ops_are_ignored() {
 async fn test_t_seek_waits_for_guest_and_resumes_together() {
     let (host, guest, _invite) = setup_host_guest().await;
 
-    ready_both(&host, &guest);
+    ready_both(&host, &guest).await;
     let _ = host.host_play();
     let _ = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING"
-    });
+    })
+    .await;
 
     let target = 99_000u64;
     let seek_snap = host.host_seek(target, true);
@@ -852,12 +918,14 @@ async fn test_t_seek_waits_for_guest_and_resumes_together() {
 
     let host_snap = poll_host(&host, std::time::Duration::from_secs(30), |s| {
         s.room.state == "PLAYING" && s.sync.position_ms == target
-    });
+    })
+    .await;
     assert_eq!(host_snap.sync.position_ms, target);
 
     let guest_snap = poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.sync.position_ms == target && s.room.state == "PLAYING"
-    });
+    })
+    .await;
     assert_eq!(guest_snap.sync.position_ms, target);
 }
 
@@ -1077,7 +1145,7 @@ mod env_tests {
             "guest must be connected over QUIC after joining"
         );
 
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         // The host must observe the authenticated guest.
         let host_snap = poll_host(&host, std::time::Duration::from_secs(30), |s| {
@@ -1085,7 +1153,8 @@ mod env_tests {
                 && s.participants
                     .iter()
                     .any(|p| p.role == "Guest" && p.connected)
-        });
+        })
+        .await;
         assert!(host_snap.network.connected);
 
         host.leave_party();
@@ -1148,7 +1217,7 @@ async fn m5_call_signal_offer_arrives_at_guest() {
     let snap = host.create_local_party(None).await.expect("host create");
     let invite = snap.room.invite_code.unwrap();
     guest.join_party(invite).await.expect("guest join");
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     drop(_env_guard);
 
     // Host sends an OFFER signal
@@ -1161,7 +1230,8 @@ async fn m5_call_signal_offer_arrives_at_guest() {
     // Guest should receive the call signal via QUIC
     let guest_snap = poll_guest(&guest, std::time::Duration::from_secs(3), |s| {
         !s.call_signals.is_empty()
-    });
+    })
+    .await;
     assert_eq!(guest_snap.call_signals.len(), 1);
     assert_eq!(guest_snap.call_signals[0].signal_type, "OFFER");
     assert_eq!(guest_snap.call_signals[0].data, "fake-sdp-offer");
@@ -1181,7 +1251,7 @@ async fn m5_call_signal_answer_arrives_at_host() {
     let snap = host.create_local_party(None).await.expect("host create");
     let invite = snap.room.invite_code.unwrap();
     guest.join_party(invite).await.expect("guest join");
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     drop(_env_guard);
 
     // Guest sends an ANSWER signal
@@ -1195,7 +1265,8 @@ async fn m5_call_signal_answer_arrives_at_host() {
     // Host should receive the call signal via its QUIC broadcast listener
     let host_snap = poll_host(&host, std::time::Duration::from_secs(3), |s| {
         !s.call_signals.is_empty()
-    });
+    })
+    .await;
     assert_eq!(host_snap.call_signals.len(), 1);
     assert_eq!(host_snap.call_signals[0].signal_type, "ANSWER");
     assert_eq!(host_snap.call_signals[0].data, "fake-sdp-answer");
@@ -1215,7 +1286,7 @@ async fn m5_call_signal_ice_arrives_bidirectional() {
     let snap = host.create_local_party(None).await.expect("host create");
     let invite = snap.room.invite_code.unwrap();
     guest.join_party(invite).await.expect("guest join");
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     drop(_env_guard);
 
     // Host sends ICE candidate
@@ -1228,7 +1299,8 @@ async fn m5_call_signal_ice_arrives_bidirectional() {
     // Guest receives it
     poll_guest(&guest, std::time::Duration::from_secs(3), |s| {
         s.call_signals.iter().any(|cs| cs.signal_type == "ICE")
-    });
+    })
+    .await;
 
     // Guest sends ICE candidate back
     guest
@@ -1243,7 +1315,8 @@ async fn m5_call_signal_ice_arrives_bidirectional() {
         s.call_signals
             .iter()
             .any(|cs| cs.data == "guest-ice-candidate")
-    });
+    })
+    .await;
 
     host.leave_party();
     guest.leave_party();
@@ -1277,7 +1350,7 @@ async fn test_w_guest_joins_second_room_cleanly_from_running_app() {
         .join_party(invite_a.clone())
         .await
         .expect("guest join A");
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     let snap = guest.snapshot();
     assert_eq!(snap.room.role, "Guest");
     assert_eq!(
@@ -1301,12 +1374,13 @@ async fn test_w_guest_joins_second_room_cleanly_from_running_app() {
         .join_party(invite_b.clone())
         .await
         .expect("guest join B");
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     drop(_env_guard);
 
     let snap = poll_guest(&guest, std::time::Duration::from_secs(30), |s| {
         s.room.state == "LOBBY" && s.media.is_some()
-    });
+    })
+    .await;
     assert_eq!(
         snap.room.invite_code.as_deref(),
         Some(invite_b.as_str()),
