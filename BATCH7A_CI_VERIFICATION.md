@@ -142,27 +142,31 @@ Every step green, including the two that failed or were skipped in run 1:
 test test_b_play_transitions_both_to_playing ... ok
 ```
 
-**Per-target results (15 `test result:` lines):**
+**Per-target results — all 14 targets named (plus the doc-test run):**
 
-| Passed | Failed | Ignored | Filtered out |
-|---|---|---|---|
-| 469 | 0 | 2 | 0 |
-| 0 | 0 | 0 | 0 |
-| 3 | 0 | 0 | 0 |
-| 2 | 0 | 0 | 0 |
-| **28** (`m2_integration`) | **0** | 0 | 0 |
-| 7 | 0 | 0 | 0 |
-| 18 | 0 | 0 | 0 |
-| 9 | 0 | 0 | 0 |
-| 15 | 0 | 0 | 0 |
-| 0 | 0 | 0 | 0 |
-| 0 | 0 | 0 | 0 |
-| 0 | 0 | 0 | 0 |
-| 2 | 0 | 0 | 0 |
-| 0 | 0 | 0 | 1 |
-| 0 | 0 | 0 | 0 |
+| Target | Passed | Failed | Ignored | Filtered out |
+|---|---|---|---|---|
+| `unittests src/lib.rs` | 469 | 0 | 2 | 0 |
+| `unittests src/main.rs` | 0 | 0 | 0 | 0 |
+| `tests/dependency_audit.rs` | 3 | 0 | 0 | 0 |
+| `tests/host_guest_wiring.rs` | 2 | 0 | 0 | 0 |
+| **`tests/m2_integration.rs`** | **28** | **0** | 0 | 0 |
+| `tests/m3_closure.rs` | 7 | 0 | 0 | 0 |
+| `tests/m3_integration.rs` | 18 | 0 | 0 | 0 |
+| `tests/m3_m4_e2e.rs` | 9 | 0 | 0 | 0 |
+| `tests/m4_closure.rs` | 15 | 0 | 0 | 0 |
+| `tests/real_native_surface_e2e.rs` | 0 | 0 | 0 | 0 |
+| `tests/real_playback_smoke_test.rs` | 0 | 0 | 0 | 0 |
+| `tests/real_sw_render_test.rs` | 0 | 0 | 0 | 0 |
+| `tests/tailscale_probe.rs` | 2 | 0 | 0 | 0 |
+| `tests/windows_native_surface_e2e.rs` | 0 | 0 | 0 | 1 |
+| Doc-tests | 0 | 0 | 0 | 0 |
 
 **Windows totals: 553 passed / 0 failed / 2 ignored / 1 filtered out.**
+
+Note the asymmetry: on Windows the single filtered-out test is in
+`tests/windows_native_surface_e2e.rs` (the test exists there and was skipped for lack of libmpv);
+on macOS that target has zero tests, so the skip produces no line — see §3.2.
 
 `m2_integration` = **28 passed / 0 failed** — including `test_a_ready_reaches_host ... ok`,
 `test_b_play_transitions_both_to_playing ... ok`, `test_c_pause_is_canonical ... ok`.
@@ -173,29 +177,32 @@ test test_b_play_transitions_both_to_playing ... ok
 test test_b_play_transitions_both_to_playing ... ok
 ```
 
-| Passed | Failed | Ignored | Filtered out |
-|---|---|---|---|
-| 478 | 0 | 2 | 1 |
-| 0 | 0 | 0 | 0 |
-| 3 | 0 | 0 | 0 |
-| 2 | 0 | 0 | 0 |
-| **28** (`m2_integration`) | **0** | 0 | 0 |
-| 7 | 0 | 0 | 0 |
-| 18 | 0 | 0 | 0 |
-| 9 | 0 | 0 | 0 |
-| 15 | 0 | 0 | 0 |
-| 0 | 0 | 0 | 1 |
-| 0 | 0 | 0 | 1 |
-| 0 | 0 | 0 | 1 |
-| 2 | 0 | 0 | 0 |
-| 0 | 0 | 0 | 0 |
-| 0 | 0 | 0 | 0 |
+**Per-target results — all 14 targets named (plus the doc-test run):**
+
+| Target | Passed | Failed | Ignored | Filtered out |
+|---|---|---|---|---|
+| `unittests src/lib.rs` | 478 | 0 | 2 | 1 |
+| `unittests src/main.rs` | 0 | 0 | 0 | 0 |
+| `tests/dependency_audit.rs` | 3 | 0 | 0 | 0 |
+| `tests/host_guest_wiring.rs` | 2 | 0 | 0 | 0 |
+| **`tests/m2_integration.rs`** | **28** | **0** | 0 | 0 |
+| `tests/m3_closure.rs` | 7 | 0 | 0 | 0 |
+| `tests/m3_integration.rs` | 18 | 0 | 0 | 0 |
+| `tests/m3_m4_e2e.rs` | 9 | 0 | 0 | 0 |
+| `tests/m4_closure.rs` | 15 | 0 | 0 | 0 |
+| `tests/real_native_surface_e2e.rs` | 0 | 0 | 0 | 1 |
+| `tests/real_playback_smoke_test.rs` | 0 | 0 | 0 | 1 |
+| `tests/real_sw_render_test.rs` | 0 | 0 | 0 | 1 |
+| `tests/tailscale_probe.rs` | 2 | 0 | 0 | 0 |
+| `tests/windows_native_surface_e2e.rs` | 0 | 0 | 0 | 0 |
+| Doc-tests | 0 | 0 | 0 | 0 |
 
 **macOS totals: 562 passed / 0 failed / 2 ignored / 4 filtered out.**
 
+The 4 filtered-out tests on macOS are exactly `bundled_runtime_is_loadable` (lib, macOS-gated) plus
+one each in `real_native_surface_e2e`, `real_playback_smoke_test` and `real_sw_render_test`.
 macOS carries 9 more lib tests than Windows (478 vs 469) — the `#[cfg(target_os = "macos")]`-gated
-tests that legitimately do not exist on Windows. The different filtered counts (4 vs 1) are the same
-effect: a `--skip` name that matches nothing in a target produces no filtered-out line.
+tests that legitimately do not exist on Windows.
 
 ### 3.3 Frontend — PASS
 
