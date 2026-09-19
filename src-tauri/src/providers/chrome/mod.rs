@@ -638,6 +638,11 @@ fn parse_ws_url(url: &str) -> Result<(String, u16, String), ManagedChromeError> 
 mod tests {
     use super::*;
     use crate::providers::youtube::{is_youtube_url, YoutubeAdapter};
+    // `Child`/`Stdio` are only used by the `#[cfg(unix)]` helpers below. Without
+    // the gate this is an unused import on Windows, which `clippy -D warnings`
+    // rejects — and that failure happens BEFORE the test step, so Windows would
+    // run no tests at all. macOS clippy cannot see it.
+    #[cfg(unix)]
     use std::process::{Child, Stdio};
 
     /// Spawns a child with the same process-group isolation production applies,

@@ -769,6 +769,11 @@ impl LocalPlayer for MpvPlayer {
 mod tests {
     use super::{MpvPlayer, PlayerError, PlayerState};
     use crate::media::player::LocalPlayer;
+    // `Path` is only used by the macOS-gated test below. Without the gate this
+    // is an unused import on Windows, which `clippy -D warnings` rejects — and
+    // that failure happens BEFORE the test step, so Windows would run no tests
+    // at all. macOS clippy cannot see it.
+    #[cfg(target_os = "macos")]
     use std::path::Path;
 
     #[test]
