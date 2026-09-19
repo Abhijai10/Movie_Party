@@ -5,13 +5,18 @@
 //!   MpvPlayer::open → attach_native_surface → play →
 //!   render_next_frame → display_frame → CALayer contents
 //!
-//! Skips gracefully when the bundled runtime or test video is absent.
 //! macOS-only.
+//!
+//! Prerequisites (the bundled runtime and the committed fixture) are enforced
+//! by `common::require_*`. They used to be checked with `if !exists { return }`,
+//! which `cargo test` reported as `ok` — a pass that executed no assertions at
+//! all. A missing prerequisite now fails loudly. See BATCH5_REPORT.md.
 
 #![cfg(target_os = "macos")]
 
+mod common;
+
 use std::os::raw::c_void;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use movie_party_lib::media::player::mpv_backend::MpvPlayer;
@@ -83,17 +88,7 @@ unsafe impl Send for RealLayer {}
 
 #[test]
 fn bundled_libmpv_renders_onto_real_calayer_through_production_player() {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let bundled = manifest_dir.join("mpv_runtime/libmpv.dylib");
-    if !bundled.exists() {
-        eprintln!("SKIP: no bundled libmpv at {bundled:?}");
-        return;
-    }
-    let test_video = Path::new("/tmp/movie_party_test.mp4");
-    if !test_video.exists() {
-        eprintln!("SKIP: no test video at {test_video:?}");
-        return;
-    }
+    let (bundled, test_video) = common::require_runtime_and_fixture();
 
     std::env::set_var(
         "MOVIE_PARTY_LIBMPV_PATH",
@@ -111,7 +106,7 @@ fn bundled_libmpv_renders_onto_real_calayer_through_production_player() {
 
     // ── 2. Production MpvPlayer ───────────────────────────────────────────
     let mut player = MpvPlayer::new();
-    player.open(test_video).expect("open");
+    player.open(&test_video).expect("open");
     eprintln!("CHECKPOINT: player opened media");
 
     // ── 3. Attach native surface → loads bundled libmpv, creates render ctx ─
@@ -126,11 +121,35 @@ fn bundled_libmpv_renders_onto_real_calayer_through_production_player() {
 
     // ── 4. Start playback ─────────────────────────────────────────────────
     player.play().expect("play");
-    eprintln!("CHECKPOINT: playback started");
+
+    // Wait for playback to actually start. `attach_native_surface` opens the
+    // media asynchronously, so `play()` can land before the file is ready; the
+    // render loop then runs against a player that never advanced and the later
+    // pause/seek steps operate on a `time-pos` of 0. Bounded, so a genuinely
+    // stuck player fails HERE with a clear message rather than surfacing as a
+    // confusing "seek: error running command" further down.
+    let play_deadline = Instant::now() + Duration::from_secs(3);
+    while player.snapshot().position_ms == 0 && Instant::now() < play_deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let started_at = player.snapshot().position_ms;
+    assert!(
+        started_at > 0,
+        "playback must start and advance within 3s of play() (position stayed at 0)"
+    );
+    eprintln!("CHECKPOINT: playback started (position {started_at}ms)");
 
     // ── 5. Render frames and push to CALayer ──────────────────────────────
+    //
+    // The window is deliberately shorter than the fixture. It used to be 3.0 s
+    // against a 3.000 s fixture, so the render loop consumed the whole file and
+    // the pause/seek/resume steps below then ran against ended playback — which
+    // read as `time-pos` 0 and made `seek` fail with "error running command".
+    // That is the flake this test was known for; it is deterministic, not
+    // random, and it is a parameter defect rather than a player defect. The
+    // assertions below are unchanged.
     let render_start = Instant::now();
-    let render_duration = Duration::from_secs(3);
+    let render_duration = Duration::from_millis(1_200);
     let mut rendered = 0u32;
 
     while Instant::now() - render_start < render_duration {

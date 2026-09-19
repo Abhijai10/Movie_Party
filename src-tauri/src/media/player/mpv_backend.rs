@@ -823,18 +823,32 @@ mod tests {
         }
     }
 
+    // macOS-only: it loads `mpv_runtime/libmpv.dylib` by name. On Windows the
+    // test simply does not exist (reported as zero tests) rather than
+    // "passing" — the same treatment the macOS-only integration tests get.
+    #[cfg(target_os = "macos")]
     #[test]
-    fn bundled_runtime_is_loadable_when_present() {
-        // This test verifies that the BUNDLED runtime (staged by the build
-        // script into src-tauri/mpv_runtime/) can be opened via libloading
-        // and resolves the mpv client API symbols. It only runs when the
-        // runtime actually exists (e.g. after `scripts/stage-libmpv-macos.sh`).
+    fn bundled_runtime_is_loadable() {
+        // Verifies that the BUNDLED runtime (staged by the build script into
+        // src-tauri/mpv_runtime/) opens via libloading and resolves the mpv
+        // client API symbols.
+        //
+        // This used to `return` when the runtime was absent, which `cargo test`
+        // reported as `ok` — a pass that asserted nothing. It now fails loudly,
+        // matching the policy in `tests/common/mod.rs` (BATCH5_REPORT.md). CI
+        // cannot stage the runtime, so CI skips this test explicitly by name.
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let bundled_path = manifest_dir.join("mpv_runtime/libmpv.dylib");
-        if !bundled_path.exists() {
-            eprintln!("no bundled libmpv at {bundled_path:?} — skipping test");
-            return;
-        }
+        assert!(
+            bundled_path.exists(),
+            "PREREQUISITE MISSING: the bundled libmpv runtime is absent at {bundled_path:?}.\n\
+             It is a gitignored build artifact; stage it with\n\
+             \n    ./scripts/stage-libmpv-macos.sh\n\
+             \n\
+             which needs a local libmpv build first (scripts/build-libmpv-macos.sh).\n\
+             CI cannot do this, so CI skips this test explicitly rather than\n\
+             letting it pass without executing."
+        );
         let lib = unsafe { libloading::Library::new(&bundled_path) }
             .expect("bundled libmpv.dylib must be loadable via dlopen");
         let _fn: unsafe extern "C" fn() -> *mut std::ffi::c_void = unsafe {

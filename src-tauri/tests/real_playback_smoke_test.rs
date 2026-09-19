@@ -7,12 +7,22 @@
 //! test runs headless; decoding and playback control are fully real.
 //!
 //! This proves the bundled runtime genuinely decodes and plays a local video,
-//! not merely that the file exists. Skips gracefully when the runtime or the
-//! test video is absent.
+//! not merely that the file exists.
+//!
+//! macOS-only: it loads `mpv_runtime/libmpv.dylib` directly, so on any other
+//! platform it is correctly reported as zero tests rather than "passing".
+//!
+//! Prerequisites (the bundled runtime and the committed fixture) are enforced
+//! by `common::require_*`. They used to be checked with `if !exists { return }`,
+//! which `cargo test` reported as `ok` — a pass that executed no assertions at
+//! all. A missing prerequisite now fails loudly. See BATCH5_REPORT.md.
+
+#![cfg(target_os = "macos")]
+
+mod common;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
-use std::path::Path;
 use std::ptr;
 
 type MpvHandle = *mut c_void;
@@ -24,17 +34,7 @@ const MPV_FORMAT_INT64: i32 = 4;
 
 #[test]
 fn bundled_libmpv_plays_pauses_seeks_real_video() {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let bundled = manifest_dir.join("mpv_runtime/libmpv.dylib");
-    if !bundled.exists() {
-        eprintln!("SKIP: no bundled libmpv at {bundled:?}");
-        return;
-    }
-    let test_video = Path::new("/tmp/movie_party_test.mp4");
-    if !test_video.exists() {
-        eprintln!("SKIP: no test video at {test_video:?}");
-        return;
-    }
+    let (bundled, test_video) = common::require_runtime_and_fixture();
 
     // Load the EXACT dylib the packaged app ships.
     let lib = unsafe { libloading::Library::new(&bundled) }

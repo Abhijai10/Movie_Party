@@ -1,19 +1,48 @@
-//! Real playback smoke test against the bundled libmpv runtime using the
+//! Real playback validation against the bundled libmpv runtime using the
 //! software render API (MPV_RENDER_API_TYPE_SW).
 //!
 //! Validates the SW render pipeline the packaged Movie Party app uses:
 //!   bundled libmpv → mpv_render_context_create(SW) → mpv_render_context_render
 //!   → bgr0 buffer → verified non-zero pixels
 //!
-//! Skips gracefully when the runtime or test video is absent.
+//! macOS-only: it loads `mpv_runtime/libmpv.dylib` directly.
+//!
+//! # What this test got wrong before (see BATCH5_REPORT.md)
+//!
+//! It rendered into one buffer in a fixed 3.0 s loop and then asserted on the
+//! *final* buffer contents. That is not the claim it wants to make, and it was
+//! wrong for two compounding reasons:
+//!
+//! 1. **The render window outlived the media.** The fixture is exactly 3.000 s
+//!    and playback starts ~1 s before the render loop, so the loop always
+//!    finished *past the end of the file*.
+//! 2. **mpv renders a black frame when there is no frame to present.** With no
+//!    new frame available, `mpv_render_context_render` writes a fully zeroed
+//!    buffer (measured: all 307 200 bytes written, all zero) — so the final
+//!    buffer was *legitimately* black, and the assertion failed even though the
+//!    render pipeline was working correctly.
+//!
+//! Measured on the old code: 47 renders carried real pixel data, the last 3 were
+//! post-end-of-media black, and the assertion sampled one of those 3. Shrinking
+//! the window to 1 s made the test pass with no other change — which is what
+//! identified it as a test defect rather than a rendering defect.
+//!
+//! The test now states its requirement directly: *produce at least N renders
+//! that carry real pixel data*. It classifies every render (using
+//! `mpv_render_context_update`, which the old code never consulted), keeps the
+//! best frame as evidence, and never asserts on an arbitrary final buffer.
+//!
+//! Prerequisites are enforced by `common::require_*`, which fails loudly rather
+//! than letting the test report success without executing.
 
 #![cfg(target_os = "macos")]
 
+mod common;
+
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
-use std::path::Path;
 use std::ptr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 type MpvHandle = *mut c_void;
 
@@ -26,6 +55,16 @@ struct MpvRenderParam {
 
 const MPV_FORMAT_INT64: i32 = 4;
 const MPV_FORMAT_DOUBLE: i32 = 5;
+
+/// `mpv_render_context_update` flag: a new frame is available to render.
+const MPV_RENDER_UPDATE_FRAME: u64 = 1;
+
+/// Hard ceiling on the render loop, so a broken pipeline fails instead of hanging.
+const RENDER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A sentinel that is itself non-zero, so "mpv wrote nothing" and "mpv wrote a
+/// black frame" are distinguishable instead of both reading as a zeroed buffer.
+const SENTINEL: u8 = 0xAB;
 
 fn cstring(s: &str) -> CString {
     CString::new(s).unwrap()
@@ -48,26 +87,11 @@ unsafe fn err_msg(
 
 #[test]
 fn bundled_libmpv_sw_render_api_produces_decoded_frames() {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let bundled = manifest_dir.join("mpv_runtime/libmpv.dylib");
-    if !bundled.exists() {
-        eprintln!("SKIP: no bundled libmpv at {bundled:?}");
-        return;
-    }
-    let test_video = Path::new("/tmp/movie_party_test.mp4");
-    if !test_video.exists() {
-        eprintln!("SKIP: no test video at {test_video:?}");
-        return;
-    }
+    let (bundled, test_video) = common::require_runtime_and_fixture();
 
     // ── 1. Load bundled libmpv ───────────────────────────────────────────
-    let lib = match unsafe { libloading::Library::new(&bundled) } {
-        Ok(lib) => lib,
-        Err(e) => {
-            eprintln!("SKIP: bundled libmpv could not be loaded: {e}");
-            return;
-        }
-    };
+    let lib = unsafe { libloading::Library::new(&bundled) }
+        .expect("bundled libmpv.dylib must be loadable (checked by require_libmpv)");
 
     let mpv_create: unsafe extern "C" fn() -> MpvHandle =
         unsafe { *lib.get(b"mpv_create\0").expect("mpv_create") };
@@ -104,6 +128,10 @@ fn bundled_libmpv_sw_render_api_produces_decoded_frames() {
     ) -> c_int = unsafe {
         *lib.get(b"mpv_render_context_create\0")
             .expect("mpv_render_context_create")
+    };
+    let mpv_render_context_update: unsafe extern "C" fn(*mut c_void) -> u64 = unsafe {
+        *lib.get(b"mpv_render_context_update\0")
+            .expect("mpv_render_context_update")
     };
     let mpv_render_context_render: unsafe extern "C" fn(
         *mut c_void,
@@ -171,7 +199,7 @@ fn bundled_libmpv_sw_render_api_produces_decoded_frames() {
     });
 
     let duration_name = cstring("duration");
-    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(5);
     let mut loaded = false;
     while Instant::now() < deadline {
         unsafe { mpv_wait_event(handle, 0.05) };
@@ -190,6 +218,30 @@ fn bundled_libmpv_sw_render_api_produces_decoded_frames() {
         }
     }
     assert!(loaded, "test video did not load within timeout");
+
+    // Guard the fixture's length explicitly. Without this, a too-short fixture
+    // produces the confusing "buffer must contain non-zero pixel data" symptom
+    // described in the module docs instead of naming the real problem.
+    let mut duration: f64 = 0.0;
+    unsafe {
+        mpv_get_property(
+            handle,
+            duration_name.as_ptr(),
+            MPV_FORMAT_DOUBLE,
+            &mut duration as *mut _ as *mut c_void,
+        );
+    }
+    assert!(
+        duration >= common::MIN_FIXTURE_SECONDS,
+        "the fixture must be at least {:.1}s long so the render loop stays inside \
+         the media; {test_video:?} is {duration:.3}s. Regenerate it with \
+         ./scripts/make-test-media-macos.sh",
+        common::MIN_FIXTURE_SECONDS
+    );
+    eprintln!(
+        "fixture duration {duration:.3}s (>= {:.1}s required)",
+        common::MIN_FIXTURE_SECONDS
+    );
 
     // ── 5. Start playback ────────────────────────────────────────────────
     let set_cmd = cstring("set");
@@ -231,14 +283,30 @@ fn bundled_libmpv_sw_render_api_produces_decoded_frames() {
     let h = video_h.max(16) as usize;
     let stride = (w * 4).div_ceil(64) * 64;
     let mut buf = vec![0u8; stride * h];
+    let buffer_len = buf.len();
 
-    // ── 7. Render frames via SW render API ───────────────────────────────
+    // ── 7. Render via the SW render API, classifying every render ────────
+    //
+    // The loop's requirement is explicit: collect enough renders that carry
+    // real pixel data. It stops as soon as it has them, so it does not depend
+    // on the fixture's length and cannot fail merely because playback ended.
     let sw_fmt = cstring("bgr0");
-    let mut rendered = 0u32;
+    let mut renders = 0u32;
+    let mut frames_with_pixels = 0u32;
+    let mut frames_without_new_frame = 0u32;
+    let mut frames_written_black = 0u32;
+    let mut best_nonzero = 0usize;
+    let mut first16 = [0u8; 16];
     let render_start = Instant::now();
-    let render_duration = std::time::Duration::from_secs(3);
 
-    while Instant::now() - render_start < render_duration {
+    while render_start.elapsed() < RENDER_TIMEOUT
+        && frames_with_pixels < common::MIN_FRAMES_WITH_PIXELS
+    {
+        let frame_available =
+            unsafe { mpv_render_context_update(render_ctx) } & MPV_RENDER_UPDATE_FRAME != 0;
+
+        buf.fill(SENTINEL);
+
         unsafe { mpv_wait_event(handle, 0.01) };
         let mut sw_size = [w as i32, h as i32];
         let mut stride_val = stride;
@@ -269,31 +337,67 @@ fn bundled_libmpv_sw_render_api_produces_decoded_frames() {
                 data: ptr::null_mut(),
             },
         ];
+
         let rc = unsafe { mpv_render_context_render(render_ctx, params.as_ptr()) };
-        if rc == 0 {
-            rendered += 1;
+        assert_eq!(rc, 0, "render: {}", unsafe {
+            err_msg(rc, mpv_error_string)
+        });
+        renders += 1;
+
+        let written = buf.iter().filter(|&&b| b != SENTINEL).count();
+        let nonzero = buf.iter().filter(|&&b| b != 0).count();
+
+        if !frame_available {
+            // Not an error — mpv reports no new frame between video frames —
+            // but recorded, because a run made entirely of these is the
+            // signature of the defect described in the module docs.
+            frames_without_new_frame += 1;
         }
-        std::thread::sleep(std::time::Duration::from_millis(30));
+
+        if written == 0 {
+            // mpv wrote nothing at all: no frame was presented to this buffer.
+            continue;
+        }
+
+        if nonzero > 0 {
+            frames_with_pixels += 1;
+            if nonzero > best_nonzero {
+                best_nonzero = nonzero;
+                first16.copy_from_slice(&buf[..16]);
+            }
+        } else {
+            // mpv wrote a frame, and every byte of it was zero.
+            frames_written_black += 1;
+        }
+
+        std::thread::sleep(Duration::from_millis(15));
     }
 
-    // ── 8. Verify frames were rendered with actual pixel data ────────────
     let elapsed = render_start.elapsed().as_secs_f64();
-    assert!(
-        rendered > 0,
-        "SW render API must produce at least one frame in {render_duration:?}"
-    );
     eprintln!(
-        "RENDER PASS: {rendered} frames produced in {elapsed:.1}s ({:.0} fps) \
-         buffer={w}x{h} stride={stride}",
-        rendered as f64 / elapsed,
+        "SW render: {renders} renders in {elapsed:.2}s — {frames_with_pixels} with pixel data, \
+         {frames_written_black} black, {frames_without_new_frame} with no new frame \
+         (buffer {w}x{h} stride {stride})"
     );
 
-    let non_zero = buf.iter().any(|&b| b != 0);
+    // ── 8. The actual claim ──────────────────────────────────────────────
     assert!(
-        non_zero,
-        "rendered frame buffer must contain non-zero pixel data"
+        frames_with_pixels >= common::MIN_FRAMES_WITH_PIXELS,
+        "the SW render API must produce at least {} renders carrying real pixel data; \
+         got {frames_with_pixels} ({frames_written_black} wrote an all-black frame, \
+         {frames_without_new_frame} had no frame to present). A run where every render \
+         is black usually means the render window outlived the media — see the module \
+         docs.",
+        common::MIN_FRAMES_WITH_PIXELS
     );
-    eprintln!("Frame pixels verified: non-zero data present");
+    assert!(
+        best_nonzero > 0,
+        "the best rendered frame must contain non-zero pixel data"
+    );
+    eprintln!(
+        "Frame pixels verified: up to {best_nonzero}/{buffer_len} non-zero bytes, \
+         first16={first16:?}"
+    );
 
     // ── 9. Cleanup ───────────────────────────────────────────────────────
     unsafe {

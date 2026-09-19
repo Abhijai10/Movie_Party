@@ -72,7 +72,51 @@ jobs:
       # accepts a legitimate in-window reorder while still rejecting duplicates
       # and anything older than the window. If this test fails again, look for a
       # dropped message — do NOT raise the timeout.
-      - run: cargo test -- --test-threads=1
+      # ── The bundled libmpv runtime ────────────────────────────────────────
+      # `src-tauri/mpv_runtime/*` is gitignored (large LGPL binaries), so a
+      # clean checkout has no libmpv and this job cannot build one: the staging
+      # script needs a local libmpv build (scripts/build-libmpv-macos.sh) and
+      # Homebrew. That is a real, structural limitation — see BATCH5_REPORT.md.
+      #
+      # What changed in Batch 5: the bundled_libmpv_* tests no longer `return`
+      # early when the runtime is missing. They used to report `ok` in 0.00s
+      # without executing a single assertion — a false green. They now FAIL
+      # loudly (src-tauri/tests/common/mod.rs), which means this job must skip
+      # them EXPLICITLY and say so, rather than quietly collecting a pass it
+      # never earned.
+      #
+      # On a machine with the runtime staged, run them for real with:
+      #   cargo test --test real_playback_smoke_test \
+      #              --test real_native_surface_e2e \
+      #              --test real_sw_render_test -- --test-threads=1 --nocapture
+      - name: libmpv runtime state
+        shell: bash
+        run: |
+          if [ -f mpv_runtime/libmpv.dylib ] || [ -f mpv_runtime/libmpv.dll ]; then
+            echo "BUNDLED_LIBMPV=1" >> "$GITHUB_ENV"
+            echo "libmpv runtime present — the bundled_libmpv_* tests will execute."
+          else
+            echo "BUNDLED_LIBMPV=0" >> "$GITHUB_ENV"
+            echo "::warning title=Real playback tests SKIPPED::No bundled libmpv runtime was staged, so the bundled_libmpv_* tests (real_playback_smoke_test, real_native_surface_e2e, real_sw_render_test, windows_native_surface_e2e) DO NOT EXECUTE in this job. They are reported as an explicit skip, not a pass. Stage the runtime with scripts/stage-libmpv-macos.sh (needs a local libmpv build) to run them."
+          fi
+
+      - name: Tests
+        shell: bash
+        run: |
+          if [ "$BUNDLED_LIBMPV" = "1" ]; then
+            cargo test -- --test-threads=1
+          else
+            # Named individually rather than by a `bundled_libmpv_` prefix, so
+            # `bundled_libmpv_path_resolves_correctly_inside_app_bundle` — which
+            # is pure path-string logic and needs no runtime — still runs.
+            cargo test -- --test-threads=1 \
+              --skip bundled_libmpv_plays_pauses_seeks_real_video \
+              --skip bundled_libmpv_renders_onto_real_calayer_through_production_player \
+              --skip bundled_libmpv_sw_render_api_produces_decoded_frames \
+              --skip bundled_libmpv_renders_onto_real_child_hwnd_through_production_player \
+              --skip bundled_runtime_is_loadable
+            echo "EXPLICIT SKIP: the 5 libmpv-dependent tests above did not execute (no libmpv runtime in this job). The committed media fixture they need IS present; only the runtime is missing."
+          fi
 
   # Dependency audits — ADVISORY, non-blocking by design. Failures surface
   # as warnings so a new advisory never blocks feature work; promotion to

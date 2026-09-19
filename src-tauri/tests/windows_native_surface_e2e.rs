@@ -5,12 +5,22 @@
 //!   MpvPlayer::open → attach_native_surface → play →
 //!   render_next_frame → display_frame → StretchDIBits into the child HWND
 //!
-//! Skips gracefully when the bundled runtime or test video is absent.
 //! Windows-only.
+//!
+//! Prerequisites are enforced by `common::require_*`, which fails loudly rather
+//! than letting the test report success without executing. The fixture is the
+//! same committed file the macOS tests use (no more `C:\Windows\Temp` copy
+//! that nothing in the repository created); the runtime is
+//! `mpv_runtime/libmpv.dll`, which this repository has no way to build or stage
+//! — see BATCH5_REPORT.md, "Windows real tests cannot execute".
+//!
+//! If that runtime is absent the test FAILS. CI therefore does not run it and
+//! reports the skip explicitly instead.
 
 #![cfg(windows)]
 
-use std::path::Path;
+mod common;
+
 use std::time::{Duration, Instant};
 
 use movie_party_lib::media::player::mpv_backend::MpvPlayer;
@@ -80,17 +90,7 @@ impl Drop for RealChildWindow {
 
 #[test]
 fn bundled_libmpv_renders_onto_real_child_hwnd_through_production_player() {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let bundled = manifest_dir.join("mpv_runtime").join("libmpv.dll");
-    if !bundled.exists() {
-        eprintln!("SKIP: no bundled libmpv at {bundled:?}");
-        return;
-    }
-    let test_video = Path::new("C:\\Windows\\Temp\\movie_party_test.mp4");
-    if !test_video.exists() {
-        eprintln!("SKIP: no test video at {test_video:?}");
-        return;
-    }
+    let (bundled, test_video) = common::require_runtime_and_fixture();
 
     std::env::set_var(
         "MOVIE_PARTY_LIBMPV_PATH",
@@ -105,7 +105,7 @@ fn bundled_libmpv_renders_onto_real_child_hwnd_through_production_player() {
 
     // ── 2. Production MpvPlayer ───────────────────────────────────────────
     let mut player = MpvPlayer::new();
-    player.open(test_video).expect("open");
+    player.open(&test_video).expect("open");
     eprintln!("CHECKPOINT: player opened media");
 
     // ── 3. Attach native surface → loads bundled libmpv, creates SW ctx ───

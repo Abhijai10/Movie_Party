@@ -50,6 +50,14 @@ temp/
 *.mov
 *.avi
 
+# ...except the committed test fixture. It is small (52 KB), synthetic, has no
+# audio, and MUST be present in a clean checkout: the real_* playback tests
+# require it and used to silently pass when a /tmp copy was absent. Committing
+# it is what lets those tests execute in CI instead of reporting a false green.
+# Regenerate with scripts/make-test-media-macos.sh (see BATCH5_REPORT.md).
+!src-tauri/tests/fixtures/
+!src-tauri/tests/fixtures/*.mp4
+
 # Build artifacts
 *.dmg
 *.app
