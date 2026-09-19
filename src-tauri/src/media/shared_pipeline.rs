@@ -1,3 +1,21 @@
+//! STALE — NOT COMPILED, NOT WIRED, NOT A SHIPPED CAPABILITY (AUD-08).
+//!
+//! This module is deliberately **not** declared in `media/mod.rs`, so no build
+//! compiles it and its one `#[ignore]`d test can never run. It is a macOS-only
+//! *proof harness* for Provider Shared (`screencapture` + `ffmpeg
+//! h264_videotoolbox`), and Provider Shared remains `shared_available: false`.
+//!
+//! Declaring it does not compile. Verified against the current tree, it fails
+//! in three places:
+//!   * `QuicServer::run()` now requires
+//!     `Option<Arc<Mutex<LocalSyncCoordinator>>>` (line ~131).
+//!   * `QuicClient::connect(..)`'s argument list changed (line ~132).
+//!   * `QuicClient::send_shared_stream_packet` no longer exists (line ~141).
+//!
+//! Do not read this file as evidence that shared-stream transport works. It is
+//! evidence of the opposite: nothing here has been executed in a long time.
+//! Either delete it or repair it as part of the Provider Shared work.
+
 use std::{
     fs,
     path::{Path, PathBuf},

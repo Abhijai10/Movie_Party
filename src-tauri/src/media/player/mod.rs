@@ -13,6 +13,14 @@ pub enum PlayerState {
     Paused,
     Buffering,
     Seeking,
+    /// The movie reached its end and playback is over (AUD-03).
+    ///
+    /// Terminal for the current file: distinct from `Stopped` (no media
+    /// loaded) and from `Paused` (playback may continue). Without this the
+    /// player simply stopped advancing and the room stayed `PLAYING`
+    /// forever, so nothing — not the host, not the guest, not the UI —
+    /// could tell that the film had finished.
+    Completed,
     Error,
 }
 

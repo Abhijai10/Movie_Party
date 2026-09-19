@@ -290,6 +290,19 @@ impl LocalSyncCoordinator {
         self.paused_by_strict_sync = cause == PauseCause::BufferLow;
     }
 
+    /// The movie finished (AUD-03).
+    ///
+    /// Playback is over, but the *party* is not: this deliberately does not
+    /// tear the session down the way `end_party` does. Leaving `Playing`
+    /// stops both sides from correcting drift against a position that can no
+    /// longer advance, and the coordinator broadcast carries the same
+    /// transition to the guest, so neither side is left believing the film
+    /// is still running.
+    pub fn ended(&mut self) {
+        self.paused_by_strict_sync = true;
+        self.fire_coordinator_cb(RoomState::Ended);
+    }
+
     pub fn update_position(&mut self, position_ms: u64) {
         self.host_position_ms = position_ms;
         self.guest_position_ms = position_ms;

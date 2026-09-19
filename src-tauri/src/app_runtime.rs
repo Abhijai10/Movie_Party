@@ -574,6 +574,25 @@ struct AppRuntimeState {
     /// Host side: monotonic Instant at which the pending commit executes.
     /// Guest side: same, converted via the calibrated clock offset.
     commit_scheduled_for: Option<Instant>,
+    /// The canonical playback anchor established by the last executed
+    /// PLAY commit (AUD-01).
+    ///
+    /// A commit names a `target_position_ms` *and* the host-monotonic instant
+    /// it takes effect (`execute_at_host_mono_us`), and from that instant the
+    /// canonical position advances at 1×. The pair is therefore a complete
+    /// description of where playback is, at any later instant — which is what
+    /// lets a guest derive the canonical position locally, with no periodic
+    /// position broadcast (AUD-02).
+    ///
+    /// Without this, a guest compared its own advancing position against the
+    /// *frozen* commit target, so "drift" grew at 1× realtime and the drift
+    /// correction seeked the guest backwards roughly every second.
+    ///
+    /// `None` until the first PLAY commit. Pause/buffer/seek transitions are
+    /// handled by the `RoomState::Playing` guard in
+    /// [`AppRuntime::projected_host_position_ms`] rather than by clearing
+    /// this — a paused room has no advancing canonical position regardless.
+    committed_playback: Option<ScheduledPlayback>,
     /// Bumped on every committed play operation; carried in PlayCommit so
     /// presentation changes are unambiguous.
     presentation_epoch: u64,
@@ -863,6 +882,7 @@ impl AppRuntime {
                     pending_operation_resume_after: false,
                     last_committed_operation_id: None,
                     commit_scheduled_for: None,
+                    committed_playback: None,
                     presentation_epoch: 0,
                     session_generation: 0,
                     chrome_generation: 0,
@@ -3499,6 +3519,9 @@ impl AppRuntime {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .commit_play(&scheduled);
+            // Record the canonical anchor (AUD-01): the position at the
+            // commit deadline, from which the canonical position advances.
+            state.committed_playback = Some(scheduled);
             state.sync.position_ms = target;
             state.sync.strict_sync_paused = false;
             state.pending_operation_id = None;
@@ -4180,6 +4203,10 @@ impl AppRuntime {
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
                             .commit_play(&scheduled);
+                        // Record the canonical anchor (AUD-01). A guest's
+                        // canonical position advances from this commit's
+                        // deadline at 1×; it is not frozen at the target.
+                        state.committed_playback = Some(scheduled);
                         state.sync.position_ms = target_position_ms;
                         state.sync.strict_sync_paused = false;
                         state.pending_operation_id = None;
@@ -5238,47 +5265,128 @@ impl AppRuntime {
         Ok(snapshot)
     }
 
-    #[allow(dead_code)]
-    fn host_relay_ready_state(&self, ready: bool) -> AppSnapshot {
-        let snapshot = {
-            let mut state = self.lock();
-            let readiness = if ready {
-                ParticipantReadiness::ready(5_000)
-            } else {
-                ParticipantReadiness::not_ready("manual")
-            };
-            state
-                .sync_coordinator
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .host_ready(readiness);
-            let event = QuicServerEvent::RoomStateUpdate {
-                state: format!(
-                    "{:?}",
-                    state
-                        .sync_coordinator
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .room_state
-                ),
-                position_ms: state.sync.position_ms,
-            };
-            Self::send_host_event(&mut state, event);
-            let room_state = state
-                .sync_coordinator
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .room_state;
-            state.room_state = room_state;
-            sync_room_snapshot(&mut state);
-            snapshot_from_state(&state)
-        };
-        self.inner.emit(snapshot.clone());
-        snapshot
-    }
+    // NOTE (AUD-02): `host_relay_ready_state` used to live here. It was
+    // `#[allow(dead_code)]` and had no caller — it was the *only* production
+    // sender of `QuicServerEvent::RoomStateUpdate`, so the host never
+    // broadcast a position. That dead channel is what made the guest's drift
+    // reference frozen (AUD-01). The canonical position is now derived from
+    // the PLAY commit anchor instead (see `projected_host_position_ms`), which
+    // needs no periodic broadcast and — unlike a periodic one — cannot yank
+    // the anchor backwards when a late message arrives. `RoomStateUpdate` is
+    // still *received* for wire compatibility (see its handler below); nothing
+    // sends it.
 
     fn is_host_role(state: &AppRuntimeState) -> bool {
         state.local_participant.role == "Host"
+    }
+
+    /// Host-monotonic "now" as observed by this process.
+    ///
+    /// `monotonic_us()` is this process's own monotonic base; the calibrated
+    /// `clock_offset_to_host_us` maps it onto the host's base
+    /// (`host = local + offset` — the inverse of [`instant_for_host_mono`],
+    /// which computes `local = host - offset`). The host carries offset 0, so
+    /// this is an identity there.
+    fn host_monotonic_us(state: &AppRuntimeState) -> u64 {
+        (monotonic_us() as i64)
+            .saturating_add(state.clock_offset_to_host_us)
+            .max(0) as u64
+    }
+
+    /// The canonical position of the movie at this instant, or `None` when
+    /// playback is not advancing.
+    ///
+    /// The protocol makes this *deterministic*: a PLAY commit names both a
+    /// `target_position_ms` and the host-monotonic instant it takes effect
+    /// (`execute_at_host_mono_us`), and from that instant the canonical
+    /// position advances at 1×. Deriving it locally is what lets a guest
+    /// compare like with like.
+    ///
+    /// Guarded on `Playing` so pause, buffering and seek transitions need no
+    /// bookkeeping here — a room that is not playing has no advancing
+    /// canonical position by definition.
+    fn projected_host_position_ms(state: &AppRuntimeState) -> Option<u64> {
+        if state.room_state != RoomState::Playing {
+            return None;
+        }
+        let committed = state.committed_playback.as_ref()?;
+        let elapsed_us =
+            Self::host_monotonic_us(state).saturating_sub(committed.execute_at_host_mono_us);
+        Some(
+            committed
+                .target_position_ms
+                .saturating_add(elapsed_us / 1_000),
+        )
+    }
+
+    /// End playback when the movie finishes (AUD-03).
+    ///
+    /// Only the **host** drives this: it owns the session and the canonical
+    /// position, and the coordinator broadcast carries the transition to the
+    /// guest. A guest's own player independently reports `Completed` for its
+    /// UI, but a guest must never unilaterally end a room the host may still
+    /// be playing — a shorter or truncated local copy would otherwise end the
+    /// film early for both of them.
+    ///
+    /// Returns `true` when this call performed the transition.
+    fn apply_end_of_media(state: &mut AppRuntimeState, player_state: PlayerState) -> bool {
+        if !matches!(player_state, PlayerState::Completed)
+            || !Self::is_host_role(state)
+            || state.room_state != RoomState::Playing
+        {
+            return false;
+        }
+        state
+            .sync_coordinator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .ended();
+        // Playback is over, so strict sync must stop correcting drift against
+        // a position that can no longer advance.
+        state.sync.strict_sync_paused = true;
+        let room_state = state
+            .sync_coordinator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .room_state;
+        state.room_state = room_state;
+        // The snapshot's `sync.room_state` is a *copy* taken by
+        // `sync_room_snapshot`; without this the frontend would keep reading
+        // "PLAYING" while the room had already ended.
+        sync_room_snapshot(state);
+        true
+    }
+
+    /// The drift correction the player event loop must apply, if any.
+    ///
+    /// Returns `(drift_ms, local_position_ms)`, where `drift_ms` is the local
+    /// position **minus the canonical position**. The host owns the canonical
+    /// position and never corrects itself; a guest corrects only while the
+    /// room is genuinely playing and not strict-sync paused.
+    ///
+    /// This deliberately owns the *call site's* decision, not merely the
+    /// threshold mapping in [`crate::sync::drift`]. The previous code was
+    /// right about its thresholds and wrong about the value it compared
+    /// against, so a test of `correction_for_drift` alone could not fail for
+    /// the real defect (AUD-05).
+    fn drift_correction_for_player(
+        state: &AppRuntimeState,
+        local_position_ms: u64,
+    ) -> Option<(i64, u64)> {
+        if Self::is_host_role(state)
+            || state.sync.strict_sync_paused
+            || state.room_state != RoomState::Playing
+        {
+            return None;
+        }
+        // Fall back to the last known position only when no commit is active;
+        // the room is then not advancing, so this covers just the edge between
+        // a commit landing and the state guard settling.
+        let canonical = Self::projected_host_position_ms(state).unwrap_or(state.sync.position_ms);
+        Some((
+            local_position_ms as i64 - canonical as i64,
+            local_position_ms,
+        ))
     }
 
     /// V1 correctness gate: the local participant may only claim readiness
@@ -5812,21 +5920,35 @@ impl AppRuntime {
                     state.buffer.guest_buffer_ahead_ms = headroom_ms;
                     state.buffer.percent = Self::transfer_percent(&state);
                     if Self::is_host_role(&state) {
-                        // The host owns the canonical position. A guest must
-                        // retain the last host commit for drift comparison.
+                        // The host owns the canonical position, so its live
+                        // player position *is* the canonical one.
                         state.sync.position_ms = snap.position_ms;
-                    } else if !state.sync.strict_sync_paused
-                        && state.room_state == RoomState::Playing
+                    } else if let Some(canonical) = Self::projected_host_position_ms(&state) {
+                        // A guest's canonical position is derived from the
+                        // last PLAY commit, not frozen at it (AUD-01): the
+                        // commit target is the position at the commit
+                        // deadline, and it advances at 1× from there. Keeping
+                        // the snapshot truthful here also keeps the Debug HUD
+                        // honest.
+                        state.sync.position_ms = canonical;
+                    }
+                    // Only a guest corrects drift; the host owns the
+                    // canonical position. The decision lives in
+                    // `drift_correction_for_player` so it is testable at the
+                    // call site rather than only through the threshold
+                    // mapping.
+                    if let Some(drift) = Self::drift_correction_for_player(&state, snap.position_ms)
                     {
-                        correction = Some((
-                            snap.position_ms as i64 - state.sync.position_ms as i64,
-                            snap.position_ms,
-                        ));
+                        correction = Some(drift);
                     }
                     if buffering_now != was_buffering {
                         buffer_transition = Some((snap.position_ms, headroom_ms, buffering_now));
                         was_buffering = buffering_now;
                     }
+                    // AUD-03: end of movie. Checked before the snapshot is
+                    // built so the room state the frontend receives is
+                    // already truthful.
+                    Self::apply_end_of_media(&mut state, snap.state);
                     let out = snapshot_from_state(&state);
                     drop(state);
                     inner.emit(out);
@@ -7672,15 +7794,16 @@ fn apply_recovery_to_state(state: &mut AppRuntimeState, event: FailureEvent, pla
 #[cfg(test)]
 mod tests {
     use super::{
-        adaptive_preload_deadline, project_host_mono_to_wall_ms, reconnect_failure,
-        should_notify_preload_wait, sync_room_snapshot, AppRuntime, AppSnapshot, LibPlayerSnapshot,
-        PlayerSnapshot, PlayerState, ReconnectFailure, PLAYER_STATE_ERROR,
+        adaptive_preload_deadline, player_state_wire_name, project_host_mono_to_wall_ms,
+        reconnect_failure, should_notify_preload_wait, sync_room_snapshot, AppRuntime, AppSnapshot,
+        LibPlayerSnapshot, PlayerSnapshot, PlayerState, ReconnectFailure, Uuid, PLAYER_STATE_ERROR,
     };
     use crate::call::{CallSignal, CallSignalType};
     use crate::network::quic::monotonic_us;
     use crate::network::quic::QuicError;
     use crate::resilience::{FailureEvent, RecoveryAction};
     use crate::room::MoviePartyInvite;
+    use crate::sync::local::ScheduledPlayback;
     use crate::sync::state_machine::RoomState;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -9736,6 +9859,385 @@ mod tests {
             self.snapshot.error_message.clone()
         }
         fn close(&mut self) {}
+    }
+
+    /// A player whose reported position genuinely advances with wall time.
+    ///
+    /// `ScriptedPlayer` cannot serve here: its `snapshot()` is static, so a
+    /// player-event-loop test built on it sees a motionless playhead. That is
+    /// precisely the environment in which the frozen-anchor defect (AUD-01)
+    /// was invisible — CI has no libmpv, so position never moved and the
+    /// broken drift comparison reported zero drift.
+    ///
+    /// `set_playback_rate` deliberately does NOT change the reported rate:
+    /// the assertion under test is about *seeks*, and decoupling the rate
+    /// keeps the playhead at a predictable 1× so a backwards seek cannot be
+    /// mistaken for the rate correction doing its job.
+    struct AdvancingPlayer {
+        started: std::time::Instant,
+        base_position_ms: u64,
+        duration_ms: u64,
+        state: crate::media::player::PlayerState,
+        rate_calls: std::sync::Arc<std::sync::Mutex<Vec<f32>>>,
+        seek_calls: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+    }
+
+    impl AdvancingPlayer {
+        fn new(
+            base_position_ms: u64,
+            duration_ms: u64,
+            rate_calls: std::sync::Arc<std::sync::Mutex<Vec<f32>>>,
+            seek_calls: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+        ) -> Self {
+            Self {
+                started: std::time::Instant::now(),
+                base_position_ms,
+                duration_ms,
+                state: crate::media::player::PlayerState::Playing,
+                rate_calls,
+                seek_calls,
+            }
+        }
+    }
+
+    impl crate::media::player::LocalPlayer for AdvancingPlayer {
+        fn open(
+            &mut self,
+            _path: &std::path::Path,
+        ) -> Result<(), crate::media::player::PlayerError> {
+            Ok(())
+        }
+        fn play(&mut self) -> Result<(), crate::media::player::PlayerError> {
+            self.state = crate::media::player::PlayerState::Playing;
+            Ok(())
+        }
+        fn pause(&mut self) -> Result<(), crate::media::player::PlayerError> {
+            self.state = crate::media::player::PlayerState::Paused;
+            Ok(())
+        }
+        fn seek(&mut self, position_ms: u64) -> Result<(), crate::media::player::PlayerError> {
+            self.seek_calls.lock().unwrap().push(position_ms);
+            // A real seek moves the playhead and playback continues from
+            // there, so rebase rather than only recording the call.
+            self.base_position_ms = position_ms;
+            self.started = std::time::Instant::now();
+            Ok(())
+        }
+        fn set_volume(&mut self, _volume: f32) -> Result<(), crate::media::player::PlayerError> {
+            Ok(())
+        }
+        fn set_playback_rate(
+            &mut self,
+            rate: f32,
+        ) -> Result<(), crate::media::player::PlayerError> {
+            self.rate_calls.lock().unwrap().push(rate);
+            Ok(())
+        }
+        fn snapshot(&self) -> LibPlayerSnapshot {
+            LibPlayerSnapshot {
+                state: self.state,
+                position_ms: self.base_position_ms + self.started.elapsed().as_millis() as u64,
+                duration_ms: Some(self.duration_ms),
+                volume: 1.0,
+                playback_rate: 1.0,
+                buffered_ahead_ms: None,
+                error_message: None,
+            }
+        }
+        fn duration(&self) -> Option<u64> {
+            Some(self.duration_ms)
+        }
+        fn buffered_ahead_ms(&self) -> Option<u64> {
+            None
+        }
+        fn error_message(&self) -> Option<String> {
+            None
+        }
+        fn close(&mut self) {}
+    }
+
+    /// Build a runtime positioned as a **guest** whose room is genuinely
+    /// playing. The commit anchor is installed separately by
+    /// [`install_play_anchor`] so each test can choose the anchor's age
+    /// relative to the moment it starts its player.
+    fn guest_playing_runtime() -> AppRuntime {
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            state.local_participant.role = "Guest".to_string();
+            state.room_state = RoomState::Playing;
+            state.sync.strict_sync_paused = false;
+        }
+        runtime
+    }
+
+    /// Install a PLAY commit anchor, i.e. "playback is at `target_position_ms`
+    /// as of host-monotonic instant `execute_at_host_mono_us`".
+    fn install_play_anchor(
+        runtime: &AppRuntime,
+        target_position_ms: u64,
+        execute_at_host_mono_us: u64,
+    ) {
+        let mut state = runtime.lock();
+        state.sync.position_ms = target_position_ms;
+        state.committed_playback = Some(ScheduledPlayback {
+            operation_id: Uuid::now_v7(),
+            target_position_ms,
+            execute_at_host_mono_us,
+        });
+    }
+
+    /// AUD-01 regression — **drives the real player event loop.**
+    ///
+    /// A guest whose local playhead is running in step with the canonical
+    /// position must not be seeked at all. Before the fix the canonical
+    /// reference was the *frozen* commit target, so every poll computed
+    /// "drift" equal to the time elapsed since the commit and hard-seeked the
+    /// guest back to that target — playback could never progress past ~0.7 s.
+    ///
+    /// This is deliberately not a test of `apply_drift_correction` with a
+    /// hand-picked drift value: that is the shape of test that could not fail
+    /// for this defect (AUD-05). It spawns the production loop and lets the
+    /// loop derive the drift itself.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn guest_in_sync_is_never_seeked_by_the_player_event_loop() {
+        let anchor_target_ms = 1_000_000_u64;
+        let runtime = guest_playing_runtime();
+
+        let rate_calls: std::sync::Arc<std::sync::Mutex<Vec<f32>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seek_calls: std::sync::Arc<std::sync::Mutex<Vec<u64>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let player = AdvancingPlayer::new(
+            anchor_target_ms,
+            3_600_000,
+            rate_calls.clone(),
+            seek_calls.clone(),
+        );
+        let player_arc: std::sync::Arc<
+            std::sync::Mutex<dyn crate::media::player::LocalPlayer + Send + Sync>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(player));
+        runtime.lock().player = Some(player_arc);
+
+        // The commit takes effect now, so the canonical position starts at the
+        // target and advances at 1× in step with the playhead — exactly what a
+        // real guest sees after a PLAY commit lands.
+        install_play_anchor(&runtime, anchor_target_ms, monotonic_us());
+
+        runtime.spawn_player_event_loop();
+        // Several 200 ms polls — comfortably past the 700 ms hard-seek band
+        // the old code crossed within a single second of playback.
+        tokio::time::sleep(std::time::Duration::from_millis(1_400)).await;
+
+        let seeks = seek_calls.lock().unwrap().clone();
+        assert!(
+            seeks.is_empty(),
+            "an in-sync guest must never be seeked; the loop seeked to {seeks:?}. \
+             A seek back to the commit target means the canonical position was \
+             compared as a frozen anchor rather than a projected one (AUD-01)."
+        );
+
+        // The canonical position must also have ADVANCED, not stayed pinned at
+        // the commit target — that is the other half of the same defect.
+        let canonical = runtime.lock().sync.position_ms;
+        assert!(
+            canonical > anchor_target_ms,
+            "the guest's canonical position must advance past the commit target; \
+             it stayed at {canonical} (target {anchor_target_ms})"
+        );
+        // And it must advance at 1×, not merely move. A frozen anchor gives 0×;
+        // a projection that added wall-clock time twice would give ~2×. The
+        // window is wide enough to absorb the 200 ms poll granularity.
+        let advanced_ms = canonical - anchor_target_ms;
+        assert!(
+            (1_000..=2_000).contains(&advanced_ms),
+            "the canonical position must advance at ~1× over 1.4 s; it advanced \
+             {advanced_ms} ms past the commit target"
+        );
+    }
+
+    /// Negative control for the AUD-01 regression.
+    ///
+    /// Proves the regression above can actually go red. With **no** anchor
+    /// installed, the same in-sync playhead is reported as drifted by exactly
+    /// the elapsed-since-commit figure — the number the old code compared
+    /// against. If the projection is ever removed, the regression test fails
+    /// in precisely this way rather than passing vacuously.
+    ///
+    /// Deterministic by construction: the host clock is pinned to a constant
+    /// via `clock_offset_to_host_us`, so the anchor's age is exact instead of
+    /// depending on how long the test process happens to have been alive.
+    #[tokio::test]
+    async fn negative_control_frozen_anchor_reports_elapsed_time_as_drift() {
+        let anchor_target_ms = 1_000_000_u64;
+        // Pin "host now" to a fixed instant. `host_monotonic_us` is
+        // `monotonic_us() + clock_offset_to_host_us`, so this offset makes the
+        // host clock read `host_now` (± the microseconds that pass below).
+        let host_now: u64 = 50_000_000_000;
+        let elapsed_ms: u64 = 900;
+        // The commit took effect `elapsed_ms` ago, so the canonical position
+        // has advanced exactly that far past the commit target.
+        let execute_at_host_mono_us = host_now - elapsed_ms * 1_000;
+
+        let runtime = guest_playing_runtime();
+        install_play_anchor(&runtime, anchor_target_ms, execute_at_host_mono_us);
+        {
+            let mut state = runtime.lock();
+            state.clock_offset_to_host_us = host_now as i64 - monotonic_us() as i64;
+        }
+
+        let canonical = {
+            let state = runtime.lock();
+            AppRuntime::projected_host_position_ms(&state).expect("playing guest with anchor")
+        };
+        assert!(
+            canonical >= anchor_target_ms + elapsed_ms
+                && canonical <= anchor_target_ms + elapsed_ms + 5,
+            "precondition: the projected canonical position must advance from the commit \
+             target, not stay frozen at it; got {canonical} for target {anchor_target_ms}"
+        );
+
+        // With the anchor: an in-sync guest needs no correction at all.
+        let with_anchor = {
+            let state = runtime.lock();
+            AppRuntime::drift_correction_for_player(&state, canonical)
+                .expect("a playing guest must yield a correction")
+        };
+        assert!(
+            matches!(
+                crate::sync::drift::correction_for_drift(with_anchor.0, canonical as i64),
+                crate::sync::drift::DriftCorrection::Ignore
+            ),
+            "with the anchor installed an in-sync guest reports no correction; got drift {}",
+            with_anchor.0
+        );
+
+        // Now the pre-fix situation: no anchor, so the only available
+        // reference is the frozen `sync.position_ms` — still the commit target.
+        let frozen = {
+            let mut state = runtime.lock();
+            state.committed_playback = None;
+            AppRuntime::drift_correction_for_player(&state, canonical)
+                .expect("a playing guest must yield a correction")
+        };
+        assert_eq!(
+            frozen.0, elapsed_ms as i64,
+            "control: with no anchor, the elapsed-since-commit figure IS reported as \
+             drift — this is exactly the defect the projection removes"
+        );
+        assert!(
+            matches!(
+                crate::sync::drift::correction_for_drift(frozen.0, canonical as i64),
+                crate::sync::drift::DriftCorrection::HardSeek { .. }
+            ),
+            "control: the frozen-anchor drift must land in the hard-seek band, which \
+             is what made a guest unwatchable"
+        );
+    }
+
+    /// AUD-03 regression — **drives the real player event loop.**
+    ///
+    /// When the host's player reports `Completed`, the room must leave
+    /// `PLAYING` (and broadcast it), rather than sitting in `PLAYING` forever
+    /// with a playhead that has stopped moving.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn host_reaching_end_of_media_ends_playback() {
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            state.local_participant.role = "Host".to_string();
+            state.room_state = RoomState::Playing;
+            state.sync.strict_sync_paused = false;
+        }
+        let rate_calls: std::sync::Arc<std::sync::Mutex<Vec<f32>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seek_calls: std::sync::Arc<std::sync::Mutex<Vec<u64>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let player = ScriptedPlayer::new(600_000, 600_000, rate_calls, seek_calls);
+        // The movie is over: this is what the libmpv backend now reports when
+        // `eof-reached` is set.
+        let player_arc: std::sync::Arc<
+            std::sync::Mutex<dyn crate::media::player::LocalPlayer + Send + Sync>,
+        > = {
+            let mut p = player;
+            p.snapshot.state = PlayerState::Completed;
+            std::sync::Arc::new(std::sync::Mutex::new(p))
+        };
+        runtime.lock().player = Some(player_arc);
+
+        runtime.spawn_player_event_loop();
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+        let state = runtime.lock();
+        assert_eq!(
+            state.room_state,
+            RoomState::Ended,
+            "the host reaching the end of the movie must end playback, not stay PLAYING"
+        );
+        assert!(
+            state.sync.strict_sync_paused,
+            "an ended room must not keep correcting drift"
+        );
+        // The frontend routes and renders on `sync.room_state`, which is a
+        // *copy* taken by `sync_room_snapshot`. Asserting the internal field
+        // alone would let the transition land half-applied: the room ended,
+        // while the UI still read "PLAYING" forever.
+        assert_eq!(
+            state.sync.room_state, "ENDED",
+            "the snapshot the frontend receives must also report ENDED"
+        );
+    }
+
+    /// Negative control for the AUD-03 regression.
+    ///
+    /// Two ways the transition must NOT happen — either would be a real bug
+    /// (a guest ending the host's room, or a paused room being ended):
+    /// a guest reporting `Completed`, and a host that is merely `Paused`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn negative_control_end_of_media_requires_a_playing_host() {
+        for (role, room_state, player_state) in [
+            ("Guest", RoomState::Playing, PlayerState::Completed),
+            ("Host", RoomState::Paused, PlayerState::Completed),
+            ("Host", RoomState::Playing, PlayerState::Paused),
+        ] {
+            let runtime = AppRuntime::new();
+            {
+                let mut state = runtime.lock();
+                state.local_participant.role = role.to_string();
+                state.room_state = room_state;
+            }
+            let rate_calls: std::sync::Arc<std::sync::Mutex<Vec<f32>>> =
+                std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seek_calls: std::sync::Arc<std::sync::Mutex<Vec<u64>>> =
+                std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut p = ScriptedPlayer::new(0, 600_000, rate_calls, seek_calls);
+            p.snapshot.state = player_state;
+            let player_arc: std::sync::Arc<
+                std::sync::Mutex<dyn crate::media::player::LocalPlayer + Send + Sync>,
+            > = std::sync::Arc::new(std::sync::Mutex::new(p));
+            runtime.lock().player = Some(player_arc);
+
+            runtime.spawn_player_event_loop();
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+            assert_eq!(
+                runtime.lock().room_state,
+                room_state,
+                "role={role} room={room_state:?} player={player_state:?} must not \
+                 end the room"
+            );
+        }
+    }
+
+    /// AUD-03: the `Completed` state must have a wire name the frontend can
+    /// act on, and must not be confused with the failure state.
+    #[test]
+    fn completed_player_state_has_a_distinct_wire_name() {
+        assert_eq!(player_state_wire_name(&PlayerState::Completed), "COMPLETED");
+        assert_ne!(
+            player_state_wire_name(&PlayerState::Completed),
+            PLAYER_STATE_ERROR
+        );
     }
 
     /// The runtime drift path must restore the normal 1.0 rate once the

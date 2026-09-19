@@ -1024,20 +1024,51 @@ mod tests {
         let detected = page.execute(&adapter.detect_player(100)).expect("detect");
         let detected = detected["result"]["value"].as_bool().unwrap_or(false);
         if !detected {
-            eprintln!(
-                "EXTERNAL PROVIDER VERIFICATION PENDING: YouTube loaded, but no HTML5 player was detected; automation, consent, or geography may have blocked playback"
-            );
             session.close().expect("close");
             let _ = std::fs::remove_dir_all(root);
-            return;
+            // AUD-07: this used to `return` here, and libtest reports an early
+            // return as `ok` — so an explicitly-requested run could report
+            // success without having verified anything at all. A test that was
+            // asked for must produce a verdict, not a shrug. The failure is a
+            // failure of the *verification*, not of the product.
+            panic!(
+                "no HTML5 player was detected on the live YouTube page, so provider \
+                 synchronization was NOT verified; automation, consent or geography \
+                 may have blocked playback"
+            );
         }
 
+        // A real position, not merely a present field.
         let position = page.execute(&adapter.get_position(101)).expect("position");
-        assert!(position["result"].get("value").is_some());
+        let position_before = position["result"]["value"]
+            .as_f64()
+            .expect("get_position must return a numeric currentTime");
+        assert!(
+            position_before.is_finite() && position_before >= 0.0,
+            "currentTime must be a real position; got {position_before}"
+        );
+
         let pause = page.execute(&adapter.pause(102)).expect("pause");
         assert_eq!(pause["result"]["value"].as_bool(), Some(true));
+
+        // The seek must actually move the playhead. Asserting only that CDP
+        // returned `true` said nothing about the page — the old assertions here
+        // could not distinguish a working seek from a no-op.
         let seek = page.execute(&adapter.seek(103, 1.0)).expect("seek");
         assert_eq!(seek["result"]["value"].as_bool(), Some(true));
+        std::thread::sleep(Duration::from_millis(500));
+        let after = page
+            .execute(&adapter.get_position(105))
+            .expect("position after seek");
+        let position_after = after["result"]["value"]
+            .as_f64()
+            .expect("get_position must return a numeric currentTime");
+        assert!(
+            (position_after - 1.0).abs() < 1.0,
+            "after seeking to 1.0 s the playhead must be near 1.0 s; it was \
+             {position_after} (before the seek: {position_before})"
+        );
+
         let buffer = page
             .execute(&adapter.get_buffer_state(104))
             .expect("buffer");

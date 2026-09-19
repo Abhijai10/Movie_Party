@@ -84,6 +84,58 @@ unsafe fn mpv_get_int64(mpv: MpvHandle, fns: &MpvFns, name: &str) -> Option<i64>
     }
 }
 
+unsafe fn mpv_get_flag(mpv: MpvHandle, fns: &MpvFns, name: &str) -> Option<bool> {
+    let c_name = CString::new(name).ok()?;
+    // mpv's MPV_FORMAT_FLAG is an `int` that reads back as 0/1.
+    let mut out: c_int = 0;
+    let result = (fns.mpv_get_property)(
+        mpv,
+        c_name.as_ptr(),
+        MPV_FORMAT_FLAG,
+        &mut out as *mut _ as *mut c_void,
+    );
+    if result == MPV_ERROR_SUCCESS {
+        Some(out != 0)
+    } else {
+        None
+    }
+}
+
+/// The mpv options this player sets at initialisation, as `(name, value)`.
+///
+/// Kept as a pure function so the configuration is assertable without a
+/// libmpv handle or a loaded file — the audio decision in particular
+/// (AUD-06) was previously invisible to every test.
+fn player_init_options() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("msg-level", "all=status"),
+        ("quiet", "yes"),
+        ("terminal", "no"),
+        // AUD-03: hold the last frame at end of file instead of dropping into
+        // mpv's idle state. Without this the file is unloaded at EOF,
+        // `time-pos`/`duration` stop resolving, and "the movie finished" is
+        // indistinguishable from "the player broke" — there is nothing stable
+        // left to detect. With it, `eof-reached` stays yes, the final frame
+        // remains on screen, and `snapshot()` can report a real `Completed`.
+        ("keep-open", "yes"),
+        // AUD-06: audio is enabled *explicitly* rather than by omission.
+        //
+        // These are mpv's documented defaults, so this is not a behaviour
+        // change — it is the decision made visible. Nothing in this repository
+        // had ever produced a sound, and a silent default is not a decision
+        // anyone can review. `ao=auto` lets mpv pick the platform's audio
+        // output (CoreAudio on macOS, WASAPI on Windows) rather than pinning
+        // one that may not exist.
+        //
+        // This does NOT prove audio works. It proves the player asks for it.
+        // End-to-end audio and A-V sync remain unverified — see the AUD-06
+        // entry in the remediation report.
+        ("audio", "auto"),
+        ("aid", "auto"),
+        ("ao", "auto"),
+    ]
+}
+
 unsafe fn mpv_set_option(
     mpv: MpvHandle,
     fns: &MpvFns,
@@ -237,9 +289,9 @@ impl MpvPlayer {
             });
         }
         unsafe {
-            mpv_set_option(mpv, &fns, "msg-level", "all=status")?;
-            mpv_set_option(mpv, &fns, "quiet", "yes")?;
-            mpv_set_option(mpv, &fns, "terminal", "no")?;
+            for (name, value) in player_init_options() {
+                mpv_set_option(mpv, &fns, name, value)?;
+            }
         }
         let result = unsafe { (fns.mpv_initialize)(mpv) };
         if result != MPV_ERROR_SUCCESS {
@@ -558,6 +610,18 @@ impl LocalPlayer for MpvPlayer {
                 if let Some(dur) = mpv_get_double(handle, fns, "duration") {
                     snap.duration_ms = Some((dur * 1000.0) as u64);
                 }
+                // AUD-03: end of file. `eof-reached` is mpv's own end-of-media
+                // signal and the only reliable one — the last frame being held
+                // (see `keep-open`) means position alone cannot distinguish
+                // "finished" from "stalled". Report the terminal state and pin
+                // the position to the duration so the clock reads the end
+                // rather than stalling wherever the last poll happened to land.
+                if mpv_get_flag(handle, fns, "eof-reached") == Some(true) {
+                    snap.state = PlayerState::Completed;
+                    if let Some(duration) = snap.duration_ms {
+                        snap.position_ms = duration;
+                    }
+                }
             }
         }
         snap
@@ -780,6 +844,47 @@ mod tests {
     fn mpv_player_creation_does_not_panic() {
         let _player = MpvPlayer::new();
         // Creation should never panic even if mpv is unavailable
+    }
+
+    /// AUD-06 regression: the player must ask for audio, explicitly.
+    ///
+    /// The finding was that audio was enabled only by *omission* — mpv's
+    /// default — so no reviewer and no test could see the decision. This pins
+    /// the intent. It is a configuration test: it proves the player requests
+    /// audio output, and says nothing about whether a sound is produced. The
+    /// end-to-end audio check needs a real movie with a real audio track on
+    /// two real devices, and is still outstanding.
+    #[test]
+    fn player_requests_audio_output_explicitly() {
+        let options = super::player_init_options();
+        let get = |name: &str| {
+            options
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| *value)
+        };
+        assert_eq!(
+            get("audio"),
+            Some("auto"),
+            "audio decoding must be requested explicitly, not left to mpv's default"
+        );
+        assert_eq!(
+            get("aid"),
+            Some("auto"),
+            "the audio track must be selected explicitly"
+        );
+        assert_eq!(
+            get("ao"),
+            Some("auto"),
+            "an audio output must be selected explicitly (platform default)"
+        );
+        // AUD-03 depends on this: without `keep-open` the file is unloaded at
+        // EOF and `eof-reached` can never be observed.
+        assert_eq!(
+            get("keep-open"),
+            Some("yes"),
+            "the end-of-file hold is what makes end-of-media detectable (AUD-03)"
+        );
     }
 
     #[cfg(target_os = "macos")]
