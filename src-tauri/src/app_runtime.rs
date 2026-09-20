@@ -5355,9 +5355,15 @@ impl AppRuntime {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .ended();
-        // Playback is over, so strict sync must stop correcting drift against
-        // a position that can no longer advance.
-        state.sync.strict_sync_paused = true;
+        // ADV-05: do NOT set `sync.strict_sync_paused` here.
+        //
+        // It looks like the way to stop drift correction, but it is neither
+        // necessary nor harmless: `drift_correction_for_player` already refuses
+        // to correct unless the room is `Playing`, and this sets `Ended`. What
+        // it *does* do is reach the frontend, where `strict_sync_paused` drives
+        // `BufferingOverlay` — so setting it made the app announce "Paused to
+        // keep you together — <peer> is buffering" at the end of every movie.
+        // Ending the room is the signal; this flag means something else.
         let room_state = state
             .sync_coordinator
             .lock()
@@ -10361,8 +10367,20 @@ mod tests {
             "the host reaching the end of the movie must end playback, not stay PLAYING"
         );
         assert!(
-            state.sync.strict_sync_paused,
-            "an ended room must not keep correcting drift"
+            !state.sync.strict_sync_paused,
+            "ADV-05: an ended room must NOT set strict_sync_paused. That flag is \
+             mirrored to the frontend, where it drives BufferingOverlay — setting \
+             it made the app announce 'Paused to keep you together — <peer> is \
+             buffering' at the end of every movie. This assertion used to require \
+             the opposite, i.e. it codified the bug."
+        );
+        // The property that actually matters — no drift correction once the film
+        // is over — comes from the room state, not from the flag. Assert it
+        // directly so removing the flag cannot silently re-enable correction.
+        assert!(
+            AppRuntime::drift_correction_for_player(&state, 1_000).is_none(),
+            "an ended room must not correct drift (room_state != Playing is what \
+             guarantees this, not strict_sync_paused)"
         );
         // The frontend routes and renders on `sync.room_state`, which is a
         // *copy* taken by `sync_room_snapshot`. Asserting the internal field

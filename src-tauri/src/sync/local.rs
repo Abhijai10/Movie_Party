@@ -298,8 +298,21 @@ impl LocalSyncCoordinator {
     /// longer advance, and the coordinator broadcast carries the same
     /// transition to the guest, so neither side is left believing the film
     /// is still running.
+    ///
+    /// ADV-05: this deliberately does **not** set `paused_by_strict_sync`.
+    ///
+    /// It used to, on the reasoning that an ended room must not keep
+    /// correcting drift. That was both redundant and wrong:
+    ///
+    /// * **redundant** — `drift_correction_for_player` already refuses to
+    ///   correct unless `room_state == RoomState::Playing`, and this sets
+    ///   `Ended`, so the correction is off regardless;
+    /// * **wrong** — that flag is mirrored into the snapshot as
+    ///   `strict_sync_paused`, which the frontend feeds to `BufferingOverlay`.
+    ///   Setting it made the app show **"Paused to keep you together — <peer>
+    ///   is buffering"** at the end of *every* movie, with a buffer meter for a
+    ///   peer that is not buffering at all.
     pub fn ended(&mut self) {
-        self.paused_by_strict_sync = true;
         self.fire_coordinator_cb(RoomState::Ended);
     }
 
