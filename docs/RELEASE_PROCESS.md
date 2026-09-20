@@ -8,7 +8,13 @@ release notes.
 
 ## 1. Cutting a release
 
-`.github/workflows/release.yml` is the only release path. It runs on:
+**There are two publishing paths, and this section used to claim there was one.** That claim was wrong
+and it matters, because the second one can add an asset to an *existing* release — so "frozen" is a
+convention here, not something the workflows enforce.
+
+### `release.yml` — the main path
+
+Runs on:
 
 * a **`v*` tag push**, or
 * **manual dispatch** (`workflow_dispatch`) with a `tag` input — the recovery path when a tag's
@@ -16,8 +22,33 @@ release notes.
   builds the code at the selected ref and attaches the artifacts to the existing release, because
   `tauri-action` appends to an existing release rather than replacing it.
 
-The `resolve-matrix` job decides which legs run (`all` / `macos` / `windows`), so a macOS-only
-rebuild does not pay for the Windows build again. Legs:
+**It is gated on the version check.** The `version-consistency` job (a reusable workflow,
+`.github/workflows/version-consistency.yml`, also called by `ci.yml`) asserts that `package.json`,
+`src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `Cargo.lock` all declare the same version, and
+`publish-tauri` declares `needs: [resolve-matrix, version-consistency]`. **A mismatch fails the job and
+the publish never starts.** This matters because `ci.yml` is `workflow_dispatch`-only: before the check
+was moved onto this path, nothing ran on a tag push at all, so a tag whose declarations disagreed would
+have published a mislabelled release with every gate green.
+
+### `build.yml` — the Windows installer, which also publishes
+
+`build.yml` is **manual-only** (`workflow_dispatch`) and builds just the Windows NSIS installer — the
+single most expensive job in the repo, so it is run deliberately. It is not a separate product: if it is
+dispatched **against a `v*` tag**, its final step attaches the installer to that tag's release
+(`if: startsWith(github.ref, 'refs/tags/v')`, `fail_on_unmatched_files: true`).
+
+Two consequences worth knowing before you dispatch it:
+
+* it **adds an asset to an existing release**, so running it against an old tag changes that release's
+  asset list. Nothing prevents it, and nothing warns you;
+* it **does not run the test suite** and is not gated on the version check — it builds and uploads.
+
+So: treat dispatching either workflow against a `v*` tag as a publishing action, not a build.
+
+### `resolve-matrix`
+
+The `resolve-matrix` job in `release.yml` decides which legs run (`all` / `macos` / `windows`), so a
+macOS-only rebuild does not pay for the Windows build again. Legs:
 
 | Leg | Runner | Target |
 |---|---|---|
@@ -32,9 +63,14 @@ before building:
 * **macOS** — `scripts/build-libmpv-macos.sh` compiles LGPL `ffmpeg`/`libplacebo`/`harfbuzz`/`libass`/
   `libmpv` from pinned sources with `@loader_path`-relative install names, then
   `scripts/stage-libmpv-macos.sh` installs them. Slow (~20–40 min), but license-correct: Homebrew's
-  `mpv` is GPL and cannot be bundled into this proprietary app.
+  `mpv` is GPL and cannot be bundled into this proprietary app. **All six source tarballs are now
+  SHA-256-verified before extraction** (`fetch_verified`), because these sources are compiled into the
+  binary that ships. If a digest check fails, check whether upstream re-tagged or GitHub regenerated the
+  archive before assuming compromise — and never delete the check to make it pass.
 * **Windows** — downloads `mpv-winbuild-cmake`'s self-contained LGPL dev archive and stages
-  `libmpv-2.dll` as `mpv-2.dll`, which is what `mpv_backend.rs` loads at runtime.
+  `libmpv-2.dll` as `mpv-2.dll`, which is what `mpv_backend.rs` loads at runtime. **The archive's
+  SHA-256 is pinned and verified before extraction** (`Get-FileHash`), because pinning the asset *name*
+  does not pin its *bytes*.
 
 A **local** macOS release build needs the runtime staged by hand first
 (`./scripts/stage-libmpv-macos.sh`); otherwise the bundle simply ships without it and plays nothing.
