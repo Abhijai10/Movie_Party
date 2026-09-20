@@ -574,6 +574,53 @@ integrity check — that lives in the Windows *staging* steps of `build.yml`/`re
 which `ci.yml` runs. It will first execute on the next real Windows build, which is exactly why the
 constructs were kept to ones already proven in that same step.
 
+### ADV-09 — NEW BUG (P2, **pre-existing**, supply chain): six unverified source downloads in the macOS libmpv build
+
+Found by **generalising ADV-08 from "is this one fetch verified?" to "where does this repo fetch
+*anything*, and is each fetch verified?"** — a sweep across `scripts/` and `.github/workflows/`, instead
+of reading file by file. That is the reusable method, and it found the same class six more times.
+
+`scripts/build-libmpv-macos.sh` downloaded six source tarballs with **no integrity check at all** — and
+these are compiled into the libmpv that ships inside the macOS installer:
+
+| Source | URL style | verified? |
+|---|---|---|
+| FFmpeg n8.1 | `archive/refs/tags/*` | ❌ |
+| libplacebo v7.360.1 | project archive | ❌ |
+| Vulkan-Headers v1.4.318 | `archive/refs/tags/*` | ❌ |
+| harfbuzz 11.0.0 | release asset | ❌ |
+| libass 0.17.3 | release asset | ❌ |
+| mpv v0.41.0 | `archive/refs/tags/*` | ❌ |
+
+Every URL was pinned to a tag or version; no bytes were. The script's header calls the build
+*"reproducible"*, which was doing a lot of work.
+
+**Worse than ADV-08 in one respect:** three of the six use `archive/refs/tags/*`, which GitHub
+**generates** from the tag's tree. Those bytes are not a published artifact at all — a moved tag, or
+GitHub regenerating archives (which it has done historically), changes them. **Pinning a tag name pins
+nothing.**
+
+**Fixed** with a `fetch_verified` helper that checks SHA-256 **before** extraction and refuses to
+continue on mismatch. All six digests were computed by downloading each URL and hashing it, and each is
+recorded next to its URL.
+
+**Verified EXECUTABLY** — stronger evidence than ADV-08 could get, because this is bash rather than
+PowerShell. The real function was extracted from the script and exercised both ways:
+
+```
+correct digest -> "OK: verified /tmp/fv_ok"                        exit 0
+wrong digest   -> "ERROR: SHA-256 mismatch for /tmp/fv_bad"
+                  "  expected: DEADBEEF..."
+                  "  actual:   937AA5EE...DFFB6"
+                  "Refusing to build from an unverified source tarball."
+                                                                   exit 1
+```
+
+The `actual` it printed matches the independently computed digest, so the check reads the real file
+rather than a cached value. `bash -n` and shellcheck are both clean, and the header documents what to do
+when one fails: check whether upstream re-tagged or GitHub regenerated, recompute deliberately, and
+**do not delete the check to make it pass**.
+
 ### CI verification of this second pass
 
 **Run `35506106235` @ `7aea3e2` → SUCCESS, all jobs** — macOS **571 passed / 0 failed**, Windows
@@ -581,7 +628,7 @@ constructs were kept to ones already proven in that same step.
 workflow again. The counts are unchanged from the previous run because the ADV-05 fix replaced one
 assertion with a stronger one rather than adding a test.
 
-**Net across the passes: seven findings, and every one came from asking a different question than the
+**Net across the passes: eight findings, and every one came from asking a different question than the
 one that produced the fix.**
 
 | Pass | Finding | Question that found it |
@@ -592,6 +639,7 @@ one that produced the fix.**
 | 2 | ADV-06 — a masked failure could ship a degraded libmpv (**pre-existing**) | *Can I validate the workflow I cannot execute?* |
 | 2 | ADV-07 — the fixture generator cannot reproduce the committed fixture | *Is the artifact of record actually reproducible?* |
 | 3 | ADV-08 — the shipped Windows DLL was never integrity-checked (**pre-existing**) | *Have I actually READ every workflow, not just linted it?* |
+| 3 | ADV-09 — six unverified source downloads in the macOS libmpv build (**pre-existing**) | *Where does this repo fetch anything, and is each fetch verified?* |
 | — | AUD-08 — the file is orphaned, not stale | *Can this actually be repaired, or only documented?* |
 
 **CI verification of ADV-06:** run `35507117939` @ `d6d9964` → **SUCCESS, all jobs** (macOS, Windows,
