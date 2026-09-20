@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * Batch 11 — the contracts that are not about a single pure function.
@@ -187,6 +187,25 @@ function rustSourcesIn(dirRelativeToSrc: string): RustSource[] {
   const prefix = `${dirRelativeToSrc}/`;
   return allRustSources().filter(({ path }) => path.startsWith(prefix));
 }
+
+/**
+ * Warm the crate read once, on an explicit budget.
+ *
+ * Measured: the walk costs ~2.5 s idle but **~6.4 s under full-suite load**
+ * (vitest runs files in parallel, and the workspace is on an external volume).
+ * Vitest's default per-test timeout is 5 s, so whichever assertion triggered the
+ * walk first was aborted mid-read and reported as a failure — while the read
+ * itself completed and populated the cache (the next assertions ran in 1–3 ms).
+ * A green single-file run hid it completely.
+ *
+ * So the cost is declared here rather than left to a default that does not
+ * describe it. This is not a timeout raised to conceal a defect: the assertions
+ * are pure scans with no timing semantics, and the failure mode being fixed is
+ * "the machine was busy", not "the answer was wrong".
+ */
+beforeAll(() => {
+  allRustSources();
+}, 30_000);
 
 describe("AUD-08 — the orphaned shared_pipeline.rs is deleted, not repaired", () => {
   /**
