@@ -315,6 +315,17 @@ unbounded without the clamp, so the clamp is doing the work rather than the inpu
 exit 0 / zero warnings · CI-style suite **571 passed / 0 failed** (568 + the 3 new tests) ·
 `m2_integration` 28/28 · all three workflow YAMLs parse and are wired correctly.
 
+**CI run `35505187082` @ `0e736e9` → SUCCESS, all jobs**, and it settles ADV-03 on the real runner:
+
+| Job | Result |
+|---|---|
+| Rust (macos-latest) | ✅ **571 passed / 0 failed / 2 ignored / 8 filtered** (568 + 3) |
+| Rust (windows-latest) | ✅ **562 passed / 0 failed / 2 ignored / 1 filtered** (559 + 3) |
+| **`version-consistency / Version consistency`** | ✅ — the `workflow_call` prefix in the job name is the proof that the **reusable workflow executed through the `uses:` call**, and it printed `OK: all four version declarations agree (0.9.8)` |
+| Frontend / Cargo audit / pnpm audit | ✅ |
+
+Both platforms gained exactly **+3**, which is the three new unit tests.
+
 **Still open, unchanged by this work:** W1–W6 in §5. ADV-01's *symptom* is now bounded rather than
 impossible — an uncalibrated guest free-runs — and only a real two-device run will show whether
 calibration is reliable enough in practice for that trade to be invisible.
