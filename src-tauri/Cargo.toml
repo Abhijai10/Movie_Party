@@ -1,6 +1,6 @@
 [package]
 name = "movie-party"
-version = "0.9.8"
+version = "0.9.9"
 description = "Private two-person desktop cinema app"
 authors = ["Movie Party"]
 edition = "2021"

@@ -1,5 +1,83 @@
 # Movie Party — Release Notes
 
+## 0.9.9 (stabilization)
+
+The stabilization pass between v0.9.8 and the first beta. Everything here is a
+correctness, integrity or honesty fix — there are no new features, and no
+experimental work. The Shared Movie Experience remains gated off exactly as
+before: it is not implemented and cannot be enabled.
+
+### Watching together actually stays synchronized
+- **Guest playback is no longer repeatedly seeked backwards.** The drift
+  projection could be arbitrarily wrong because it ran against a clock that had
+  never been calibrated, and nothing bounded the result. Correction is now gated
+  on calibration and clamped to the media duration, so a projected position can
+  no longer land outside the movie.
+- **A simultaneous readiness hand-off no longer drops a message.** The two
+  participants could report ready at the same instant; each report travels on its
+  own connection and they can arrive out of order, so the later one was rejected
+  as a sequence error, ignored, and never retried — leaving the room waiting
+  forever. A bounded reorder window now accepts a legitimate reorder while still
+  rejecting duplicates and anything stale.
+- **Stale playback state no longer survives leaving a party.** A previously
+  committed playback was never cleared, so it could be reused after returning to
+  the lobby.
+
+### The end of a movie
+- **The end of a movie is now reported, and shown.** A finished film previously
+  left the room in a state indistinguishable from a pause: the app still claimed
+  to be *Syncing*, the control dock still offered a play button, and pressing it
+  tried to start the movie again from the end. The film's final frame now stays
+  on screen with a short *Movie Finished* card and a single **Back to Lobby**
+  action, and playback controls are disabled while the movie is over.
+- **No more "Paused to keep you together" as the credits roll.** That notice —
+  meant for a peer whose buffer had run dry mid-film — was being shown at the end
+  of *every* movie.
+
+### Provider playback
+- **Managed Chrome is now owned, and torn down whole.** A replaced browser
+  process could be terminated together with the one that replaced it, and a
+  crash of Movie Party itself could leave a browser tree running. Teardown is now
+  scoped to the process group on macOS and Linux, and to a kill-on-close job
+  object on Windows.
+- **Failures are reported instead of swallowed** in the local database writes and
+  in provider command handling.
+
+### Security
+- **`rustls` 0.23.45.** This clears the dependency advisory that was red at
+  v0.9.8; `cargo audit` passes.
+- Network and provider-URL hardening, including a real URL parser for the
+  provider destination checks.
+
+### Release integrity
+- **A version mismatch now blocks a release.** The consistency check existed but
+  lived in a workflow that only runs when dispatched by hand, so it never ran on
+  the one path that publishes. It is now a shared workflow that the release job
+  *depends on*, so four declarations that disagree stop the publish rather than
+  being discovered after it.
+- **The shipped Windows runtime is integrity-checked.** The DLL bundled into the
+  Windows installer was previously pinned only by filename — an asset replaced at
+  the same URL would have been staged silently. Its SHA-256 is now verified
+  before extraction.
+- **All six macOS runtime source downloads are verified**, not just named.
+- **A masked failure can no longer ship a degraded macOS runtime.** A shell
+  pattern in the staging step could swallow a failed lookup and produce a build
+  without its OpenGL loader; it now fails loudly instead.
+- **The release body is derived from the tag's own notes.** The body was a
+  hardcoded string that had been reused unchanged across three releases, so each
+  one advertised the previous release's changes. A missing notes section now
+  fails the release rather than publishing stale text.
+
+### Testing
+- **The test suite no longer reports passes it did not earn.** Tests that needed
+  a real media runtime used to return early and report success without running a
+  single assertion; they now fail loudly when the runtime is absent, and CI skips
+  them explicitly and says so.
+- Audio output is now exercised against a real audio-bearing fixture, and
+  end-of-media is verified on a real player rather than only in unit tests.
+- An orphaned source file that no build compiled — and whose only test could
+  therefore never run — has been removed.
+
 ## 0.9.8 (P2 remediation)
 
 The deferred P2 findings from the v0.9.6 audit, re-audited against the v0.9.7
