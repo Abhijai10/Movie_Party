@@ -645,6 +645,116 @@ mod tests {
     #[cfg(unix)]
     use std::process::{Child, Stdio};
 
+    /// A temp Chrome profile directory that removes itself on drop.
+    ///
+    /// Two defects motivated this, both found while running the real-Chrome
+    /// tests in Batch 13:
+    ///
+    /// * `let _ = std::fs::remove_dir_all(root)` **swallowed every failure**, so
+    ///   a profile that could not be removed left no trace in the output.
+    /// * Cleanup only ran on the success path. A test that panicked before its
+    ///   last line — the sandboxed CDP failure did exactly that — never removed
+    ///   anything at all.
+    ///
+    /// Together they let `movie-party-chrome-*` directories accumulate in
+    /// `$TMPDIR` with nothing to say so. The guard also runs on unwind, retries
+    /// briefly (Chrome may still be flushing when `close_gracefully` returns),
+    /// and complains loudly if it still cannot remove the directory. It
+    /// deliberately does **not** fail the test: the product is not what leaked.
+    struct TempProfile {
+        path: PathBuf,
+    }
+
+    impl TempProfile {
+        fn new(prefix: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::now_v7()));
+            fs::create_dir_all(&path).expect("create temp profile dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempProfile {
+        fn drop(&mut self) {
+            for _ in 0..20 {
+                match fs::remove_dir_all(&self.path) {
+                    Ok(()) => return,
+                    // Already gone counts as success.
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                    Err(_) => thread::sleep(Duration::from_millis(50)),
+                }
+            }
+            eprintln!(
+                "warning: could not remove the temp Chrome profile at {} — \
+                 it is still on disk and needs removing by hand",
+                self.path.display()
+            );
+        }
+    }
+
+    /// Proves the guard above cleans up on the path that used to leak.
+    ///
+    /// The old cleanup sat on the last line of each test, so a panic skipped it
+    /// entirely — which is how the `movie-party-chrome-*` directories dated
+    /// 2026-09-19 came to be sitting in `$TMPDIR`. This panics *inside* the
+    /// guard and asserts the directory is gone regardless.
+    ///
+    /// This is a real control, not decoration: delete the `Drop` impl and this
+    /// test goes red.
+    #[test]
+    fn temp_profile_is_removed_even_when_the_test_panics() {
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let recorder = std::sync::Arc::clone(&observed);
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let profile = TempProfile::new("movie-party-chrome-panic");
+            *recorder.lock().expect("recorder") = Some(profile.path().to_path_buf());
+            panic!("simulated mid-test failure");
+        }));
+
+        assert!(outcome.is_err(), "the simulated failure must propagate");
+
+        let path = observed
+            .lock()
+            .expect("recorder")
+            .clone()
+            .expect("the guard must have been constructed");
+        assert!(
+            !path.exists(),
+            "a panicking test left its temp profile behind at {}",
+            path.display()
+        );
+    }
+
+    /// The two `real_chrome_*` tests open a **visible** Chrome window on
+    /// whatever desktop runs them.
+    ///
+    /// That is not an accident of the test: [`ChromeLaunchPlan::args`] has no
+    /// `--headless`, because the product needs the user to *see* the provider
+    /// page. The tests therefore cannot be made quiet without changing the
+    /// product, and must not be.
+    ///
+    /// They are `#[ignore]`d for that reason — but `--ignored` is one flag away,
+    /// and running them without meaning to pops real browser windows onto the
+    /// owner's screen and then closes them, which reads exactly like Chrome
+    /// crashing. So they require an explicit opt-in, and **fail loudly** without
+    /// it rather than quietly doing nothing — the AUD-07 rule: a test that was
+    /// asked for must produce a verdict, not a shrug.
+    fn require_visible_chrome_consent() {
+        if std::env::var_os("MOVIE_PARTY_ALLOW_VISIBLE_CHROME").is_none() {
+            panic!(
+                "refusing to run: this test opens a REAL, VISIBLE Chrome window on the \
+                 current desktop (the launch plan deliberately has no --headless, and \
+                 must not gain one — the provider page has to be visible to the user). \
+                 Set MOVIE_PARTY_ALLOW_VISIBLE_CHROME=1 to confirm you want that. \
+                 CI never runs this test: it is #[ignore]d and CI does not pass --ignored."
+            );
+        }
+    }
+
     /// Spawns a child with the same process-group isolation production applies,
     /// so these tests exercise the real group rather than one that does not
     /// exist.
@@ -760,17 +870,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn launch_timeout_kills_and_reaps_the_whole_tree() {
-        let root = std::env::temp_dir().join(format!(
-            "movie-party-chrome-timeout-{}",
-            uuid::Uuid::now_v7()
-        ));
-        std::fs::create_dir_all(&root).expect("profile dir");
-        let pid_file = root.join("pids");
+        let root = TempProfile::new("movie-party-chrome-timeout");
+        let pid_file = root.path().join("pids");
 
         // Records its own pid and its child's, then stays alive without ever
         // opening a CDP endpoint.
         let executable = fake_chrome(
-            &root,
+            root.path(),
             &format!(
                 "echo $$ > {pids}\nsleep 300 &\necho $! >> {pids}\nwait",
                 pids = pid_file.display()
@@ -778,7 +884,7 @@ mod tests {
         );
         let plan = build_launch_plan(
             executable,
-            &root,
+            root.path(),
             "youtube",
             allocate_local_cdp_port().expect("cdp port"),
             "about:blank",
@@ -801,7 +907,6 @@ mod tests {
                 "pid {pid} survived a failed launch — the tree leaked (MP-20)"
             );
         }
-        let _ = std::fs::remove_dir_all(root);
     }
 
     /// MP-20: when the browser dies during launch, the real cause must surface
@@ -810,15 +915,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn launch_child_exit_is_reaped_not_leaked() {
-        let root =
-            std::env::temp_dir().join(format!("movie-party-chrome-exit-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir_all(&root).expect("profile dir");
-        let pid_file = root.join("pids");
+        let root = TempProfile::new("movie-party-chrome-exit");
+        let pid_file = root.path().join("pids");
 
         // Records itself and a child, then exits on its own. The child outlives
         // it — exactly the orphan a single-PID teardown leaves behind.
         let executable = fake_chrome(
-            &root,
+            root.path(),
             &format!(
                 "echo $$ > {pids}\nsleep 300 &\necho $! >> {pids}\nexit 3",
                 pids = pid_file.display()
@@ -826,7 +929,7 @@ mod tests {
         );
         let plan = build_launch_plan(
             executable,
-            &root,
+            root.path(),
             "youtube",
             allocate_local_cdp_port().expect("cdp port"),
             "about:blank",
@@ -852,7 +955,6 @@ mod tests {
                 "pid {pid} survived a launch that failed because the browser exited (MP-20)"
             );
         }
-        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Reads the pids a fake Chrome recorded, tolerating a write that has not
@@ -982,10 +1084,10 @@ mod tests {
     #[test]
     #[ignore = "launches real Chrome and opens a localhost CDP session"]
     fn real_chrome_launches_and_evaluates_cdp() {
+        require_visible_chrome_consent();
         let executable = find_chrome(&default_chrome_candidates()).expect("Chrome installed");
-        let root =
-            std::env::temp_dir().join(format!("movie-party-chrome-{}", uuid::Uuid::now_v7()));
-        let plan = build_launch_plan(executable, &root, "youtube", 9333, "about:blank")
+        let root = TempProfile::new("movie-party-chrome");
+        let plan = build_launch_plan(executable, root.path(), "youtube", 9333, "about:blank")
             .expect("launch plan");
         let session = launch_managed_chrome(plan).expect("launch Chrome");
         let targets = session.targets().expect("targets");
@@ -1002,18 +1104,17 @@ mod tests {
         assert_eq!(title["result"]["value"].as_str(), Some("Movie Party CDP"));
 
         session.close().expect("close");
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     #[ignore = "launches real Chrome and uses the live YouTube page"]
     fn real_youtube_provider_sync_uses_chrome_cdp() {
+        require_visible_chrome_consent();
         let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
         assert!(is_youtube_url(url));
         let executable = find_chrome(&default_chrome_candidates()).expect("Chrome installed");
-        let root =
-            std::env::temp_dir().join(format!("movie-party-youtube-{}", uuid::Uuid::now_v7()));
-        let plan = build_launch_plan(executable, &root, "youtube", 9336, "about:blank")
+        let root = TempProfile::new("movie-party-youtube");
+        let plan = build_launch_plan(executable, root.path(), "youtube", 9336, "about:blank")
             .expect("launch plan");
         let session = launch_managed_chrome(plan).expect("launch Chrome");
         let mut page = session.connect_page().expect("page websocket");
@@ -1025,7 +1126,6 @@ mod tests {
         let detected = detected["result"]["value"].as_bool().unwrap_or(false);
         if !detected {
             session.close().expect("close");
-            let _ = std::fs::remove_dir_all(root);
             // AUD-07: this used to `return` here, and libtest reports an early
             // return as `ok` — so an explicitly-requested run could report
             // success without having verified anything at all. A test that was
@@ -1075,6 +1175,5 @@ mod tests {
         assert!(buffer.get("result").is_some());
 
         session.close().expect("close");
-        let _ = std::fs::remove_dir_all(root);
     }
 }
