@@ -9,7 +9,7 @@
 
 | # | Field | Value |
 |---|---|---|
-| 1 | **Exact 0.9.9 candidate SHA** | `0c2b5e86d30638be3483f853cfe6ede79a917dd1` (branch HEAD) |
+| 1 | **Exact 0.9.9 candidate SHA** | **`0c2b5e86d30638be3483f853cfe6ede79a917dd1`** — the source commit CI validated and the commit to tag. (Branch tip is now a later docs-only commit; see §1 for why that does not change the candidate.) |
 | 2 | **Exact version declarations** | all four at `0.9.9` — see §2 |
 | 3 | **CI run ID** | `35526767715` |
 | 4 | **Every CI job result** | 6/6 green — see §3 |
