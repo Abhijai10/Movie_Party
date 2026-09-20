@@ -5,8 +5,8 @@
 apply the smallest safe fix, add a regression test, add a negative control, then run the gates.
 **Date:** 2026-09-20
 **Baseline HEAD at start:** `e19c2eb` (branch `stabilization/v0.9.9-rc1`)
-**Verification target:** **`1424116`** — the full code + test state. (Earlier commits in the batch are
-listed in §9.) *Local only — not pushed.*
+**Verification target:** **`7f2d59a`** — the full code + test state, **CI-verified green on both
+platforms** (run `35502292851`). Earlier commits in the batch are listed in §9.
 
 ---
 
@@ -471,6 +471,36 @@ is *which value the drift comparison reads*, which is precisely the defect.
 - The AUD-01 test gained an explicit assertion that the loop **must not** overwrite
   `sync.position_ms` with a projection — so this specific over-reach cannot come back silently.
 
+### Re-run: green on both platforms
+
+**CI run `35502292851` @ `7f2d59a` → SUCCESS, all six jobs.**
+
+| Job | Result |
+|---|---|
+| Frontend | ✅ |
+| **Rust (macos-latest)** | ✅ **568 passed / 0 failed / 2 ignored / 8 filtered** across 17 targets |
+| **Rust (windows-latest)** | ✅ **559 passed / 0 failed / 2 ignored / 1 filtered** across 17 targets |
+| Version consistency | ✅ — first execution; printed `OK: all four version declarations agree (0.9.8)` |
+| Cargo audit / pnpm audit | ✅ |
+
+Both platforms gained exactly **+6** over the Batch 7A baseline (562 → 568, 553 → 559), which is the
+six new unit tests. The macOS-only integration tests correctly report 0 tests on Windows.
+
+### A flaky test of my own, found by the full local run
+
+The full local suite then caught `production_player_leaves_completed_after_seeking_back` failing —
+**my own new test**, and the same *class* of mistake as the CI race: its wait predicate required only
+`state != Completed`, and mpv clears `eof-reached` **before** `time-pos` has moved. So the wait could
+return while the position was still pinned at the duration, and the following
+`position_ms < 1_500` assertion failed.
+
+Fixed by requiring **both** conditions in the predicate. Verified stable: **3 consecutive runs, 3/3
+green.**
+
+Worth stating plainly: I introduced two timing-dependent tests in this batch — one broke CI, one
+broke my local suite — and both were *predicates satisfied by a transient state*. That is the single
+most common way to write a test that passes by luck.
+
 ### The lesson, recorded
 
 A fix that changes a **field's meaning across a whole subsystem** is a bigger change than the defect
@@ -484,6 +514,7 @@ and the audit's wording was already pointing at it.
 
 | Gate | Result |
 |---|---|
+| **CI run `35502292851` @ `7f2d59a`** | **✅ SUCCESS, all six jobs — macOS 568/0, Windows 559/0, Version consistency ✅** |
 | `cargo fmt --check` | **clean** |
 | `cargo clippy --all-targets --all-features -- -D warnings` | **exit 0, zero warnings** |
 | `cargo test` (all targets, CI's skip list) | **568 passed / 0 failed / 2 ignored / 8 filtered** across 17 targets |
@@ -586,38 +617,30 @@ updater — a documentation requirement, not a defect), AUD-14 (the `real_*` tar
 
 ## 7. Unverified Windows / platform items
 
-**This is the largest remaining gap, and it is mine, not the audit's.**
+**The Windows gap is closed. What remains is real-hardware behaviour, not platform coverage.**
 
-**`1424116` has not been through CI.** It is a local commit on `stabilization/v0.9.9-rc1`; the remote
-tip is still `a44542a`, which is the SHA CI actually verified. So:
+`7f2d59a` **has been through CI and is green on both platforms** (run `35502292851`) — see §4d, which
+also records that the *first* push went red on macOS and why. The remote tip is now `7f2d59a`, not
+`a44542a`.
 
 | Item | Status |
 |---|---|
-| Rust on macOS, **without** a runtime (CI's configuration) | **Locally verified** — 568 passed / 0 failed |
-| Rust on macOS, **with** the real libmpv runtime | **Locally verified** — the 8 libmpv-dependent tests execute (see below) |
+| Rust on macOS, **without** a runtime (CI's configuration) | **CI-verified** — 568 passed / 0 failed |
+| Rust on Windows | **CI-verified** — 559 passed / 0 failed |
+| Windows clippy (`-D warnings`) | **CI-verified** — the step passed |
+| Rust on macOS, **with** the real libmpv runtime | **Locally verified** — the 8 libmpv-dependent tests execute |
 | AUD-03 end-of-media on real libmpv | **Verified** (§4b) — real decode, real EOF, `Completed` |
 | AUD-06 audio decode + AO init on real libmpv | **Verified** (§4c) — but headless `ao=null`, so no audible output |
-| Rust on Windows | **NOT verified.** No CI run against `1424116`. |
-| Windows clippy (`-D warnings`) | **NOT verified.** |
-| Frontend | Locally verified (287 tests, lint/tsc/build clean) |
-| `version-consistency` job | Script verified under `bash` (as CI runs it) against the real files; the job itself has never executed |
+| Frontend | CI-verified (287 tests) + locally (lint/tsc/build clean) |
+| `version-consistency` job | **CI-verified** — executed and printed all four declarations agreeing |
 
-This matters concretely: Batch 7A's failure was a Windows-only clippy error that macOS could not see,
-and it happened *before* the test step, so Windows ran no tests at all. I cannot cross-compile to
-`x86_64-pc-windows-msvc` here (it dies in `ring`/`aws-lc-sys` build scripts with no Windows C
-toolchain). Reviewing my changes, none is platform-conditional — `player_init_options` and
-`PlayerState::Completed` are neutral, `mpv_get_flag` mirrors the existing `mpv_get_double` FFI pattern,
-and the new tests use no platform-specific API — but **that is a code-reading argument, not a
-verification.** Windows must be re-run before this can be called verified.
-
-**One Windows-specific risk my own change introduces, stated plainly:** the new
-`tests/real_eof_detection_test.rs` is `#![cfg(target_os = "macos")]`, so on Windows it compiles to
-**zero tests** — which is the correct behaviour and matches the other `real_*` targets. But it means
-the Windows job will not exercise end-of-media detection at all. Windows EOF behaviour rests on
-`mpv_get_flag("eof-reached")` and `keep-open`, neither of which I have observed on that platform.
-
-**Nothing was pushed.** Pushing the candidate branch is what would let CI run, and that is an
-externally visible action, so it waits for your approval.
+**One Windows-specific limitation that remains, stated plainly:** the new
+`tests/real_eof_detection_test.rs` and `real_audio_test.rs` are `#![cfg(target_os = "macos")]`, so on
+Windows they compile to **zero tests** — correct behaviour, matching the other `real_*` targets, but it
+means the Windows job does not exercise end-of-media detection or audio at all. Windows EOF behaviour
+rests on `mpv_get_flag("eof-reached")` and `keep-open`, and Windows audio on `ao=auto` selecting
+WASAPI — none of which I have observed on that platform. Green Windows CI means the code compiles and
+its platform-neutral suites pass; it is not evidence about Windows playback.
 
 ---
 
@@ -640,18 +663,20 @@ player, not the party.
 
 ## 9. Commit SHA
 
-| | SHA | Pushed? |
-|---|---|---|
-| Baseline HEAD (audit target) | `e19c2eb` | yes (candidate branch) |
-| This batch — remediation code | `f280b6c` | no — local only |
-| This batch — end-of-media runtime test + CI skips | `f2a9b2f` | no — local only |
-| This batch — audio fixture, generator flag, audio test | `1424116` | no — local only |
-| This batch — docs (this report, + amendments) | `3ac98a9` onward | no — local only |
-| Last CI-verified SHA | `a44542a` | yes — still the remote tip |
+| | SHA | Pushed? | CI? |
+|---|---|---|---|
+| Baseline HEAD (audit target) | `e19c2eb` | yes | — |
+| This batch — remediation code | `f280b6c` | yes | ✅ (as part of `117e797`) |
+| This batch — end-of-media runtime test + CI skips | `f2a9b2f` | yes | ✅ |
+| This batch — audio fixture, generator flag, audio test | `1424116` | yes | ✅ |
+| This batch — docs (report, + amendments) | `33e0e4a`, `117e797` | yes | ❌ `117e797` **failed on macOS** (§4d) |
+| **This batch — narrowed AUD-01 + report** | **`7f2d59a`** | **yes** | **✅ both platforms** |
+| Previously CI-verified (Batch 7A) | `a44542a` | yes | ✅ |
 
-**`1424116` is the SHA that matters for verification** — the complete code, test and fixture state.
-`f280b6c` is the remediation itself (9 files, +1635 / −57, including the audit report); the commits
-after it add tests, fixtures and documentation and change no production behaviour.
+**`7f2d59a` is the SHA that matters for verification** — the complete code, test and fixture state,
+green on macOS and Windows. Note the honest path: the first push (`117e797`) failed on macOS, which is
+why the SHA moved. `f280b6c` is the remediation itself (9 files, +1635 / −57, including the audit
+report); the commits after it add tests, fixtures, documentation, and the AUD-01 narrowing.
 
 Unchanged and confirmed after the commit: `main` = `2d5c833` (local) / `bb22577` (remote), all five
 tags, `v0.9.8` → `bb22577`, and no release created or modified.
@@ -660,21 +685,30 @@ tags, `v0.9.8` → `bb22577`, and no release created or modified.
 
 ## 10. Is the code ready for the final regression audit?
 
-**Yes — with one condition that is not mine to meet.**
+**Yes. The condition that was outstanding is now met.**
 
 No **P0 or P1 remains as an open code defect.** AUD-01 (P0), AUD-02 and AUD-03 (P1) are fixed and
-regression-tested; AUD-01's fix was proven non-vacuous by reproducing the original defect on demand,
-and AUD-03 is verified end-to-end on real libmpv. So the "STOP before release preparation if any
-P0/P1 remains" condition is not triggered.
+regression-tested; AUD-01's fix was proven non-vacuous by reproducing the original defect on demand
+(and re-proven after it was narrowed); AUD-03 and AUD-06 are verified against real libmpv.
 
-The condition is this: **`1424116` is not CI-verified, and Windows has never run it.** Given that
-Batch 7A's one and only failure was a Windows-only clippy error invisible on macOS, calling this
-"ready for final regression audit" while Windows is unrun would repeat the exact mistake the audit
-was written to stop. The honest sequence is:
+**`7f2d59a` is CI-verified green on both platforms** — macOS 568 passed / 0 failed, Windows 559
+passed / 0 failed, plus the new version-consistency job. The path there was not clean: the first push
+(`117e797`) went **red on macOS** because my AUD-01 fix was too broad, and §4d records the failure, the
+diagnosis, the narrowing and the re-verification. Windows passed on the first push and every push
+since.
 
-1. **Approve the push** of `stabilization/v0.9.9-rc1` → CI runs on `1424116` (both platforms).
-2. If Windows is green, the final regression audit can begin against that SHA.
-3. M1–M3 (two real devices, audio, a long session) remain the real gate on the product promise.
+So the "STOP before release preparation if any P0/P1 remains" condition is not triggered, and the
+Windows-coverage gap that made this unanswerable earlier is closed.
+
+**What is still not closed is not a code question:**
+
+1. **M1–M3 remain the real gate** — two real devices, audible sound, and a multi-hour session. No
+   automated gate in this repository has ever proven two devices staying in sync, and none of my
+   changes alter that.
+2. **Windows playback behaviour is unobserved**, not merely untested: the new real-hardware tests are
+   macOS-gated, so Windows CI proves compilation and the platform-neutral suites, nothing more.
+3. **AUD-08 is unremediated** by your instruction (Shared work is out of scope), and **AUD-15 is
+   flagged but unchanged**.
 
 **What changed since the first draft of this report.** Two findings moved because two assumptions of
 mine turned out to be wrong — both in the direction of "more verifiable than I claimed":

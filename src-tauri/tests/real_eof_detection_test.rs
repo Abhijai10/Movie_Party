@@ -231,8 +231,12 @@ fn production_player_leaves_completed_after_seeking_back() {
 
     player.seek(500).expect("seek back to 500 ms");
 
+    // The predicate must require BOTH conditions. Waiting only for the state to
+    // clear is a race: mpv clears `eof-reached` before `time-pos` has moved, so
+    // the wait can return while the position is still pinned at the duration —
+    // which is exactly how this test first failed.
     let after = wait_for(&player, Duration::from_secs(10), |snap| {
-        snap.state != PlayerState::Completed
+        snap.state != PlayerState::Completed && snap.position_ms < 1_500
     });
 
     assert_ne!(
