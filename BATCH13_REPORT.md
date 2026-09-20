@@ -54,6 +54,18 @@ From the desktop that is indistinguishable from Chrome crashing.
    anyway. **Proven as a real control:** disabling the `Drop` impl turns it red
    (`FAILED. 0 passed; 1 failed`, exit 101, naming the leaked path). Restored, hash-verified.
 
+**The fix holds on the failure path, not only the happy path.** Running the *failing* parallel command
+(`cargo test --all-features`, which panics in `launch_timeout_kills_and_reaps_the_whole_tree`) with a
+before/after set-difference gave **6 temp dirs before, 6 after, zero new**. That also identifies the
+origin of the two `movie-party-chrome-timeout-*` directories dated **00:33** — they came from the
+**pristine control run** of §6.1, where the old code's last-line `remove_dir_all` was skipped by the
+panic. The signature of that failure mode is that the directory holds `fake-chrome` and `youtube/` but
+**no `pids`** file: the fake browser lost its 800 ms race and never wrote one.
+
+Six `movie-party-chrome-*` directories remain in `$TMPDIR` (three dated 2026-09-19, one 21:50, two
+00:33). **All are historical test debris; none is new leakage.** They were left in place and reported
+rather than deleted.
+
 **Proof it is test-only:** every diff hunk carries the `mod tests {` context and the lowest changed
 line is **647**, while `mod tests` begins at **638**. The launch plan, teardown and signal handling are
 untouched.
