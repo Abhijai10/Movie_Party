@@ -45,10 +45,21 @@ jobs:
           # NSIS bundle picks it up as a Tauri resource.
           $mpvRelease = "20260830"
           $mpvAsset = "mpv-dev-x86_64-20260830-git-e8673660ab.7z"
+          # SHA-256 of that exact asset, as published by GitHub for this
+          # release. Verified below before anything is extracted: the DLL this
+          # stages is bundled into the Windows installer and shipped, and pinning
+          # the *name* does not pin the *bytes* -- an asset replaced at the same
+          # URL would otherwise be staged silently. (Found by the
+          # post-remediation adversarial audit, ADV-08.)
+          $mpvSha256 = "7310560BD25CC760282E8754A389302629C6E748261030C3870E1CB2F80CDC48"
           $mpvUrl = "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/$mpvRelease/$mpvAsset"
           $archive = Join-Path $env:RUNNER_TEMP "mpv-dev.7z"
           $extract = Join-Path $env:RUNNER_TEMP "mpv-dev"
           Invoke-WebRequest -Uri $mpvUrl -OutFile $archive
+          $actualHash = (Get-FileHash -Path $archive -Algorithm SHA256).Hash
+          if ($actualHash -ne $mpvSha256) {
+            throw "libmpv archive failed its integrity check: expected $mpvSha256 but got $actualHash. Refusing to stage an unverified DLL."
+          }
           New-Item -ItemType Directory -Force -Path $extract | Out-Null
           & "C:\Program Files\7-Zip\7z.exe" x $archive "-o$extract" -y | Out-Null
           $dll = Get-ChildItem -Path $extract -Recurse -Filter "libmpv-2.dll" | Select-Object -First 1
