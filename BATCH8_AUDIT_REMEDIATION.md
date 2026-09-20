@@ -44,11 +44,12 @@ v0.9.8 GitHub Release is not modified, and no `v0.9.9` was created.
 | **AUD-08** | P2 | Yes — and **worse than reported** | No | **NOT REMEDIATED** — deliberately | Staleness recorded loudly; deletion deferred to owner | none |
 | **AUD-09** | P2 | Yes | No | **FIXED** | `version-consistency` CI job | the job itself |
 | AUD-10 | P3 | Yes | No | Unchanged — out of scope | — | — |
-| AUD-11 | P3 | Yes | No | Unchanged — out of scope | — | — |
+| AUD-11 | P3 | Yes | No | Unchanged — and my fix does **not** alter it (see §6) | — | — |
 | AUD-12 | P3 | Yes | No | Unchanged — out of scope | — | — |
 | AUD-13 | INFO | Yes | No | Unchanged — documentation matter | — | — |
 | AUD-14 | INFO | Yes | No | Unchanged — deliberate and documented | — | — |
 | **AUD-15** | **P3 (new)** | Yes | No | **NEW — found while fixing AUD-01**; not changed | recommended, not applied — see §6 | — |
+| **AUD-16** | **P3 (new)** | Yes | No | **NEW — found auditing my own AUD-03 change**; not changed | no UI affordance for "the film finished" — see §6 | — |
 
 ---
 
@@ -609,6 +610,43 @@ near-certain). It is also not a *new* failure mode: an uncalibrated offset alrea
 deadline. The one-line guard, if you want it, is to return `None` from `drift_correction_for_player`
 when `!state.clock_calibrated` — which would also make the dead flag meaningful. Say the word and I
 will apply it with a test.
+
+### AUD-16 — NEW, found by auditing my own AUD-03 change (P3, not changed)
+
+Making end-of-media truthful created a state the UI does not surface. At EOF the snapshot is now
+*correct* — room `ENDED`, player `COMPLETED` — but:
+
+- `screen` stays `CINEMA`, so the user still sees the cinema with no "the film finished" message;
+- the sync indicator falls into its "not playing" branch and reads **"Syncing"**, which is misleading
+  rather than wrong;
+- the play/pause control offers **resume**, which calls `host_play` and re-commits play from the end
+  position — so pressing it lands straight back in `Ended`;
+- nothing anywhere says the film is over.
+
+**Not a regression.** Before, the room sat in `PLAYING` forever with a frozen playhead and no
+indication either — this is strictly more truthful. It is the next step AUD-03 *implies* but the audit
+did not ask for (it asked for detection and a regression test, both delivered). Surfacing it is a
+product decision — an "Ended" overlay with "Watch again" / "Back to lobby" — so I did not invent one.
+
+**Checks that came back clean while auditing this** (worth recording, since they are negative evidence):
+
+- The frontend types player state as a plain **`string`** (`backend/appRuntime.ts:185`), not a closed
+  union, so `"COMPLETED"` cannot break the type contract or fall through an exhaustive switch.
+- `COMPLETED` is not classified as a failure or as "preparing": `playerHasFailed` matches only
+  `PLAYER_ERROR`, and `playerIsPreparing` covers `PLAYER_ERROR` / `UNAVAILABLE` / `STOPPED` only.
+- Every frontend room-state test is an `===` comparison against `PLAYING` or `RECONNECTING`. There is
+  no closed set of room states to fall through, so `ENDED` renders without breaking anything.
+
+### AUD-11 — status unchanged by this batch (P3)
+
+The audit called it "symptomatic of the missing position channel (AUD-02)". Re-checked after the fix:
+the guard at `app_runtime.rs:4504` is untouched and its behaviour is **unchanged**, because the narrowed
+AUD-01 fix deliberately leaves `sync.position_ms` with its prior commit-derived semantics. It remains a
+fragile heuristic — a legitimate position of exactly 0 mid-session still re-initialises from the
+coordinator — but benign, since the next commit overwrites it.
+
+Worth noting: the *original*, over-broad AUD-01 fix would have made this guard interact with a
+wall-clock-advancing field. That is a third independent reason the narrowing was correct.
 
 ### AUD-10..AUD-14 — unchanged (P3/INFO)
 Untouched, as instructed. AUD-10 (five never-invoked commands), AUD-11 (`position_ms == 0` heuristic),
