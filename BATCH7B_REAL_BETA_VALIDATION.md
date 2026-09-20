@@ -29,14 +29,35 @@ Pick **one** of the two options below and record which one was used on **both** 
 
 | Option | Build | SHA | Notes |
 |---|---|---|---|
-| **A (recommended)** | Local build from `stabilization/v0.9.9-rc1` | `2d5c83391dec43342bb4346ae19c542a6e672385` | Contains Batches 1–6. Requires toolchain + libmpv staging on macOS. |
-| **B (fallback)** | GitHub Release **v0.9.8** installer | `bb225778434e3f07923e03e85d7d7cc1db79146c` | **Does NOT contain the Batch 1 sequence-reorder fix.** A run on Option B validates v0.9.8, not the stabilized code, and must be labelled as such in the sign-off. |
+| **A (recommended)** | Local build from `stabilization/v0.9.9-rc1` | `260cb06d2914b5133e1562712d661f2a0054209e` | The **v0.9.9 candidate**: Batches 1–11 plus the 0.9.9 version bump (all four declarations read `0.9.9`). Requires toolchain + libmpv staging on macOS. |
+| **B (fallback)** | GitHub Release **v0.9.8** installer | `bb225778434e3f07923e03e85d7d7cc1db79146c` | **Does NOT contain the Batch 1 sequence-reorder fix, nor anything from Batches 2–11.** A run on Option B validates v0.9.8, not the 0.9.9 candidate, and must be labelled as such in the sign-off. |
+
+### Confirming you are on the candidate
+
+`260cb06` is the commit that makes the version `0.9.9`; it is the code this beta is
+about. Documentation commits may follow it on the branch and change no application
+code, so confirm your checkout is code-identical to the candidate **before** testing:
+
+```bash
+git rev-parse HEAD                                   # what you actually built
+git diff --stat 260cb06..HEAD -- src/ src-tauri/     # must print nothing
+```
+
+If that diff prints anything, you are **not** on the candidate. Record the SHA you
+really built and report the discrepancy rather than proceeding.
+
+**The application cannot display its own version.** Settings → *App version* shows the
+app **name** — `app_metadata` returns only `app_name`/`protocol_major`/`protocol_minor`,
+and the view binds the name into a row labelled "App version" (`SettingsView.tsx`).
+There is no version field to read. So per-device provenance **cannot** be taken from the
+UI; record it from the build you installed, using the commands above.
 
 **Record before starting:**
 
 ```
 Device A (host) : OS + version ..............  Build option (A/B): ....  SHA: ............
 Device B (guest): OS + version ..............  Build option (A/B): ....  SHA: ............
+Candidate both devices must match: 260cb06d2914b5133e1562712d661f2a0054209e
 ```
 
 Both devices **must** run the same SHA. A mixed-version run is not a valid beta result.
