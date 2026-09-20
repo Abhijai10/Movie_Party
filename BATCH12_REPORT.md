@@ -270,7 +270,7 @@ from the candidate commit to the shipped installer payload.
 (zlib-compressed), so `grep -aF "0.9.9"` inside it returns 0. The version is carried by the filename
 and by the contained app's `Info.plist`.
 
-### Windows — cannot be built on this host
+### Windows — not buildable on this host, built via CI instead
 
 The Windows NSIS installer requires a Windows host; it **cannot** be produced on macOS. It was
 obtained instead through the real workflow path, **without creating a tag or a release**:
