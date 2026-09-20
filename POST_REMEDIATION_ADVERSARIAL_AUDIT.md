@@ -331,3 +331,126 @@ impossible — an uncalibrated guest free-runs — and only a real two-device ru
 calibration is reliable enough in practice for that trade to be invisible.
 
 ---
+
+## 8. Second pass — completing the remaining audit items
+
+*Added while working through the items this audit left untouched. AUD-08 was explicitly deferred by the
+owner; everything else is resolved or explained below.*
+
+### ADV-05 — NEW BUG (P2), a user-visible regression from my own AUD-03 fix. FIXED
+
+Found by asking **"who else reads this flag?"** rather than by re-reading the diff.
+
+`LocalSyncCoordinator::ended()` set `paused_by_strict_sync = true`, and `apply_end_of_media` set
+`state.sync.strict_sync_paused = true` directly. That flag is mirrored into the snapshot, and the
+frontend feeds it straight to `BufferingOverlay`, which renders whenever it is true:
+
+```
+<h1>Paused to keep you together</h1>
+<p>{peer} is buffering</p>   + a buffer meter
+```
+
+So **at the end of every movie** the app announced that the peer was buffering and drew a progress
+meter for a download that was not happening. `BufferingOverlay` does not consult the room state, so the
+ended room did not suppress it.
+
+Both writes are removed — for the same reason. The reasoning behind them was "an ended room must not
+keep correcting drift", but that is **redundant** (`drift_correction_for_player` already refuses unless
+`room_state == Playing`, and `ended()` sets `Ended`) and **wrong** (the flag means "paused by strict
+sync", and the UI acts on that meaning).
+
+**The AUD-03 test had codified the bug** — it asserted `strict_sync_paused` was `true` after
+end-of-media. It now asserts the opposite, and asserts the property that actually matters directly
+(`drift_correction_for_player` is `None` at `Ended`), so removing the flag cannot silently re-enable
+correction. Mutation control with **both** mechanisms restored: the test goes red with the specific
+message, then both files were reverted and verified by hash.
+
+The two remaining setters are legitimate and unchanged: `buffer_low` (room becomes `Buffering`) and
+`peer_disconnected` (room becomes `Reconnecting`) — both cases where the overlay is correct.
+
+### AUD-13 — ALREADY SATISFIED, better than the audit assumed
+
+The audit said the unsigned/un-notarised reality "must be in the release notes". It already is, and on
+the surface users actually read: `docs/RELEASE_BODY_FOOTER.md` carries the downloads table, the fact
+that the build is **ad-hoc signed and NOT notarized**, the exact Gatekeeper wording for each macOS
+version ("damaged and can't be opened", "cannot be opened because Apple cannot check it", "could not
+verify … is free of malware"), the Control-click → Open walkthrough, the `xattr -d
+com.apple.quarantine` alternative, an explicit "do **not** disable Gatekeeper system-wide", and a
+statement that there is **no update mechanism by design** and that `.app.tar.gz` is not an updater
+artifact.
+
+`release.yml` appends it to every release body and **fails loudly** if the file is missing. No work
+needed — recorded because the audit's INFO entry implied otherwise.
+
+### AUD-10 — VERIFIED (dead surface confirmed), deliberately not removed
+
+The five commands are registered in `generate_handler!` and have **zero** frontend references; the live
+API is `create_and_broadcast_schedule` / `cancel_and_broadcast_schedule` / `guest_accept_schedule` /
+`list_schedules`. (The audit's list was slightly off: it named `update_and_broadcast_schedule` as dead
+while implying the `*_and_broadcast` family was live — the cross-check above is authoritative.)
+
+**Not removed.** The audit classified this P3 as "dead surface, **not a defect**", and deleting public
+commands has no user-visible benefit and non-zero risk. The audit's real concern — "two parallel
+schedule APIs can drift" — is better met by recording which is authoritative, which is what this entry
+does.
+
+### AUD-11 — VERIFIED BENIGN, unchanged
+
+The `position_ms == 0` guard is untouched and its behaviour is unchanged, because the narrowed AUD-01
+fix deliberately leaves `sync.position_ms` with its prior commit-derived semantics. A legitimate
+mid-session position of exactly 0 still re-initialises from the coordinator, but the next commit
+overwrites it. Benign; the fragility is real and documented.
+
+### AUD-12 — DELIBERATE, not changed
+
+`buffered_ahead_ms()` returning `None` for mpv is not a defect: the event loop does
+`snap.buffered_ahead_ms.unwrap_or(cache_headroom_ms)`, so the app's own sparse-cache accounting is used
+instead of mpv's demuxer cache. Implementing mpv's would *replace* a working signal rather than fix a
+broken one, and it changes what feeds `report_buffer_status` → strict sync — behaviour that can only be
+validated with two real devices. **Changing it without that validation would be trading a known-good
+signal for an unvalidated one.** Left as the audit classified it: deliberate.
+
+### AUD-14 — DELIBERATE, with a concrete proposal rather than silence
+
+CI's `real_*` targets execute zero tests because `mpv_runtime/*` is gitignored and CI cannot stage it.
+The mechanism to run them already exists — `ci.yml` has a `libmpv runtime state` step that runs
+everything when the runtime is present — so closing this needs only a staging step on the macOS runner
+(`brew install mpv` + `scripts/stage-libmpv-macos.sh`).
+
+**Not done**, because it is genuinely risky rather than merely effortful: a Homebrew mpv is a
+*different build* from the bundled one, so the tests would be validating a runtime the product does not
+ship; it adds minutes to every run; and a flaky hardware-adjacent suite in CI is a worse outcome than
+an honest zero. This is the highest-value remaining item, and it should be a deliberate decision with
+its own batch rather than a side effect of this one.
+
+### AUD-16 — NEEDS A PRODUCT DECISION, not built
+
+Still open from the first report: the data is now truthful (room `ENDED`, player `COMPLETED`) but
+nothing surfaces it — `screen` stays `CINEMA`, the sync indicator reads "Syncing", and the play control
+offers *resume*, which re-commits play from the end and lands straight back in `Ended`. Surfacing it
+means inventing an "Ended" affordance (a replay button? a return to lobby?), which is a product
+decision, so I have not invented one.
+
+### AUD-08 — OPEN, deferred by the owner
+
+Unchanged, and now documented as **orphaned** rather than stale: the shared-stream transport API is gone
+from `network/quic.rs`, so "declare and repair" is impossible. Awaiting detailed instructions.
+
+### CI verification of this second pass
+
+**Run `35506106235` @ `7aea3e2` → SUCCESS, all jobs** — macOS **571 passed / 0 failed**, Windows
+**562 passed / 0 failed**, and `version-consistency / Version consistency` green through the reusable
+workflow again. The counts are unchanged from the previous run because the ADV-05 fix replaced one
+assertion with a stronger one rather than adding a test.
+
+**Net across both passes: four of my own fixes had defects, and every one was found by asking a
+different question than the one that produced the fix.**
+
+| Pass | Finding | Question that found it |
+|---|---|---|
+| 1 | ADV-01 — projection depends on an uncalibrated clock | *What does this new value depend on, and who bounds it?* |
+| 1 | ADV-03 — the gate never runs on a tag push | *Does another path bypass the fix?* |
+| 2 | ADV-05 — the app says "peer is buffering" at the end of every film | *Who else reads this flag?* |
+| — | AUD-08 — the file is orphaned, not stale | *Can this actually be repaired, or only documented?* |
+
+
