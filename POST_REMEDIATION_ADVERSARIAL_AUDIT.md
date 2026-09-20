@@ -1,11 +1,12 @@
 # Post-Remediation Adversarial Audit
 
-**Mode: READ ONLY.** No code, test, documentation, tag, branch or release was modified. This file is
-new and untracked; nothing was committed.
+**The audit itself was READ ONLY.** No code, test, documentation, tag, branch or release was modified
+while it was performed. Every finding below was then fixed in a follow-up commit — see
+§7 "Remediation of these findings" for what changed, the evidence, and what is still open.
 
 **Subject:** `stabilization/v0.9.9-rc1` @ `65b97ea` — the Batch 8 remediation candidate.
-**Verified code SHA:** `3372d48` (CI run `35502788709`, all six jobs green; `65b97ea` is a docs-only
-delta on top).
+**Audited SHA:** `65b97ea` (verified code `3372d48`, CI run `35502788709`, all six jobs green).
+**Fixes applied in:** `97d452a`.
 **Date:** 2026-09-20
 
 ---
@@ -271,3 +272,51 @@ One process note, offered as a limitation rather than a finding: this pass attac
 along the path I thought most likely**. That is not exhaustive. The three findings I did produce all
 came from asking "what does this new value depend on, and who bounds it?" — a question I would apply to
 every fix in the next pass too.
+
+---
+
+## 7. Remediation of these findings
+
+*Added after the fact. Everything above is the audit as performed; this section is what happened next.*
+
+| Finding | Verdict | Fix |
+|---|---|---|
+| **ADV-01** (P2) | **FIXED** | `drift_correction_for_player` now guards on `clock_calibrated`, and `projected_host_position_ms` is clamped to the media duration. |
+| **ADV-02** (P3) | **FIXED** | `committed_playback` is cleared in `leave_party` and in the create/join reset (`return_home` reaches it through `leave_party`). |
+| **ADV-03** (P2) | **FIXED** | The check moved to a reusable workflow (`version-consistency.yml`); `ci.yml` calls it and `publish-tauri` now `needs: [resolve-matrix, version-consistency]`, so a version mismatch **blocks the publish**. |
+| **ADV-04** (INFO) | **ADDRESSED** | The release path now has pre-publication validation. Whether it should have more is a decision, not a default. |
+| **AUD-08** | **RE-EXAMINED — finding is stronger** | The shared-stream transport API is **gone from `network/quic.rs` entirely**, so the file is *orphaned*, not merely stale. "Declare and repair" is therefore impossible; deletion remains the owner's call. |
+
+**Why the guard is a silent degradation, stated as a trade rather than hidden:** an uncalibrated guest
+now gets **no** drift correction instead of a **wrong** one. Free-running playback is watchable; a seek
+to the end of the film is not. Surfacing the condition in the UI would be a follow-up — it would mean
+inventing a user-facing state, which is a product decision.
+
+**Mutation controls, run together.** With the guard, the clamp *and* the anchor clear all disabled, the
+three new tests go **red with their own specific messages** (3 failed / 0 passed), then the mutations
+were reverted and verified by hash:
+
+```
+uncalibrated_guest_gets_no_drift_correction ... FAILED
+  an uncalibrated guest must not be drift-corrected; got Some((0, 1000000))
+projection_is_clamped_to_the_media_duration ... FAILED
+leaving_a_party_clears_the_play_anchor ... FAILED
+  leaving a party must clear committed_playback, or the next session's
+  projection is derived from the previous session's deadline
+```
+
+`uncalibrated_guest_gets_no_drift_correction` asserts **both** directions (uncalibrated → `None`,
+calibrated → `Some`), so it cannot pass by returning `None` unconditionally — a guard test that only
+checked the negative case would be satisfied by breaking drift correction entirely.
+`projection_is_clamped_to_the_media_duration` carries a control showing the value is genuinely
+unbounded without the clamp, so the clamp is doing the work rather than the input happening to be small.
+
+**Verification after the fixes:** `fmt` clean · `clippy --all-targets --all-features -D warnings`
+exit 0 / zero warnings · CI-style suite **571 passed / 0 failed** (568 + the 3 new tests) ·
+`m2_integration` 28/28 · all three workflow YAMLs parse and are wired correctly.
+
+**Still open, unchanged by this work:** W1–W6 in §5. ADV-01's *symptom* is now bounded rather than
+impossible — an uncalibrated guest free-runs — and only a real two-device run will show whether
+calibration is reliable enough in practice for that trade to be invisible.
+
+---
