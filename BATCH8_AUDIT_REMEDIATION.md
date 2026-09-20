@@ -5,7 +5,8 @@
 apply the smallest safe fix, add a regression test, add a negative control, then run the gates.
 **Date:** 2026-09-20
 **Baseline HEAD at start:** `e19c2eb` (branch `stabilization/v0.9.9-rc1`)
-**Commit produced:** `f280b6c` — *local only, not pushed*
+**Verification target:** **`f2a9b2f`** — the full code + test state. (`f280b6c` is the same state minus
+the final test/CI commit; see §9.) *Local only — not pushed.*
 
 ---
 
@@ -33,9 +34,9 @@ v0.9.8 GitHub Release is not modified, and no `v0.9.9` was created.
 
 | ID | Class | Re-proved? | Already fixed? | Verdict after this batch | Fix | Test |
 |---|---|---|---|---|---|---|
-| **AUD-01** | **P0** | Yes — reproduced | No | **FIXED (source)**, runtime-verify outstanding | Derive canonical position from the PLAY commit anchor | `guest_in_sync_is_never_seeked_by_the_player_event_loop` |
+| **AUD-01** | **P0** | Yes — reproduced | No | **FIXED** (source + regression + control); two-device verify outstanding | Derive canonical position from the PLAY commit anchor | `guest_in_sync_is_never_seeked_by_the_player_event_loop` |
 | **AUD-02** | **P1** | Yes | No | **FIXED** | Remove the dead `host_relay_ready_state`; anchor redefined | covered by AUD-01 test |
-| **AUD-03** | **P1** | Yes | No | **FIXED (source)**, `eof-reached` runtime-verify outstanding | `PlayerState::Completed` + `keep-open` + host `ended()` | `host_reaching_end_of_media_ends_playback` |
+| **AUD-03** | **P1** | Yes | No | **FIXED — verified at runtime on real libmpv** (§4b) | `PlayerState::Completed` + `keep-open` + host `ended()` | `host_reaching_end_of_media_ends_playback`, `production_player_reports_completed_when_the_movie_ends` |
 | **AUD-04** | P2 | Yes | No | **FIXED** | Decision extracted to `drift_correction_for_player` | AUD-01 test drives the real loop |
 | **AUD-05** | P2 | Yes | No | **FIXED** | Tests now exercise the call site, not the helper | AUD-01 + control |
 | **AUD-06** | P2 | Yes | No | **PARTIAL** — code fixed, end-to-end unverified | Explicit `audio`/`aid`/`ao` options | `player_requests_audio_output_explicitly` |
@@ -110,6 +111,11 @@ correcting drift against a position that can no longer advance.
 would have kept reading `PLAYING` while the room had ended — the transition landing half-applied.
 The fix now calls `sync_room_snapshot`, and the test asserts the frontend-visible field.
 
+**And this is the one finding I was able to verify on real hardware rather than by reading code** —
+`libmpv.dylib` turned out to be present on this machine, so the production player was driven against
+a real 3-second file. It reports `Completed` at EOF, pinned to the duration, and clears it on seek
+back. The `keep-open=yes` half of the fix was proven load-bearing by mutation. See §4b.
+
 ### AUD-04 / AUD-05 (P2) — the tests could not fail
 
 The old drift tests called `apply_drift_correction` **directly with hand-picked literals**. They
@@ -157,7 +163,9 @@ capability. Its only test is `#[ignore]`d and can never run.
 
 ## 3. Tests added
 
-Six, verified by diffing `#[test]`/`#[tokio::test]` attributes against HEAD (`+6`, exactly):
+**Nine in total: six unit tests, plus a new macOS-only integration target of three real-libmpv tests
+(§4b).** The six were verified by diffing `#[test]`/`#[tokio::test]` attributes against HEAD (`+6`,
+exactly):
 
 | Test | Proves |
 |---|---|
@@ -167,6 +175,11 @@ Six, verified by diffing `#[test]`/`#[tokio::test]` attributes against HEAD (`+6
 | `negative_control_end_of_media_requires_a_playing_host` | Three ways the transition must **not** fire: a guest reporting `Completed`, a paused room, a merely-paused player. |
 | `completed_player_state_has_a_distinct_wire_name` | `Completed` → `"COMPLETED"`, and is not confused with `PLAYER_ERROR`. |
 | `player_requests_audio_output_explicitly` | `audio`/`aid`/`ao` are set explicitly, and `keep-open` (which AUD-03 depends on) is present. |
+
+Plus a new integration target, `tests/real_eof_detection_test.rs` — three tests driving the
+**production** `MpvPlayer` against real libmpv: `production_player_reports_completed_when_the_movie_ends`,
+`production_player_is_not_completed_mid_playback` (negative control),
+`production_player_leaves_completed_after_seeking_back`. Detail and evidence in §4b.
 
 Test doubles added: `AdvancingPlayer` (a player whose position genuinely advances with wall time —
 `ScriptedPlayer` is static, which is *precisely* the environment in which AUD-01 was invisible),
@@ -203,23 +216,124 @@ site with no anchor) and the end-of-media control (three cases that must not tra
 
 ---
 
+## 4b. Runtime verification on real libmpv — AUD-03 closed end-to-end
+
+**This is the one place where I stopped reasoning from source and actually ran the real thing.**
+
+The bundled `mpv_runtime/libmpv.dylib` (4.5 MB) **is present on this machine** — it is gitignored, so
+CI can never have it. That means the real-playback path, which every gate in this repository is
+structurally blind to, can be exercised here. I used it to convert AUD-03 from "source-level only"
+into runtime evidence.
+
+### What was observed (raw mpv, fixture = 3 s)
+
+Two runs of the same file, differing only in `keep-open`:
+
+| t | `keep-open=yes` | `keep-open=no` (the default) |
+|---|---|---|
+| 1.5 s | `eof-reached=false` `duration=3.0` `time-pos=2.600` | `eof-reached=false` `duration=3.0` `time-pos=2.633` |
+| **2.0 s** | **`eof-reached=true`** `idle-active=false` `duration=3.0` `time-pos=2.967` | **`eof-reached=None`** `idle-active=true` `duration=None` `time-pos=None` |
+| 2.5 s | `eof-reached=true` (stable) | `eof-reached=None` (stable) |
+| after seek to 0.5 s | **`eof-reached=false`** `time-pos=0.500` | seek **fails** (`error running command`, −12) |
+
+Read the middle row twice. **Without `keep-open`, `eof-reached` is not merely false — it is
+unreadable.** The property read *errors* once mpv unloads the file, so
+`mpv_get_flag(handle, fns, "eof-reached") == Some(true)` could never be true and `Completed` could
+never be reported. `keep-open=yes` is therefore **load-bearing**, not cosmetic — and the code comment
+that claimed this is now backed by a measurement rather than an assertion.
+
+The last row also confirms the recovery path: seeking away from the end clears `eof-reached`, so
+`Completed` is a live reading rather than a latch — which is what makes "seek back and watch it again"
+work.
+
+### Production-code verification: `tests/real_eof_detection_test.rs` (new)
+
+The raw observation above proves *mpv's* behaviour. It does not prove *my* code. So the same ground is
+covered through `MpvPlayer` — the type the runtime actually holds — in a new macOS-only integration
+target:
+
+| Test | What it establishes |
+|---|---|
+| `production_player_reports_completed_when_the_movie_ends` | Real decode → real EOF → `PlayerState::Completed`, and `position_ms` **pinned to** `duration_ms` (mpv's own last `time-pos` is 2967 ms; the code pins 3000). |
+| `production_player_is_not_completed_mid_playback` | Negative control: every sample taken >500 ms before the end must be non-terminal, and the test **fails as vacuous** if it never observed such a sample. |
+| `production_player_leaves_completed_after_seeking_back` | Seeking back to 500 ms clears `Completed` and moves the playhead — the recovery path. |
+
+All three pass against real libmpv (13.6 s, real decoding).
+
+**Note on the path:** `MpvPlayer` loads libmpv *only* in `attach_native_surface`; before that,
+`play()` takes a documented simulation path that reports `Playing` without decoding anything. So the
+test builds a real `CALayer` through the same minimal Objective-C bridge `real_native_surface_e2e.rs`
+uses. A test that skipped that step would pass while decoding nothing — precisely the false-green this
+suite exists to avoid.
+
+### Negative control for this section: `keep-open` removed
+
+`keep-open=yes` was mutated to `no` in `player_init_options()` and the new target re-run:
+
+```
+production_player_reports_completed_when_the_movie_ends ... FAILED
+  the production player must report Completed at end of media;
+  it reported Playing at position 0/Some(3000) ms.
+production_player_leaves_completed_after_seeking_back ... FAILED
+  precondition: the movie must reach Completed first
+production_player_is_not_completed_mid_playback ... ok
+```
+
+Two of three go red, and the failure is **the pre-fix symptom itself**: the state never leaves
+`Playing`. (The third passes correctly — it only fails if `Completed` appears *spuriously*.) The
+mutation was reverted and verified **by hash**
+(`a6e17a72140130bbf5d5bcb4df630f2784296e7cd2e10a8d3ed09f62e8adb8d6`, byte-identical to the backup),
+after which all three pass again.
+
+So the AUD-03 fix has a control at the player layer as well as at the runtime layer, and the control
+reproduces the original defect on demand.
+
+### CI must skip these by name — and now does
+
+`tests/common/mod.rs` deliberately **fails loudly** when a prerequisite is missing (a BATCH5 policy:
+no silent skips). CI has no libmpv, so the new tests would panic there and turn the build red. CI
+therefore skips libmpv-dependent tests **by name**, and the three new names were added to that list
+(5 → 8), along with the warning message. Verified: the YAML parses, the skip list reads 8 entries, and
+a CI-style local run still reports **568 passed / 0 failed** with the new target showing
+`0 passed; 3 filtered out`.
+
+**This is the part that would have broken CI if I had not checked.** Adding a real-hardware test to a
+suite whose prerequisites fail loudly is only safe if the CI skip list is updated in the same change.
+
+---
+
 ## 5. Full validation results
 
 | Gate | Result |
 |---|---|
 | `cargo fmt --check` | **clean** |
 | `cargo clippy --all-targets --all-features -- -D warnings` | **exit 0, zero warnings** |
-| `cargo test` (all targets, CI's skip list) | **568 passed / 0 failed / 2 ignored** across 15 targets |
+| `cargo test` (all targets, CI's skip list) | **568 passed / 0 failed / 2 ignored / 7 filtered** across 16 targets |
+| `cargo test` (all targets, **real libmpv present, no skips**) | **575 passed / 0 failed / 2 ignored** across 16 targets |
 | `eslint . --max-warnings=0` | **exit 0**, zero output |
 | `tsc --noEmit` | **exit 0** |
 | `vite build` | **exit 0** (12.79 s; pre-existing chunk-size advisory) |
 | `vitest run` | **287 passed / 23 files** |
 
-**The Rust totals reconcile exactly.** The last CI-verified macOS total was **562**. This run is
-**568** — the same 562 plus the 6 new tests. Per-target: lib 484 (one filtered by the CI skip list),
-dep_audit 3, host_guest 2, **m2_integration 28**, m3_closure 7, m3_integration 18, m3_m4_e2e 9,
-m4_closure 15, tailscale 2; `real_native`/`real_playback`/`real_sw_render`/`windows_native`/doc-tests
-each 0. All 15 result lines read `0 failed`.
+**The Rust totals reconcile exactly, two ways.**
+
+*Against CI.* The last CI-verified macOS total was **562**. The CI-comparable local run is **568** —
+the same 562 plus the 6 new unit tests. My 3 new integration tests are skipped by name in CI (they
+need the runtime), so they add nothing to that figure; the new target correctly shows
+`0 passed; 3 filtered out`. Per-target: lib 484 (one filtered), dep_audit 3, host_guest 2,
+**m2_integration 28**, m3_closure 7, m3_integration 18, m3_m4_e2e 9, m4_closure 15, tailscale 2;
+`real_native`/`real_playback`/`real_sw_render`/`windows_native`/doc-tests each 0. All 16 result lines
+read `0 failed`.
+
+*Against the runtime.* With `libmpv.dylib` present and no skips, the total is **575** —
+`575 − 568 = 7`, which is exactly the 7 skipped tests that exist on macOS (`bundled_runtime_is_loadable`
+in the lib, plus one each in `real_native_surface_e2e`, `real_playback_smoke_test`,
+`real_sw_render_test`, and my 3 in `real_eof_detection_test`). The 8th skip,
+`bundled_libmpv_renders_onto_real_child_hwnd_through_production_player`, is Windows-only, so it
+contributes 0 tests here — which is why the delta is 7 and not 8.
+
+**Every libmpv-dependent test passes on this machine**, including `real_sw_render_test` (2.65 s) and
+`real_native_surface_e2e` (4.45 s), which CI can never execute.
 
 **Two environment notes, stated rather than glossed:**
 
@@ -228,12 +342,13 @@ each 0. All 15 result lines read `0 failed`.
   underlying binaries (`node_modules/.bin/eslint`, `vitest`, `tsc`, `vite`) instead. Same tools,
   same config.
 - The `cargo test` shell exits non-zero because a test touches the macOS keychain, which the sandbox
-  blocks. `CARGO TEST EXIT: 0` and all 15 `test result:` lines are `ok`. Unrelated to these changes.
+  blocks. `CARGO TEST EXIT: 0` and all 16 `test result:` lines are `ok`. Unrelated to these changes.
 
 **No unrelated behaviour changed.** `dist/` is gitignored, so the build dirtied nothing tracked.
-The diff is 8 files + the audit report: `app_runtime.rs`, `media/mod.rs`,
-`media/player/mod.rs`, `media/player/mpv_backend.rs`, `media/shared_pipeline.rs` (comments only),
-`providers/chrome/mod.rs` (test only), `sync/local.rs`, `.github/workflows/ci.yml`.
+The change is 9 files: `app_runtime.rs`, `media/mod.rs`, `media/player/mod.rs`,
+`media/player/mpv_backend.rs`, `media/shared_pipeline.rs` (comments only),
+`providers/chrome/mod.rs` (test only), `sync/local.rs`, `.github/workflows/ci.yml`, and the new
+`tests/real_eof_detection_test.rs`.
 
 ---
 
@@ -250,6 +365,14 @@ There is still no audio-bearing fixture in the repository: I confirmed by direct
 no `mp4a`/`ac-3`). I could not create one — `ffmpeg`/`ffprobe` are not installed here and the sandbox
 blocks package installs. A-V sync is a core part of "watch a movie together" and **nothing in this
 repository has ever produced a sound.**
+
+**One stale comment disproved while verifying.** `tests/real_native_surface_e2e.rs:113-116` states
+that "load_current_media inside the player sets vo=null/ao=null". It does not. `load_current_media`
+sets exactly two things — `pause=1` and `loadfile` — and the only `vo`/`ao` assignment anywhere in
+`mpv_backend.rs` is the one AUD-06 added. So the comment is wrong, and wrong in a direction that
+matters: it implies production audio is deliberately disabled by the player, which would make AUD-06
+look closed when it is not. Worth correcting so nobody reasons from it. The observable truth is
+narrower and less comfortable: the player *requests* audio, and the fixture has none to play.
 
 ### AUD-15 — NEW, found while fixing AUD-01 (P3, not changed)
 `clock_calibrated` (`app_runtime.rs:620`) is **written but never read** — dead state. It is set
@@ -278,13 +401,15 @@ updater — a documentation requirement, not a defect), AUD-14 (the `real_*` tar
 
 **This is the largest remaining gap, and it is mine, not the audit's.**
 
-`f280b6c` **has not been through CI.** It is a local commit on `stabilization/v0.9.9-rc1`; the remote
+**`f2a9b2f` has not been through CI.** It is a local commit on `stabilization/v0.9.9-rc1`; the remote
 tip is still `a44542a`, which is the SHA CI actually verified. So:
 
 | Item | Status |
 |---|---|
-| Rust on macOS | **Locally verified** — 568 passed / 0 failed |
-| Rust on Windows | **NOT verified.** No CI run against `f280b6c`. |
+| Rust on macOS, **without** a runtime (CI's configuration) | **Locally verified** — 568 passed / 0 failed |
+| Rust on macOS, **with** the real libmpv runtime | **Locally verified** — the 8 libmpv-dependent tests execute (see below) |
+| AUD-03 end-of-media on real libmpv | **Verified** (§4b) — real decode, real EOF, `Completed` |
+| Rust on Windows | **NOT verified.** No CI run against `f2a9b2f`. |
 | Windows clippy (`-D warnings`) | **NOT verified.** |
 | Frontend | Locally verified (287 tests, lint/tsc/build clean) |
 | `version-consistency` job | Logic verified locally; the job itself has never executed |
@@ -296,6 +421,12 @@ toolchain). Reviewing my changes, none is platform-conditional — `player_init_
 `PlayerState::Completed` are neutral, `mpv_get_flag` mirrors the existing `mpv_get_double` FFI pattern,
 and the new tests use no platform-specific API — but **that is a code-reading argument, not a
 verification.** Windows must be re-run before this can be called verified.
+
+**One Windows-specific risk my own change introduces, stated plainly:** the new
+`tests/real_eof_detection_test.rs` is `#![cfg(target_os = "macos")]`, so on Windows it compiles to
+**zero tests** — which is the correct behaviour and matches the other `real_*` targets. But it means
+the Windows job will not exercise end-of-media detection at all. Windows EOF behaviour rests on
+`mpv_get_flag("eof-reached")` and `keep-open`, neither of which I have observed on that platform.
 
 **Nothing was pushed.** Pushing the candidate branch is what would let CI run, and that is an
 externally visible action, so it waits for your approval.
@@ -309,12 +440,13 @@ externally visible action, so it waits for your approval.
 | M1 | **Two real devices, one real movie, watch it to the end.** | The only thing that confirms AUD-01's fix. My evidence is a scripted player driving the real loop; nobody has watched a real decoded frame stay in sync. |
 | M2 | **A movie with an audio track**, confirming sound and A-V sync. | No audio-bearing fixture exists and none can be built here. |
 | M3 | **A 2-hour (ideally 8-hour) session**, watching drift. | The projection depends on the continuously re-calibrated clock offset. Whether the offset stays accurate enough over hours is unverified. |
-| M4 | **End-of-media on both sides** — host and guest both leave `PLAYING`; seek back and resume works. | The `eof-reached` → `Completed` step needs a real libmpv runtime. |
+| M4 | **End-of-media on both sides** — host and guest both leave `PLAYING`; seek back and resume works. | **Narrowed, not closed.** The player layer is now verified on real libmpv (§4b): `Completed` is reported at EOF, pinned to the duration, cleared by seeking back. What remains is the *coordination* — that the host's `Ended` reaches a real guest and both sides stop correcting drift. That needs two devices. |
 | M5 | **Pause / seek / buffering / reconnect** during playback on both sides. | Needs two devices. |
-| M6 | **Windows build**, at minimum the CI run; ideally a real Windows machine. | No Windows toolchain here. |
+| M6 | **Windows build**, at minimum the CI run; ideally a real Windows machine. | No Windows toolchain here. Windows will not run the new end-of-media tests at all (they are macOS-gated), so Windows EOF behaviour is unobserved. |
 
 Batches 7B's `BATCH7B_REAL_BETA_VALIDATION.md` (28 areas, T01–T28) remains the procedure for M1–M5.
-**Every row in it is still NOT TESTED.**
+**Every row in it is still NOT TESTED** — and note that §4b does *not* change that: it verifies the
+player, not the party.
 
 ---
 
@@ -323,13 +455,15 @@ Batches 7B's `BATCH7B_REAL_BETA_VALIDATION.md` (28 areas, T01–T28) remains the
 | | SHA | Pushed? |
 |---|---|---|
 | Baseline HEAD (audit target) | `e19c2eb` | yes (candidate branch) |
-| **This batch — code** | **`f280b6c`** | **no — local only** |
-| This batch — docs (this report, + amendments) | `4d124cd` onward | no — local only |
+| This batch — remediation code | `f280b6c` | no — local only |
+| This batch — runtime test + CI skip list | `f2a9b2f` | no — local only |
+| This batch — docs (this report, + amendments) | `3ac98a9` onward | no — local only |
 | Last CI-verified SHA | `a44542a` | yes — still the remote tip |
 
-`f280b6c` is one commit: 9 files, +1635 / −57, and it includes
-`DEEP_PRODUCTION_READINESS_AUDIT.md`. The commits after it are documentation only and add nothing to
-the code state. **`f280b6c` is the SHA that matters for verification.**
+**`f2a9b2f` is the SHA that matters for verification** — it is the complete code + test state.
+`f280b6c` is the same state without the final test/CI commit, and the docs commits after it add
+nothing to the code. `f280b6c` is one commit of 9 files (+1635 / −57) including the audit report;
+`f2a9b2f` adds `tests/real_eof_detection_test.rs` and the CI skip list entry.
 
 Unchanged and confirmed after the commit: `main` = `2d5c833` (local) / `bb22577` (remote), all five
 tags, `v0.9.8` → `bb22577`, and no release created or modified.
@@ -341,22 +475,34 @@ tags, `v0.9.8` → `bb22577`, and no release created or modified.
 **Yes — with one condition that is not mine to meet.**
 
 No **P0 or P1 remains as an open code defect.** AUD-01 (P0), AUD-02 and AUD-03 (P1) are fixed and
-regression-tested, and AUD-01's fix was proven non-vacuous by reproducing the original defect on
-demand. So the "STOP before release preparation if any P0/P1 remains" condition is not triggered.
+regression-tested; AUD-01's fix was proven non-vacuous by reproducing the original defect on demand,
+and AUD-03 is verified end-to-end on real libmpv. So the "STOP before release preparation if any
+P0/P1 remains" condition is not triggered.
 
-The condition is this: **`f280b6c` is not CI-verified, and Windows has never run it.** Given that
+The condition is this: **`f2a9b2f` is not CI-verified, and Windows has never run it.** Given that
 Batch 7A's one and only failure was a Windows-only clippy error invisible on macOS, calling this
 "ready for final regression audit" while Windows is unrun would repeat the exact mistake the audit
 was written to stop. The honest sequence is:
 
-1. **Approve the push** of `stabilization/v0.9.9-rc1` → CI runs on `f280b6c` (both platforms).
+1. **Approve the push** of `stabilization/v0.9.9-rc1` → CI runs on `f2a9b2f` (both platforms).
 2. If Windows is green, the final regression audit can begin against that SHA.
-3. M1–M3 (two real devices, audio, a long session) remain the real gate on the product promise —
-   no automated gate in this repository has ever proven real decoded frames, and none of my changes
-   alter that.
+3. M1–M3 (two real devices, audio, a long session) remain the real gate on the product promise.
 
-**What I would not claim.** I have not verified that two people can watch a movie together. I have
-verified that the code no longer *actively prevents* it — the guest is no longer seeked backwards
-every second, and the film ending is now detectable. That is a fix to the mechanism, demonstrated by
-test, and it is a materially different claim from "it works". The difference is exactly what M1 exists
-to close.
+**What changed since the first draft of this report.** AUD-03 moved from "fixed at source, runtime
+verification outstanding" to **verified on real hardware** — because the bundled `libmpv.dylib` turned
+out to be present on this machine, which let the real-playback path finally be executed rather than
+reasoned about. That is the single strongest piece of evidence in this batch, and it also produced the
+mutation proof that `keep-open` is load-bearing.
+
+**What I still would not claim.** I have not verified that two people can watch a movie together. The
+honest statement is narrower and I will keep it narrow:
+
+- the guest is **no longer seeked backwards every second** (regression-tested, with the original
+  defect reproduced as a control);
+- the end of a film is **now detectable and coordinated** (verified on real libmpv at the player
+  layer; the host→guest coordination is tested but not observed across two machines);
+- and **no automated gate in this repository has ever proven two devices staying in sync** — none of
+  my changes alter that, and only M1 closes it.
+
+That is a fix to the mechanism, demonstrated by test and by execution. It is a materially different
+claim from "it works", and the difference is exactly what M1 exists to close.
