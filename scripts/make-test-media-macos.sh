@@ -5,6 +5,17 @@
 #   ./scripts/make-test-media-macos.sh 6          # 6s fixture
 #   ./scripts/make-test-media-macos.sh 3 /tmp/x.mp4
 #
+# ⚠️  THIS SCRIPT DOES NOT CURRENTLY REPRODUCE THE COMMITTED VIDEO-ONLY FIXTURE.
+#     The committed file is 30 fps / 90 frames; this generator writes 15 fps /
+#     45 frames (see `fps` in the .swift). Running it over
+#     src-tauri/tests/fixtures/movie_party_test_320x240.mp4 therefore CHANGES a
+#     test input — the render tests size their windows against that file's frame
+#     rate. `tests/fixture_properties.rs` now pins the committed properties, so
+#     such a change fails loudly in CI instead of surfacing as a confusing render
+#     failure later. Either fix the generator to 30 fps, or change the fixture
+#     deliberately and update that test with it. (Found by the post-remediation
+#     adversarial audit, ADV-07.)
+#
 # With `--with-audio` (any position after the script name) the output also gets
 # a mono 440 Hz AAC track. The committed default stays video-only: the render
 # tests depend on that fixture's duration and frame content, so regenerating it
