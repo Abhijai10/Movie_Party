@@ -483,6 +483,48 @@ release-path wiring I cannot execute is now verified structurally rather than as
 control's bad `uses:` was not flagged. Covered instead by `test -f` plus `ci.yml`, where the same
 reusable workflow already executes successfully on the real runner.
 
+### ADV-07 — NEW FINDING (P3, tooling): the fixture generator cannot reproduce the committed fixture
+
+Found by asking a question I had not asked before: **"is the artifact of record actually reproducible?"**
+
+Measured by parsing both files:
+
+| | duration | `stsz` samples | `stts` delta | implied fps |
+|---|---|---|---|---|
+| committed fixture | 3.000 s | **90** | **20** | **30** |
+| fresh generation | 3.000 s | **45** | **40** | **15** |
+
+`scripts/make-test-media-macos.sh` writes **15 fps** (`fps: Int32 = 15`), while the committed video-only
+fixture is **30 fps / 90 frames**. The script's own header calls itself *"how it is reproduced"*, and it
+is not: running it over the committed file would **halve the frame rate** of a test input the render
+tests size their windows against. Nothing would have said so.
+
+**That trap became more likely because of my own Batch 8 work** — I documented a regeneration command for
+the audio fixture, making regeneration a documented action.
+
+**Fixed two ways:**
+
+- `tests/fixture_properties.rs` — pins the committed properties (3.000 s, 30 fps / 90 frames, H.264, and
+  **no** audio track) plus the audio fixture's (audio track present, same duration). It needs **no
+  libmpv**, so unlike the `real_*` targets it runs in CI on both platforms — which is the point: a
+  changed fixture now fails here rather than surfacing later as a confusing render-test failure.
+  Hand-rolled box walker; four fields, no new dependency.
+- The generator header now states plainly that it does **not** reproduce the committed fixture, names
+  both frame rates, and points at the test that will catch a regeneration.
+
+**Mutation control:** asserting the generator's 45 instead of the committed 90 makes the test go red —
+`left: 90, right: 45` with the explanatory message. Reverted, verified by hash.
+
+**Deliberately not resolved:** whether the generator or the fixture is "right" is an *intent* question I
+cannot answer from the repository. So the test pins the artifact the tests actually use, and the choice
+is left explicit rather than guessed.
+
+**CI verification:** run `35508509335` @ `ac0f721` → **SUCCESS, all jobs** — macOS **573 passed / 0
+failed**, Windows **564 passed / 0 failed** (+2 on each, the new fixture tests). Both new tests
+**executed on both platforms**, confirmed in the logs — which is the point of putting them in a target
+that needs no libmpv. This is the only test in the repository that would catch a changed test input, and
+it runs where the `real_*` tests cannot.
+
 ### CI verification of this second pass
 
 **Run `35506106235` @ `7aea3e2` → SUCCESS, all jobs** — macOS **571 passed / 0 failed**, Windows
@@ -490,8 +532,8 @@ reusable workflow already executes successfully on the real runner.
 workflow again. The counts are unchanged from the previous run because the ADV-05 fix replaced one
 assertion with a stronger one rather than adding a test.
 
-**Net across both passes: five defects found, four of them mine, and every one found by asking a
-different question than the one that produced the fix.**
+**Net across the passes: six findings, and every one came from asking a different question than the
+one that produced the fix.**
 
 | Pass | Finding | Question that found it |
 |---|---|---|
@@ -499,6 +541,7 @@ different question than the one that produced the fix.**
 | 1 | ADV-03 — the gate never runs on a tag push | *Does another path bypass the fix?* |
 | 2 | ADV-05 — the app says "peer is buffering" at the end of every film | *Who else reads this flag?* |
 | 2 | ADV-06 — a masked failure could ship a degraded libmpv (**pre-existing**) | *Can I validate the workflow I cannot execute?* |
+| 2 | ADV-07 — the fixture generator cannot reproduce the committed fixture | *Is the artifact of record actually reproducible?* |
 | — | AUD-08 — the file is orphaned, not stale | *Can this actually be repaired, or only documented?* |
 
 **CI verification of ADV-06:** run `35507117939` @ `d6d9964` → **SUCCESS, all jobs** (macOS, Windows,
