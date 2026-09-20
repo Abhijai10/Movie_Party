@@ -201,10 +201,50 @@ source, not accepted from the audit documents.
 | No accidental v0.9.8 modification | **PASS** | tag object `4fca32ce3707d706ddd9e48a8d38cd07d1b62cc3` local **and** remote; dereferences to `bb225778…`; remote `main` unchanged at `bb225778434e3f07923e03e85d7d7cc1db79146c` |
 | **Candidate SHA exactly matches the manually tested SHA** | **FAIL** | **this is the blocker** — no manual two-device test happened at any SHA, and the candidate moved to `746775d` mid-batch (§1) |
 
-### 5.2 Diff audited
+### 5.2 The complete `v0.9.8` → candidate diff, audited
 
-The complete diff from `v0.9.8` to the candidate, plus the incremental diff introduced by §1
-(`0c2b5e8..746775d`, one file, test-only). No P0, no P1.
+**Scope: 72 files, +14,792 / −1,161.** `v0.9.8` dereferences to `bb225778434e3f07923e03e85d7d7cc1db79146c`.
+Reviewed by category rather than sampled.
+
+**Deletions — exactly one.** `src-tauri/src/media/shared_pipeline.rs` (the AUD-08 closure). No other
+file was deleted, so nothing was removed quietly.
+
+**Additions — 30 files.** Batch/audit reports; the shared `.github/workflows/version-consistency.yml`;
+`providers/chrome/process.rs` (MP-20/22/23 process ownership); the AUD-16 frontend trio
+(`MovieFinishedOverlay.tsx`, `cinemaEndState.ts`, `endOfMediaContracts.test.ts`); `tests/common/mod.rs`;
+`tests/dependency_audit.rs`; `tests/fixture_properties.rs`; `real_audio_test.rs`;
+`real_eof_detection_test.rs`; the two `.mp4` fixtures; `docs/RELEASE_BODY_FOOTER.md`;
+`docs/RELEASE_PROCESS.md`; `scripts/make-test-media-macos.{sh,swift}`.
+
+**Renames — none.**
+
+**Dependency changes — all three `Cargo.toml` claims verified, not trusted.**
+
+`Cargo.toml` adds `url = "2"`, `libc = "0.2"` (unix) and `windows-sys = "0.61"` (windows), each with a
+comment claiming the crate is already in the graph. Checked against `Cargo.lock`: **`url 2.5.8`,
+`libc 0.2.189` and `windows-sys 0.61.2` are all present as existing packages** — only direct
+references were added, so no new code enters the build. The comments are accurate.
+
+`Cargo.lock` changed by **7 insertions / 4 deletions**: the version bump, those three references, and
+**`rustls` 0.23.43 → 0.23.45** with a new checksum. That bump is intentional and guarded — commit
+`2c9d565`, documented in `BATCH4_REPORT.md` (advisory GHSA-2mjx-qc3c-rqvc, CVSS 5.3) and
+`RELEASE_NOTES.md:47`, and pinned by a regression test in `tests/dependency_audit.rs` that reads
+**`Cargo.lock` rather than the manifest** — the correct choice, since the *resolved* version is the one
+that ships.
+
+**Test gates — nothing was quietly disabled.** **No `#[ignore]` was added** (the three `+#[ignore`
+hits in the diff are comment text, not attributes). **One `#[ignore]` was removed**, and it sat inside
+`shared_pipeline.rs` — the file deleted for AUD-08. So no test was silently enabled either.
+
+**`todo!` / `unimplemented!` / `unreachable!` — none added.**
+
+**`unsafe` — 50 added lines, 1 removed.** Every `unsafe` block in the new production module
+`providers/chrome/process.rs` carries a `// SAFETY:` justification (10 blocks, 11 comments). The test
+files do not — see §6.4.
+
+**`.gitignore` — additive and documented.** It *un*-ignores `src-tauri/tests/fixtures/*.mp4` so the
+fixture ships in a clean checkout, because the `real_*` tests "used to silently pass when a `/tmp` copy
+was absent". Nothing was hidden; something was exposed.
 
 ---
 
@@ -245,6 +285,33 @@ commit to be on the remote first, then `gh workflow run ci.yml --ref <branch>`.
   so the "App version" row shows the app *name*; `app_metadata()` has no version field. Any manual
   step instructing a tester to read the version from Settings is **invalid** — it must come from
   `CFBundleShortVersionString` or the installer filename.
+
+### 6.4 `unsafe` blocks without `// SAFETY:` comments — 4 files pre-existing, 3 newly introduced
+
+The new production module `providers/chrome/process.rs` is exemplary: **10 `unsafe` blocks, 11 `SAFETY`
+comments.** The test files are not. Counted per file at both ends of the diff:
+
+| File | @v0.9.8 | @candidate | New? |
+|---|---|---|---|
+| `media/player/mpv_backend.rs` | 52 / 0 | 52 / 0 | pre-existing |
+| `tests/real_playback_smoke_test.rs` | 38 / 0 | 38 / 0 | pre-existing |
+| `tests/real_native_surface_e2e.rs` | 3 / 0 | 3 / 0 | pre-existing |
+| `tests/windows_native_surface_e2e.rs` | 3 / 0 | 3 / 0 | pre-existing |
+| `tests/real_sw_render_test.rs` | 29 / 0 | **33 / 0** | **+4 new** |
+| `tests/real_audio_test.rs` | absent | **12 / 0** | **new file** |
+| `tests/real_eof_detection_test.rs` | absent | **2 / 0** | **new file** |
+
+(format = `unsafe` blocks / `// SAFETY` comments)
+
+**18 undocumented `unsafe` blocks were introduced by this work, all in test files.** Clippy cannot
+catch it: `undocumented_unsafe_blocks` is **not enabled** anywhere in the crate, so
+`clippy --all-targets --all-features -- -D warnings` passes regardless.
+
+**Severity: hygiene, not correctness.** These are FFI calls into libmpv from the `real_*` playback
+tests; they do not run in CI and they do not ship. It changes no verdict here. It is recorded because
+the same batch that justified every `unsafe` in `process.rs` left these bare, and because the
+inconsistency is invisible to the existing gate. Fix is either comments or enabling the lint —
+its own batch.
 
 ---
 
