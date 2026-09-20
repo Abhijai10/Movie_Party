@@ -118,7 +118,19 @@ jobs:
           # via MPV_PYTHONPATH (a venv site-packages dir works for that).
           python3 -m venv /tmp/mpv-venv
           /tmp/mpv-venv/bin/pip install --quiet glad2 jinja2 markupsafe
-          export MPV_PYTHONPATH="$(/tmp/mpv-venv/bin/python -c 'import glad; import os; print(os.path.dirname(os.path.dirname(glad.__file__)))')"
+          # Declare and assign separately, then verify. `export X="$(cmd)"` is
+          # SC2155: the declaration's own status masks the substitution's, so
+          # under `set -e` a failing lookup does NOT abort the step. It would
+          # leave MPV_PYTHONPATH empty, libplacebo's meson would then build
+          # WITHOUT the OpenGL loader glad2 provides, and the release would ship
+          # that libmpv — with no test in this workflow able to notice, because
+          # the real-libmpv tests are skipped here. Fail loudly instead.
+          MPV_PYTHONPATH="$(/tmp/mpv-venv/bin/python -c 'import glad; import os; print(os.path.dirname(os.path.dirname(glad.__file__)))')"
+          if [ -z "$MPV_PYTHONPATH" ]; then
+            echo "::error title=glad2 not importable::MPV_PYTHONPATH came back empty, so libplacebo would be built without its OpenGL loader. Refusing to build a libmpv that cannot be trusted."
+            exit 1
+          fi
+          export MPV_PYTHONPATH
           echo "MPV_PYTHONPATH=$MPV_PYTHONPATH"
           bash ./scripts/build-libmpv-macos.sh
           ls -la src-tauri/mpv_runtime/
