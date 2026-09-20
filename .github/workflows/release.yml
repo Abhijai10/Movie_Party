@@ -35,6 +35,17 @@ permissions:
   contents: write
 
 jobs:
+  # ADV-03: the version gate must run HERE, on the only path that publishes.
+  #
+  # AUD-09 added the check to `ci.yml`, which is `workflow_dispatch`-only — so it
+  # never ran on a tag push, and a tag whose four version declarations disagreed
+  # would have published a mislabelled release with the gate sitting green.
+  # `publish-tauri` now depends on this, so a mismatch blocks the publish instead
+  # of being discovered afterwards. The check itself lives in one reusable
+  # workflow shared with `ci.yml`.
+  version-consistency:
+    uses: ./.github/workflows/version-consistency.yml
+
   # Resolve which matrix legs to build. Dispatch can target a single OS
   # (e.g. rebuild just macOS after a staging fix without paying for the
   # Windows build again); tag pushes always build everything. Computed
@@ -60,7 +71,7 @@ jobs:
 
   publish-tauri:
     name: Release ${{ matrix.os }}
-    needs: resolve-matrix
+    needs: [resolve-matrix, version-consistency]
     strategy:
       fail-fast: false
       matrix:

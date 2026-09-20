@@ -7,30 +7,13 @@ on:
   workflow_dispatch:
 
 jobs:
+  # AUD-09, corrected by ADV-03: the check lives in a reusable workflow so that
+  # `ci.yml` and `release.yml` share ONE implementation. It used to be inline
+  # here only — and `ci.yml` is workflow_dispatch-only, so it never ran on a tag
+  # push, which is the only path that publishes. Duplicating the script instead
+  # would recreate the drift this check exists to prevent.
   version-consistency:
-    name: Version consistency
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # AUD-09: the application version is declared in four places and nothing
-      # enforced that they agree. A tag push with three of four bumped would
-      # ship a build labelled with a version it is not. Cheap, so it runs first.
-      - name: All four version declarations must agree
-        run: |
-          set -euo pipefail
-          pkg=$(python3 -c "import json;print(json.load(open('package.json'))['version'])")
-          tauri=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
-          cargo=$(grep -m1 '^version' src-tauri/Cargo.toml | cut -d'"' -f2)
-          lock=$(awk '/^name = "movie-party"$/{getline; if ($1=="version") {gsub(/"/,"",$3); print $3; exit}}' Cargo.lock)
-          printf '%-28s %s\n' package.json "$pkg" src-tauri/tauri.conf.json "$tauri" src-tauri/Cargo.toml "$cargo" Cargo.lock "$lock"
-          for entry in "src-tauri/tauri.conf.json=$tauri" "src-tauri/Cargo.toml=$cargo" "Cargo.lock=$lock"; do
-            file="${entry%%=*}"; found="${entry#*=}"
-            if [ -z "$found" ] || [ "$found" != "$pkg" ]; then
-              echo "::error::version mismatch: $file declares '$found' but package.json declares '$pkg'"
-              exit 1
-            fi
-          done
-          echo "OK: all four version declarations agree ($pkg)"
+    uses: ./.github/workflows/version-consistency.yml
 
   frontend:
     name: Frontend

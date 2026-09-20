@@ -3171,6 +3171,9 @@ impl AppRuntime {
             // sleeping from the previous room must abort instead of mutating
             // the new one.
             bump_session_generation(&mut state);
+            // ADV-02: and the previous session's PLAY anchor must not survive
+            // into this one. See the same clear in `leave_party`.
+            state.committed_playback = None;
             // MP-07: blocking Chrome/player teardown is deferred past the lock.
             DeferredTeardown::take(&mut state)
         };
@@ -5312,11 +5315,22 @@ impl AppRuntime {
         let committed = state.committed_playback.as_ref()?;
         let elapsed_us =
             Self::host_monotonic_us(state).saturating_sub(committed.execute_at_host_mono_us);
-        Some(
-            committed
-                .target_position_ms
-                .saturating_add(elapsed_us / 1_000),
-        )
+        let projected = committed
+            .target_position_ms
+            .saturating_add(elapsed_us / 1_000);
+        // ADV-01: clamp to the media duration.
+        //
+        // The projection mixes two machines' monotonic clocks, so a stale anchor
+        // or an unset clock offset can make it arbitrarily large — and an
+        // unbounded canonical position becomes a HardSeek *past the end of the
+        // film* (see the guard in `drift_correction_for_player` for the offset
+        // half). The clamp does not repair a bad clock; it bounds the blast
+        // radius of any cause, including ones nobody has thought of yet, which
+        // is the part that matters.
+        Some(match state.player_snapshot.duration_ms {
+            Some(duration) if duration > 0 => projected.min(duration),
+            _ => projected,
+        })
     }
 
     /// End playback when the movie finishes (AUD-03).
@@ -5374,6 +5388,25 @@ impl AppRuntime {
         local_position_ms: u64,
     ) -> Option<(i64, u64)> {
         if Self::is_host_role(state)
+            // ADV-01: refuse to correct until the clock offset is calibrated.
+            //
+            // The canonical position is derived by mapping this process's
+            // monotonic clock onto the host's (`host_monotonic_us`), and that
+            // mapping is only meaningful once `clock_offset_to_host_us` has been
+            // set by the calibration loop. While it is still 0, the projection
+            // subtracts a *host* timestamp from a *guest* clock — and because
+            // `saturating_sub` is one-sided, a guest whose monotonic clock is
+            // ahead of the host's (guest uptime > host uptime) yields the whole
+            // uptime difference as "elapsed", making the canonical position
+            // arbitrarily large and seeking the guest past the end of the film.
+            //
+            // The trade is deliberate and one-directional: an uncalibrated guest
+            // now gets *no* drift correction instead of a *wrong* one. That is a
+            // silent degradation, which is the lesser evil here — free-running
+            // playback is watchable, a seek to the end of the film is not. This
+            // is also what finally makes `clock_calibrated` mean something: it
+            // was written in two places and read nowhere.
+            || !state.clock_calibrated
             || state.sync.strict_sync_paused
             || state.room_state != RoomState::Playing
         {
@@ -6506,6 +6539,13 @@ impl AppRuntime {
         state.pending_operation_id = None;
         state.pending_operation_kind = None;
         state.commit_scheduled_for = None;
+        // ADV-02: the PLAY anchor belongs to the session that set it. Leaving it
+        // behind makes the next session's projection readable from a stale
+        // deadline, which is ADV-01 with an hours-sized multiplier instead of an
+        // uptime-sized one. The normal ordering hides it (the host sends
+        // PlayCommit before the coordinator's PLAYING, so the anchor is
+        // refreshed first) — but "hidden by ordering" is not a guarantee.
+        state.committed_playback = None;
         state.pending_guest_request_id = None;
         // MP-01: the session is over. Bump the lifecycle identity so every
         // commit task still sleeping towards its deadline can see that the
@@ -9974,6 +10014,13 @@ mod tests {
             state.local_participant.role = "Guest".to_string();
             state.room_state = RoomState::Playing;
             state.sync.strict_sync_paused = false;
+            // ADV-01: drift correction now refuses to run until the clock offset
+            // is calibrated, because the projection maps this process's
+            // monotonic clock onto the host's. A guest that is genuinely playing
+            // has been calibrated — set it here so these tests exercise the
+            // correction path rather than the guard. The guard itself is covered
+            // by `uncalibrated_guest_gets_no_drift_correction`.
+            state.clock_calibrated = true;
         }
         runtime
     }
@@ -10156,6 +10203,121 @@ mod tests {
             ),
             "control: the frozen-anchor drift must land in the hard-seek band, which \
              is what made a guest unwatchable"
+        );
+    }
+
+    /// ADV-01 regression: an **uncalibrated** guest must not be drift-corrected.
+    ///
+    /// The canonical position is derived by mapping this process's monotonic
+    /// clock onto the host's. Until `clock_offset_to_host_us` is calibrated that
+    /// mapping is meaningless, and because the subtraction is `saturating_sub`
+    /// it is one-sided: a guest whose monotonic clock is ahead of the host's
+    /// yields its whole uptime difference as "elapsed", which becomes a
+    /// `HardSeek` past the end of the film.
+    ///
+    /// Both directions are asserted, so this cannot pass by returning `None`
+    /// unconditionally.
+    #[test]
+    fn uncalibrated_guest_gets_no_drift_correction() {
+        let runtime = guest_playing_runtime();
+        install_play_anchor(&runtime, 1_000_000, monotonic_us());
+
+        // Uncalibrated: no correction at all.
+        {
+            let mut state = runtime.lock();
+            state.clock_calibrated = false;
+        }
+        let uncalibrated = {
+            let state = runtime.lock();
+            AppRuntime::drift_correction_for_player(&state, 1_000_000)
+        };
+        assert!(
+            uncalibrated.is_none(),
+            "an uncalibrated guest must not be drift-corrected; got {uncalibrated:?}"
+        );
+
+        // Calibrated: the same state now yields a correction, so the assertion
+        // above is about the guard and not about the function being inert.
+        {
+            let mut state = runtime.lock();
+            state.clock_calibrated = true;
+        }
+        let calibrated = {
+            let state = runtime.lock();
+            AppRuntime::drift_correction_for_player(&state, 1_000_000)
+        };
+        assert!(
+            calibrated.is_some(),
+            "a calibrated playing guest must still be corrected — otherwise the \
+             guard has disabled drift correction entirely"
+        );
+    }
+
+    /// ADV-01 regression: the projection must be **clamped to the duration**.
+    ///
+    /// The projection mixes two machines' clocks, so a stale anchor or a bad
+    /// offset can make it arbitrarily large. The clamp does not repair a bad
+    /// clock — it bounds the blast radius of any cause. The control shows the
+    /// value is genuinely unbounded without it, so the clamp is doing the work
+    /// rather than the input happening to be small.
+    #[test]
+    fn projection_is_clamped_to_the_media_duration() {
+        let runtime = guest_playing_runtime();
+        // An anchor whose deadline is far in the past, so "elapsed" is enormous.
+        install_play_anchor(&runtime, 1_000, 0);
+        {
+            let mut state = runtime.lock();
+            // Pin the host clock to a large constant so the elapsed value is
+            // deterministic rather than dependent on process uptime.
+            state.clock_offset_to_host_us = 10_000_000_000 - monotonic_us() as i64;
+            state.player_snapshot.duration_ms = Some(3_000);
+        }
+
+        let clamped = {
+            let state = runtime.lock();
+            AppRuntime::projected_host_position_ms(&state).expect("playing guest with anchor")
+        };
+        assert_eq!(
+            clamped, 3_000,
+            "the projection must be clamped to the media duration; got {clamped} ms \
+             for a 3000 ms file"
+        );
+
+        // Control: with no known duration there is nothing to clamp against, and
+        // the raw projection is enormous — which is exactly the value that used
+        // to become a HardSeek past the end of the film.
+        let unbounded = {
+            let mut state = runtime.lock();
+            state.player_snapshot.duration_ms = None;
+            AppRuntime::projected_host_position_ms(&state).expect("playing guest with anchor")
+        };
+        assert!(
+            unbounded > 1_000_000,
+            "control: without a duration the projection is unbounded (got {unbounded} ms) — \
+             this is the value the clamp exists to contain"
+        );
+    }
+
+    /// ADV-02 regression: leaving a party must clear the PLAY anchor.
+    ///
+    /// The anchor belongs to the session that set it. Leaving it behind makes the
+    /// next session's projection readable from a stale deadline — ADV-01 with an
+    /// hours-sized multiplier instead of an uptime-sized one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn leaving_a_party_clears_the_play_anchor() {
+        let runtime = guest_playing_runtime();
+        install_play_anchor(&runtime, 1_000_000, monotonic_us());
+        assert!(
+            runtime.lock().committed_playback.is_some(),
+            "precondition: the anchor must be installed"
+        );
+
+        let _ = runtime.leave_party();
+
+        assert!(
+            runtime.lock().committed_playback.is_none(),
+            "leaving a party must clear committed_playback, or the next session's \
+             projection is derived from the previous session's deadline"
         );
     }
 

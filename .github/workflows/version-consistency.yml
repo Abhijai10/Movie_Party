@@ -1,0 +1,50 @@
+# Version consistency — the application version is declared in four places and
+# nothing else enforces that they agree.
+#
+# AUD-09 added this check, but put it in `ci.yml` — which is `workflow_dispatch`
+# only. The workflow that actually *publishes* is `release.yml`, and that one
+# fires automatically on `push: tags: ["v*"]`. So the guard never ran on the path
+# it was created to protect: tag v0.9.9 with the declarations still at 0.9.8 and
+# ci.yml is never dispatched, release.yml publishes a mislabelled build, and the
+# check stays green because nobody asked it. (ADV-03, found by the
+# post-remediation adversarial audit.)
+#
+# It lives here as a REUSABLE workflow so there is exactly one implementation:
+# `ci.yml` calls it, and `release.yml` calls it *and gates the publish job on
+# it*. Duplicating the script in two files would recreate the drift this check
+# exists to prevent.
+#
+# `workflow_dispatch` is included so it can also be run standalone from the
+# Actions tab.
+
+name: Version consistency
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  version-consistency:
+    name: Version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: All four version declarations must agree
+        run: |
+          set -euo pipefail
+          pkg=$(python3 -c "import json;print(json.load(open('package.json'))['version'])")
+          tauri=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          cargo=$(grep -m1 '^version' src-tauri/Cargo.toml | cut -d'"' -f2)
+          lock=$(awk '/^name = "movie-party"$/{getline; if ($1=="version") {gsub(/"/,"",$3); print $3; exit}}' Cargo.lock)
+          printf '%-28s %s\n' package.json "$pkg" src-tauri/tauri.conf.json "$tauri" src-tauri/Cargo.toml "$cargo" Cargo.lock "$lock"
+          for entry in "src-tauri/tauri.conf.json=$tauri" "src-tauri/Cargo.toml=$cargo" "Cargo.lock=$lock"; do
+            file="${entry%%=*}"; found="${entry#*=}"
+            if [ -z "$found" ] || [ "$found" != "$pkg" ]; then
+              echo "::error::version mismatch: $file declares '$found' but package.json declares '$pkg'"
+              exit 1
+            fi
+          done
+          echo "OK: all four version declarations agree ($pkg)"

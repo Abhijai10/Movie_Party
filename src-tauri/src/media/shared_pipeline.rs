@@ -8,13 +8,28 @@
 //! Declaring it does not compile. Verified against the current tree, it fails
 //! in three places:
 //!   * `QuicServer::run()` now requires
-//!     `Option<Arc<Mutex<LocalSyncCoordinator>>>` (line ~131).
-//!   * `QuicClient::connect(..)`'s argument list changed (line ~132).
-//!   * `QuicClient::send_shared_stream_packet` no longer exists (line ~141).
+//!     `Option<Arc<Mutex<LocalSyncCoordinator>>>` (line ~149).
+//!   * `QuicClient::connect(..)` takes `display_name: String`, not `&str`
+//!     (line ~155).
+//!   * `QuicClient::send_shared_stream_packet` no longer exists (line ~159).
+//!
+//! The third one is the important one, and it was found by the post-remediation
+//! adversarial audit: **the shared-stream transport API is gone from
+//! `network/quic.rs` entirely** — a crate-wide search for the shared-stream send
+//! path finds nothing. So this file is not merely *stale*, it is **orphaned**:
+//! the capability it exists to prove has been removed from the codebase.
+//!
+//! That rules out the "declare and repair it" option. Making it compile would
+//! mean either deleting the transport assertion — which is the only thing the
+//! harness proves, so the file would become a shell that still lies about
+//! coverage — or rebuilding a shared-stream send path, which is Provider Shared
+//! implementation work and explicitly out of scope. The honest options are
+//! therefore **delete it** (recoverable from git history) or leave it loudly
+//! marked, which is what is happening here.
 //!
 //! Do not read this file as evidence that shared-stream transport works. It is
-//! evidence of the opposite: nothing here has been executed in a long time.
-//! Either delete it or repair it as part of the Provider Shared work.
+//! evidence of the opposite: nothing here has been executed in a long time, and
+//! the transport it drives no longer exists.
 
 use std::{
     fs,
