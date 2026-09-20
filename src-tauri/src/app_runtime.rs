@@ -5923,20 +5923,27 @@ impl AppRuntime {
                         // The host owns the canonical position, so its live
                         // player position *is* the canonical one.
                         state.sync.position_ms = snap.position_ms;
-                    } else if let Some(canonical) = Self::projected_host_position_ms(&state) {
-                        // A guest's canonical position is derived from the
-                        // last PLAY commit, not frozen at it (AUD-01): the
-                        // commit target is the position at the commit
-                        // deadline, and it advances at 1× from there. Keeping
-                        // the snapshot truthful here also keeps the Debug HUD
-                        // honest.
-                        state.sync.position_ms = canonical;
                     }
-                    // Only a guest corrects drift; the host owns the
-                    // canonical position. The decision lives in
+                    // AUD-01: the guest's *drift reference* is derived from the
+                    // last PLAY commit — see `drift_correction_for_player`
+                    // below. That projection, not this field, is the fix: the
+                    // P0 was the drift comparison reading a frozen commit
+                    // target.
+                    //
+                    // This deliberately does NOT write the projection into
+                    // `state.sync.position_ms`. That field keeps its
+                    // commit-derived value, which is what the sync snapshot and
+                    // the `m2_integration` suite expect. Writing a
+                    // wall-clock-derived value into it made the field advance
+                    // even when the player did not, which turned those exact
+                    // position assertions into a race — the field is not the
+                    // bug, and widening the change to it was scope I did not
+                    // need.
+                    //
+                    // Only a guest corrects drift; the host owns the canonical
+                    // position. The decision lives in
                     // `drift_correction_for_player` so it is testable at the
-                    // call site rather than only through the threshold
-                    // mapping.
+                    // call site rather than only through the threshold mapping.
                     if let Some(drift) = Self::drift_correction_for_player(&state, snap.position_ms)
                     {
                         correction = Some(drift);
@@ -10037,22 +10044,39 @@ mod tests {
              compared as a frozen anchor rather than a projected one (AUD-01)."
         );
 
-        // The canonical position must also have ADVANCED, not stayed pinned at
-        // the commit target — that is the other half of the same defect.
-        let canonical = runtime.lock().sync.position_ms;
+        // The drift *reference* must also have advanced, not stayed pinned at
+        // the commit target — that is the other half of the same defect, and it
+        // is what the fix actually changes. Asserted on the projection rather
+        // than on `sync.position_ms`, because the field deliberately keeps its
+        // commit-derived value (see the note in the event loop).
+        let projected = {
+            let state = runtime.lock();
+            AppRuntime::projected_host_position_ms(&state)
+                .expect("a playing guest with an anchor must project a position")
+        };
         assert!(
-            canonical > anchor_target_ms,
-            "the guest's canonical position must advance past the commit target; \
-             it stayed at {canonical} (target {anchor_target_ms})"
+            projected > anchor_target_ms,
+            "the drift reference must advance past the commit target; it stayed at \
+             {projected} (target {anchor_target_ms})"
         );
         // And it must advance at 1×, not merely move. A frozen anchor gives 0×;
-        // a projection that added wall-clock time twice would give ~2×. The
-        // window is wide enough to absorb the 200 ms poll granularity.
-        let advanced_ms = canonical - anchor_target_ms;
+        // a projection that added wall-clock time twice would give ~2×.
+        let advanced_ms = projected - anchor_target_ms;
         assert!(
             (1_000..=2_000).contains(&advanced_ms),
-            "the canonical position must advance at ~1× over 1.4 s; it advanced \
+            "the drift reference must advance at ~1× over 1.4 s; it advanced \
              {advanced_ms} ms past the commit target"
+        );
+
+        // The loop must also have left the guest's committed position alone:
+        // this is the field the sync snapshot and the integration suite read,
+        // and writing the wall-clock projection into it was the regression this
+        // narrowing fixes.
+        assert_eq!(
+            runtime.lock().sync.position_ms,
+            anchor_target_ms,
+            "the event loop must not overwrite the guest's commit-derived \
+             sync.position_ms with a wall-clock projection"
         );
     }
 

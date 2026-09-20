@@ -80,6 +80,13 @@ A periodic broadcast was rejected on a concrete correctness ground, not taste: a
 position message would **yank the anchor backwards**, which is the same class of bug. A locally
 derived projection cannot be reordered or duplicated.
 
+**Scope note — narrowed after CI caught an over-reach (§4d).** The first implementation *also* wrote
+the projection into `state.sync.position_ms`. That was wider than the defect and broke
+`m2_integration`'s exact-position assertions on the macOS runner. The projection is now used **only**
+as the drift reference; that field keeps its commit-derived value. The net effect is that the only
+observable difference from pre-fix code is *which value the drift comparison reads* — which is exactly
+the defect, and nothing more.
+
 ### AUD-02 (P1) — the dead position channel
 
 `host_relay_ready_state` was the only production sender of `QuicServerEvent::RoomStateUpdate`, and it
@@ -390,6 +397,86 @@ sound.
 
 **Not closed:** this ran headless with `ao=null`, so **no sound reached a speaker**. Audible output and
 A-V sync across two devices remain manual (M2).
+
+---
+
+## 4d. The push found a real regression — and it was mine
+
+**CI run `35501328187` @ `117e797`.**
+
+| Job | Result |
+|---|---|
+| Frontend | ✅ |
+| **Rust (windows-latest)** | ✅ **553-class pass, 0 failed** — the point of the push |
+| **Rust (macos-latest)** | ❌ **failed at the Tests step** |
+| Version consistency | ✅ (first ever execution) |
+| Cargo audit / pnpm audit | ✅ |
+
+Windows green, macOS red — the **exact inverse** of Batch 7A, which was Windows-only and macOS-green.
+Worth noting for its own sake: neither platform's green implies the other's, and this batch produced a
+counter-example in both directions.
+
+### The failure
+
+```
+test_d_seek_sets_canonical_position_on_both ... FAILED
+  thread panicked at src-tauri/tests/m2_integration.rs:69:13:
+  guest predicate not satisfied within 30s
+```
+
+That is the *same message* as the original Batch 1 defect, so it deserved real suspicion rather than a
+re-run.
+
+### Root cause: my AUD-01 fix was too broad
+
+The first implementation also wrote the wall-clock projection into the guest's
+`state.sync.position_ms`:
+
+```rust
+} else if let Some(canonical) = Self::projected_host_position_ms(&state) {
+    state.sync.position_ms = canonical;     // <-- this line was the regression
+}
+```
+
+`test_d` asserts the guest's canonical position is **exactly** the seek target (`== 42_000`). But:
+
+- the projection advances at 1× wall-clock time, and
+- the event loop only writes it inside the `position_changed || state_changed` block — which, with the
+  suite's non-advancing test player, means **only on state transitions**.
+
+So the field is set to `target + (host_now − commit_deadline)`. A PLAY commit's deadline is ~750 ms in
+the future, so if the transition lands inside that window the field is set to exactly `42_000` and the
+predicate is satisfied. If it lands **after** it, the field overshoots, is never rewritten (no further
+transitions), and the exact-equality predicate can never be satisfied again → 30 s timeout.
+
+**Why every local run passed:** the transition happened to land inside the deadline window. This was a
+race I introduced — my local runs got lucky, twice, and CI did not.
+
+### The fix: narrow it to the defect
+
+The projection is needed as the **drift reference**, not as the *value* of `sync.position_ms`. Removing
+the field write restores that field's exact prior semantics — it is written only at commits — so
+nothing else changes observably, while the drift comparison still uses the projection.
+
+That is a strictly better outcome than the original: the only behavioural difference from pre-fix code
+is *which value the drift comparison reads*, which is precisely the defect.
+
+### Re-verification after the narrowing
+
+- **Mutation control re-run** (the test's assertions changed, so the earlier proof was invalidated):
+  with the projection disabled the regression still goes **red** with the same signature —
+  `seeked to [1000000, 1000000, 1000000]`. Reverted, verified by hash.
+- `m2_integration` **28 passed / 0 failed, three consecutive runs** (the suite whose flakiness this was).
+- `cargo fmt --check` clean; `clippy --all-targets --all-features -D warnings` exit 0 / zero warnings.
+- The AUD-01 test gained an explicit assertion that the loop **must not** overwrite
+  `sync.position_ms` with a projection — so this specific over-reach cannot come back silently.
+
+### The lesson, recorded
+
+A fix that changes a **field's meaning across a whole subsystem** is a bigger change than the defect
+warrants. The audit's own prescription was "redefine the drift anchor" — I did that, and then did more
+by making the field live, and the "more" is what broke. The narrower change is both smaller and safer,
+and the audit's wording was already pointing at it.
 
 ---
 
