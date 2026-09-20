@@ -525,6 +525,55 @@ failed**, Windows **564 passed / 0 failed** (+2 on each, the new fixture tests).
 that needs no libmpv. This is the only test in the repository that would catch a changed test input, and
 it runs where the `real_*` tests cannot.
 
+### ADV-08 — NEW BUG (P2, **pre-existing**, supply chain): the shipped Windows DLL was never integrity-checked
+
+Found by reading the one workflow I had validated structurally but never actually **read**:
+`build.yml`. `actionlint` passes it, and shellcheck found nothing — because neither tool can see a
+*missing* check.
+
+Both Windows build paths (`build.yml` **and** `release.yml`) staged the DLL that ships inside the
+installer with no verification at all:
+
+```powershell
+Invoke-WebRequest -Uri $mpvUrl -OutFile $archive
+& "C:\Program Files\7Zip\7z.exe" x $archive "-o$extract" -y
+Copy-Item $dll.FullName (Join-Path $stageDir "mpv-2.dll")
+```
+
+The URL, release tag **and asset name** were pinned — including the upstream git hash in the filename
+(`mpv-dev-x86_64-20260830-git-e8673660ab.7z`). The **bytes** were not. An asset replaced at the same URL
+would have been extracted and bundled silently into every Windows installer, with nothing to detect it.
+**Pinning a name is not pinning an artifact.**
+
+**Fixed** by pinning the SHA-256 and refusing to extract on mismatch, in both workflows:
+
+```powershell
+$actualHash = (Get-FileHash -Path $archive -Algorithm SHA256).Hash
+if ($actualHash -ne $mpvSha256) {
+  throw "libmpv archive failed its integrity check: ... Refusing to stage an unverified DLL."
+}
+```
+
+**The digest is independently verified, not taken on trust.** GitHub publishes it for that exact asset —
+and I also downloaded the 31,354,620-byte archive and computed its SHA-256 locally
+(`7310560B…C48`), which matches. **A pinned hash that had never been checked against the real file would
+be worse than no hash at all**, because it would look like verification.
+
+**Validation, with its limit stated:** `actionlint` + shellcheck over all four workflows → exit 0.
+**pwsh is not available here, so the PowerShell is NOT machine-validated** — it uses only constructs
+already present and working in the same step (`if (...) { throw "..." }`), and a syntax error would fail
+the Windows leg *loudly* rather than ship silently.
+
+**Left as a follow-up, deliberately:** the two staging steps are duplicated between `build.yml` and
+`release.yml`, so a fix like this has to be applied twice (and could drift). Unifying them is a bigger
+change than a supply-chain fix should carry.
+
+**CI verification:** run `35509742882` @ `5c55dc0` → **SUCCESS, all jobs** (macOS, Windows, Frontend,
+`version-consistency / Version consistency`, both audits). Note this run does **not** exercise the new
+integrity check — that lives in the Windows *staging* steps of `build.yml`/`release.yml`, neither of
+which `ci.yml` runs. It will first execute on the next real Windows build, which is exactly why the
+constructs were kept to ones already proven in that same step.
+
 ### CI verification of this second pass
 
 **Run `35506106235` @ `7aea3e2` → SUCCESS, all jobs** — macOS **571 passed / 0 failed**, Windows
@@ -532,7 +581,7 @@ it runs where the `real_*` tests cannot.
 workflow again. The counts are unchanged from the previous run because the ADV-05 fix replaced one
 assertion with a stronger one rather than adding a test.
 
-**Net across the passes: six findings, and every one came from asking a different question than the
+**Net across the passes: seven findings, and every one came from asking a different question than the
 one that produced the fix.**
 
 | Pass | Finding | Question that found it |
@@ -542,6 +591,7 @@ one that produced the fix.**
 | 2 | ADV-05 — the app says "peer is buffering" at the end of every film | *Who else reads this flag?* |
 | 2 | ADV-06 — a masked failure could ship a degraded libmpv (**pre-existing**) | *Can I validate the workflow I cannot execute?* |
 | 2 | ADV-07 — the fixture generator cannot reproduce the committed fixture | *Is the artifact of record actually reproducible?* |
+| 3 | ADV-08 — the shipped Windows DLL was never integrity-checked (**pre-existing**) | *Have I actually READ every workflow, not just linted it?* |
 | — | AUD-08 — the file is orphaned, not stale | *Can this actually be repaired, or only documented?* |
 
 **CI verification of ADV-06:** run `35507117939` @ `d6d9964` → **SUCCESS, all jobs** (macOS, Windows,
