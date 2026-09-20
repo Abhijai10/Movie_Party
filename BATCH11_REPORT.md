@@ -155,6 +155,42 @@ which the brief ruled out.
 | `vite build` | ✓ 2284 modules, built in 10.93 s |
 | version consistency (all four declarations) | ✓ all `0.9.8` |
 
+### 4a. A flake this batch introduced — found after the first commit, and fixed
+
+The frontend row above was measured **before** the work was committed, and it was
+true at the time. Re-running the full suite against the *committed* tree exposed a
+load-sensitive test that this batch had added:
+
+```
+× has no live reference anywhere in the crate   6437ms
+✓ its obsolete transport API has no live reference either   3ms
+✓ the audit is reading real source, not an empty set   1ms
+```
+
+`has no live reference anywhere in the crate` walks all 97 `.rs` files under
+`src-tauri/src`. That costs **~2.5 s idle but ~6.4 s under full-suite load**
+(vitest runs files in parallel; the workspace is on an external volume), which
+crosses vitest's **5 s** default per-test timeout.
+
+Two things made this worth reporting rather than quietly patching:
+
+* **The signature was misleading in the dangerous direction.** The test failed
+  while the next three assertions — reading the *same* memoised cache — reported
+  1–3 ms. That combination means the walk **completed** and the test was aborted
+  for time, not that it found an offender. Read the other way, it looks like a
+  live reference to `shared_pipeline` survived the deletion.
+* **A single-file run hid it completely** — `17 passed` at 2555 ms. Only the full
+  suite reproduced it, and it reproduced twice.
+
+Fixed by warming the cache in a module-level `beforeAll(…, 30_000)`, so the cost
+is declared rather than left to a default that does not describe it. This is not
+a timeout raised to conceal a defect: the assertions are pure scans with no timing
+semantics, and the failure mode is "the machine was busy".
+
+Re-verified after the fix, full suite: **25 files / 317 tests passed**, the
+affected file at 8224 ms. Test counts are unchanged — no test was added, removed
+or skipped.
+
 ### Count reconciliation
 
 | | Baseline | Final | Δ | Explained by |
@@ -240,8 +276,15 @@ not implemented.
 | | |
 |---|---|
 | Baseline HEAD (CI-verified, unchanged) | `ade8a4f2b2bb695dc78e5c56cae7ab2a6f113240` |
-| AUD-08 + AUD-16 code, tests | `07cf4fe9a235ab1c79f5a1a146f0d84142f285be` |
-| This report | the commit immediately following the above |
+| AUD-08 + AUD-16 code and tests | `07cf4fe9a235ab1c79f5a1a146f0d84142f285be` |
+| This report, first version | `dae7f01a87e5aa61913f1072232776b688d13eb8` |
+| Fix for the flake in §4a | `48668625bee4b9d676032c096b0258d04a9f99cb` |
+| This report, with §4a added | the commit immediately following the above |
+
+The last two entries are stated as a range rather than a single SHA on purpose:
+a document cannot name the commit that contains it, so the row that describes the
+amendment points at its position in the history instead of at a hash it cannot
+know. The substantive work is `07cf4fe`.
 
 Branch `stabilization/v0.9.9-rc1` only. Nothing was pushed, tagged, or released;
 `main` and `v0.9.8` are untouched.
