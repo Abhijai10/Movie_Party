@@ -46,6 +46,10 @@ nothing was rewritten.
 | `260cb06d2914b5133e1562712d661f2a0054209e` | `chore(release): bump version to 0.9.9, and add its release notes` | 5 changed, +82 / −4 |
 | `0c2b5e86d30638be3483f853cfe6ede79a917dd1` | `docs(Batch 12): point the beta validation procedure at the 0.9.9 candidate` | 1 changed, +23 / −2 |
 
+Those two are the **source** commits. Everything after them (this report, and the corrections to it) is
+documentation-only and touches no source file — which is why the candidate is defined by the
+equivalence check below rather than by the branch tip.
+
 **Push:** `git push --no-follow-tags origin stabilization/v0.9.9-rc1` → `ade8a4f..0c2b5e8`.
 `--no-follow-tags` was used deliberately and `push.followTags` was confirmed unset, so **no tag
 travelled with the push**. `main` was never pushed.
@@ -226,9 +230,15 @@ proves nothing:
 Both bundle targets were produced from the candidate:
 
 ```
-target/release/bundle/macos/Movie Party.app
 target/release/bundle/dmg/Movie Party_0.9.9_aarch64.dmg       16,149,396 bytes
 ```
+
+> **A note on the `.app`:** the `.app` was produced at
+> `target/release/bundle/macos/Movie Party.app` and verified there (architecture, `Info.plist`
+> version, 13 dylibs, dependency closure). Tauri's DMG bundling step then **deletes it** — the build
+> log ends with `Cleaning …/bundle/macos/Movie Party.app` — so that path is now empty and the `.app`
+> survives only **inside the DMG**. This does not weaken any check below: the DMG was mounted and its
+> payload inspected directly, which is the stronger test.
 
 | Check | Result |
 |---|---|
@@ -256,9 +266,9 @@ c6b658eb5d0ec748cdd82e37c97cb2fd0a84329cd29ceef4347d47a31f94057d  Movie Party.ap
 **The DMG was mounted and inspected — not inferred from its filename.** It contains
 `Movie Party.app` plus the standard `Applications -> /Applications` symlink, and the app inside
 reports `CFBundleShortVersionString` **0.9.9** with **13** dylibs. The binary inside the mounted DMG
-hashes to `c6b658eb…`, **byte-identical** to both the pre-bundle binary at
-`target/release/movie-party` and the copy in `bundle/macos/`. That is a complete provenance chain
-from the candidate commit to the shipped installer payload.
+hashes to `c6b658eb…`, **byte-identical** to the pre-bundle binary at `target/release/movie-party`
+(and to the copy that was in `bundle/macos/` before the DMG step removed it). That is a complete
+provenance chain from the candidate commit to the shipped installer payload.
 
 > **Correction to a previously recorded belief.** The project skill stated the DMG "always fails here,
 > even with sandbox escalation" and that a DMG can never be verified on this machine. **Both are
