@@ -145,6 +145,21 @@ A `version-consistency` CI job asserts that `package.json`, `src-tauri/tauri.con
 `src-tauri/Cargo.toml` and `Cargo.lock` all declare the same version. Verified locally against the
 real files before committing; it reports all four as `0.9.8`.
 
+**Also verified the way CI will actually run it.** CI executes the step under `bash` on
+`ubuntu-latest`, but my first check was in `zsh`. The script was extracted verbatim from `ci.yml` and
+run with `bash`, exit 0:
+
+```
+package.json                 0.9.8
+src-tauri/tauri.conf.json    0.9.8
+src-tauri/Cargo.toml         0.9.8
+Cargo.lock                   0.9.8
+OK: all four version declarations agree (0.9.8)
+```
+
+Worth doing because the job is new: a shell-dialect difference between my interactive shell and the
+runner is exactly the kind of thing that would have turned the first CI run red for no reason.
+
 ### AUD-08 (P2) — not remediated, deliberately
 
 The audit said `shared_pipeline.rs` "will rot silently". It has already rotted. Declaring it fails in
@@ -498,7 +513,7 @@ tip is still `a44542a`, which is the SHA CI actually verified. So:
 | Rust on Windows | **NOT verified.** No CI run against `1424116`. |
 | Windows clippy (`-D warnings`) | **NOT verified.** |
 | Frontend | Locally verified (287 tests, lint/tsc/build clean) |
-| `version-consistency` job | Logic verified locally; the job itself has never executed |
+| `version-consistency` job | Script verified under `bash` (as CI runs it) against the real files; the job itself has never executed |
 
 This matters concretely: Batch 7A's failure was a Windows-only clippy error that macOS could not see,
 and it happened *before* the test step, so Windows ran no tests at all. I cannot cross-compile to
