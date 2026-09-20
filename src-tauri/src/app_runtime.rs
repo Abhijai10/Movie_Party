@@ -4843,6 +4843,28 @@ impl AppRuntime {
     pub fn host_play(&self) -> AppSnapshot {
         let snapshot = {
             let mut state = self.lock();
+            // AUD-16: an ended room must not be restarted by a play request.
+            //
+            // `apply_end_of_media` leaves the room `Ended`; nothing below this
+            // point checks that. `prepare_play_scheduled` validates *readiness*,
+            // not the current state, so a play from `Ended` would fire
+            // `RoomState::ReadyCheck` and commit a play from the end position —
+            // the film would appear to restart and immediately end again.
+            //
+            // The Cinema play control did exactly that, because it treated
+            // "not PLAYING" as "resume" (the UI half of AUD-16 is fixed in
+            // `CinemaView`). This is the backend half, and it also covers the
+            // paths the UI does not own: a guest's Shared-Controls PLAY request
+            // arrives here through `on_guest_control_request`.
+            //
+            // Refused silently rather than errored: the request is not wrong,
+            // there is simply nothing to play, and the room already reads
+            // `ENDED`. Re-entering the movie is "Back to Lobby" (which resets
+            // the room to `Lobby`) followed by a normal start. Replay semantics
+            // are a product decision and are deliberately not invented here.
+            if state.room_state == RoomState::Ended {
+                return snapshot_from_state(&state);
+            }
             // Idempotent: playing with nothing pending is already PLAYING.
             if state.room_state == RoomState::Playing
                 && state.pending_operation_id.is_none()
@@ -10431,6 +10453,135 @@ mod tests {
                  end the room"
             );
         }
+    }
+
+    /// The state `apply_end_of_media` leaves behind (AUD-03): host role, both
+    /// participants ready, room `Ended`.
+    ///
+    /// Readiness is set deliberately. `prepare_play_scheduled` gates on
+    /// readiness and NOT on the current state, so a room that is ready but
+    /// ended is exactly the case where the missing guard would let the play
+    /// protocol run. If readiness were left unset, the readiness gate would
+    /// refuse the play and the test would pass without proving anything.
+    fn ended_host_runtime() -> AppRuntime {
+        use crate::sync::consensus::ParticipantReadiness;
+
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            state.local_participant.role = "Host".to_string();
+            let coord_room_state = {
+                let mut coord = state
+                    .sync_coordinator
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                coord.host_ready(ParticipantReadiness::ready(5_000));
+                coord.guest_ready(ParticipantReadiness::ready(5_000));
+                coord.ended();
+                coord.room_state
+            };
+            state.room_state = coord_room_state;
+            sync_room_snapshot(&mut state);
+        }
+        runtime
+    }
+
+    /// AUD-16 regression — a play request must not restart an ended room.
+    ///
+    /// The room ends at EOF (AUD-03), but the Cinema play control used to call
+    /// `host_play` anyway, because it treated "not PLAYING" as "resume". Since
+    /// `prepare_play_scheduled` validates readiness rather than the current
+    /// state, an unguarded play from `Ended` fires `RoomState::ReadyCheck` and
+    /// commits a play from the end position — the film appears to restart and
+    /// immediately ends again.
+    ///
+    /// The UI half of AUD-16 is fixed in `CinemaView`; this is the backend half,
+    /// and it is also what covers the paths the UI does not own — a guest's
+    /// Shared-Controls PLAY request reaches `host_play` through
+    /// `on_guest_control_request`.
+    #[test]
+    fn host_play_refuses_to_restart_an_ended_room() {
+        let runtime = ended_host_runtime();
+        assert_eq!(
+            runtime.lock().room_state,
+            RoomState::Ended,
+            "precondition: the room must start out ended"
+        );
+
+        let snapshot = runtime.host_play();
+
+        assert_eq!(
+            snapshot.sync.room_state, "ENDED",
+            "the snapshot the frontend receives must still read ENDED — the \
+             play control's whole job is to not resurrect the room"
+        );
+        let state = runtime.lock();
+        assert_eq!(
+            state.room_state,
+            RoomState::Ended,
+            "host_play must not move an ended room back into the play protocol"
+        );
+        assert!(
+            state.pending_operation_id.is_none(),
+            "no PLAY operation may be scheduled from an ended room"
+        );
+        assert_eq!(
+            state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .room_state,
+            RoomState::Ended,
+            "the coordinator is the state authority; without the guard it would \
+             have been driven to ReadyCheck by prepare_play_scheduled"
+        );
+    }
+
+    /// Negative control for the AUD-16 guard.
+    ///
+    /// Identical readiness, one state earlier: the only difference is that the
+    /// room has not ended. A guard that simply refused every play request would
+    /// pass the test above while breaking the product outright, so this pins
+    /// that a live room still enters the play protocol and actually schedules
+    /// an operation.
+    #[test]
+    fn negative_control_host_play_still_starts_a_room_that_has_not_ended() {
+        use crate::sync::consensus::ParticipantReadiness;
+
+        let runtime = AppRuntime::new();
+        {
+            let mut state = runtime.lock();
+            state.local_participant.role = "Host".to_string();
+            let coord_room_state = {
+                let mut coord = state
+                    .sync_coordinator
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                coord.host_ready(ParticipantReadiness::ready(5_000));
+                coord.guest_ready(ParticipantReadiness::ready(5_000));
+                coord.update_readiness_consensus(5_000);
+                coord.room_state
+            };
+            state.room_state = coord_room_state;
+            sync_room_snapshot(&mut state);
+        }
+        assert_ne!(
+            runtime.lock().room_state,
+            RoomState::Ended,
+            "precondition: this room must NOT be ended, or the control proves nothing"
+        );
+
+        let snapshot = runtime.host_play();
+
+        assert_ne!(
+            snapshot.sync.room_state, "ENDED",
+            "a room that has not ended must still be able to start playback"
+        );
+        assert!(
+            runtime.lock().pending_operation_id.is_some(),
+            "the play protocol must actually have been scheduled — otherwise the \
+             AUD-16 guard is refusing legitimate plays too"
+        );
     }
 
     /// AUD-03: the `Completed` state must have a wire name the frontend can

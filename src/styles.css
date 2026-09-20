@@ -5178,3 +5178,82 @@ input[type=range].mp-range::-webkit-slider-thumb {
         grid-column: 1 / -1;
     }
 }
+
+/* ── AUD-16: end of media ──────────────────────────────────────────────
+   The backend has reported room `ENDED` / player `COMPLETED` since AUD-03,
+   but nothing surfaced it. This is the smallest honest surface: a restrained
+   centred card over a still-visible final frame, and one action.
+
+   Hand-written rather than Tailwind: `styles.css` is a pre-built Tailwind
+   output with no Tailwind dependency or config in the repo, so a new utility
+   class would simply not exist. Every other custom surface here
+   (.buffer-overlay, .privacy-toast, .sync-indicator) is hand-written for the
+   same reason. */
+.movie-finished-overlay {
+    position: absolute;
+    z-index: 6;
+    left: 50%;
+    top: 50%;
+    display: grid;
+    justify-items: center;
+    gap: 10px;
+    width: min(420px, calc(100vw - 36px));
+    transform: translate(-50%, -50%);
+    border: 1px solid rgba(159, 122, 234, 0.24);
+    border-radius: 18px;
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent 42%),
+        rgba(9, 7, 15, 0.76);
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.38);
+    backdrop-filter: blur(18px);
+    padding: clamp(20px, 3vw, 30px);
+    text-align: center;
+    animation: overlay-center-rise 220ms ease both;
+}
+
+.movie-finished-overlay h1 {
+    margin: 0;
+    color: var(--mp-text);
+    font-family: 'Cormorant Garamond', 'Times New Roman', serif;
+    font-size: clamp(1.7rem, 3.2vw, 2.4rem);
+    font-weight: 500;
+    line-height: 1.05;
+}
+
+.movie-finished-overlay p {
+    margin: 0;
+    color: var(--mp-text-2);
+}
+
+.movie-finished-action {
+    margin-top: 8px;
+    border: 1px solid rgba(159, 122, 234, 0.42);
+    border-radius: 999px;
+    background: linear-gradient(180deg, rgba(159, 122, 234, 0.3), rgba(107, 70, 193, 0.3));
+    color: var(--mp-text);
+    cursor: pointer;
+    padding: 10px 26px;
+    font-size: 0.86rem;
+    letter-spacing: 0.06em;
+    transition: background 160ms ease, border-color 160ms ease;
+}
+
+.movie-finished-action:hover {
+    border-color: rgba(159, 122, 234, 0.72);
+    background: linear-gradient(180deg, rgba(159, 122, 234, 0.44), rgba(107, 70, 193, 0.44));
+}
+
+.movie-finished-action:focus-visible {
+    outline: 2px solid rgba(159, 122, 234, 0.9);
+    outline-offset: 2px;
+}
+
+/* The dock disables playback controls in an ended room. Disabled rather than
+   hidden: a control that silently disappears reads as a bug, whereas a
+   disabled one reads as "not available right now" — which is the truth. */
+.cinema-dock button:disabled,
+.cinema-dock button:disabled:hover {
+    opacity: 0.32;
+    cursor: not-allowed;
+    transform: none;
+}

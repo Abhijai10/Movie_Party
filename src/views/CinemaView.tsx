@@ -25,6 +25,7 @@ import {
 import { CallTile } from "../overlays/CallTile";
 import type { CallTileSessionState } from "../overlays/callTileState";
 import { BufferingOverlay } from "../overlays/BufferingOverlay";
+import { MovieFinishedOverlay } from "../overlays/MovieFinishedOverlay";
 import { ProviderStatusOverlay } from "../overlays/ProviderStatusOverlay";
 import { FloatingReactions, ReactionTray } from "../overlays/ReactionTray";
 import { ReconnectOverlay, reconnectLatchAfter } from "../overlays/ReconnectOverlay";
@@ -35,6 +36,13 @@ import {
   pickMediaFile,
 } from "../backend/appRuntime";
 import { ErrorScreenView, extractMpCode } from "./ErrorScreenView";
+import {
+  isMovieEnded,
+  playbackControlsEnabled,
+  playbackToggleAction,
+  shouldShowBufferingOverlay,
+  syncIndicatorFor,
+} from "./cinemaEndState";
 import { ChatCompose, ChatHistoryCard } from "../components/mp/ChatOverlay";
 import {
   emptyBubbleQueue,
@@ -206,6 +214,18 @@ export function CinemaView({
   // The history panel renders unless its 5 s auto-hide has dismissed it
   // (#2) — the compose bar is unaffected and stays for typing.
   const isHistoryVisible = isHistoryOpen && !chatVisibility.historyDismissed;
+
+  // AUD-16: the movie has finished and the room has ended (backend truth since
+  // AUD-03). Every end-of-media decision below is derived from this one value
+  // through the pure helpers in `cinemaEndState`, so the behaviour is testable
+  // without a DOM (the repo has no component-rendering test environment).
+  const movieEnded = isMovieEnded(snapshot.sync.roomState);
+  const syncIndicator = syncIndicatorFor(snapshot.sync.roomState);
+  const showBufferingOverlay = shouldShowBufferingOverlay({
+    roomState: snapshot.sync.roomState,
+    strictSyncPaused: snapshot.sync.strictSyncPaused,
+    bufferingParticipant: snapshot.buffer.bufferingParticipant,
+  });
 
   // The chat toggle ("c" and the dock button): open chat, or — when chat
   // is already open — re-summon an auto-hidden history panel before
@@ -832,21 +852,26 @@ export function CinemaView({
           className={`movie-frame ${snapshot.player.presentation.mode === "EMBEDDED_NATIVE" ? "native-video-active" : ""}`}
         >
           <div className="movie-light" />
-          <div className="movie-prep-state" aria-live="polite">
-            <span className="movie-prep-kicker">
-              {playerHasFailed
-                ? "Playback unavailable"
-                : playerIsPreparing
-                  ? "Preparing playback"
-                  : "Now screening"}
-            </span>
-            <h1>{movieTitle}</h1>
-            {playerHasFailed ? (
-              <p>The local player reported an error. Playback is paused for the room.</p>
-            ) : playerIsPreparing ? (
-              <p>Setting up the local player and synchronizing the room.</p>
-            ) : null}
-          </div>
+          {/* AUD-16: once the film is over this block must not claim "Now
+              screening" — a direct contradiction of the finished card. The
+              frame itself stays; only the status text steps aside. */}
+          {movieEnded ? null : (
+            <div className="movie-prep-state" aria-live="polite">
+              <span className="movie-prep-kicker">
+                {playerHasFailed
+                  ? "Playback unavailable"
+                  : playerIsPreparing
+                    ? "Preparing playback"
+                    : "Now screening"}
+              </span>
+              <h1>{movieTitle}</h1>
+              {playerHasFailed ? (
+                <p>The local player reported an error. Playback is paused for the room.</p>
+              ) : playerIsPreparing ? (
+                <p>Setting up the local player and synchronizing the room.</p>
+              ) : null}
+            </div>
+          )}
           <span className="player-position">
             {formatMs(snapshot.player.positionMs)}
             {snapshot.player.durationMs != null ? ` / ${formatMs(snapshot.player.durationMs)}` : ""}
@@ -856,14 +881,19 @@ export function CinemaView({
             )}
           </span>
         </div>
-        <div className="sync-indicator" aria-live="polite">
-          <span aria-hidden="true" />
-          {snapshot.sync.roomState === "PLAYING" ? (
-            <StatusIndicator state="sync" label="In sync" showLabel={false} />
-          ) : (
-            <StatusIndicator state="waiting" label="Syncing" showLabel={false} />
-          )}
-        </div>
+        {/* AUD-16: an ended room is not synchronizing anything, so the
+            indicator is omitted rather than falling into its "not playing"
+            branch and reading "Syncing". */}
+        {syncIndicator === "NONE" ? null : (
+          <div className="sync-indicator" aria-live="polite">
+            <span aria-hidden="true" />
+            {syncIndicator === "IN_SYNC" ? (
+              <StatusIndicator state="sync" label="In sync" showLabel={false} />
+            ) : (
+              <StatusIndicator state="waiting" label="Syncing" showLabel={false} />
+            )}
+          </div>
+        )}
         <CallTile
           peerName={peerName}
           remoteCameraEnabled={peer?.cameraEnabled ?? false}
@@ -908,12 +938,39 @@ export function CinemaView({
           />
         ) : null}
         <FloatingReactions reactions={snapshot.reactions.slice(-4)} />
-        <BufferingOverlay
-          bufferingParticipant={snapshot.buffer.bufferingParticipant}
-          peerName={peerName}
-          percent={snapshot.buffer.percent}
-          strictSyncPaused={snapshot.sync.strictSyncPaused}
-        />
+        {/* AUD-16: the buffering overlay is suppressed once the film is over.
+            ADV-05 stopped the backend setting `strict_sync_paused` at ENDED,
+            but `bufferingParticipant` is a second, independent input that can
+            still be set as the credits roll — so the flag alone was not
+            enough to keep this overlay off the end of the movie. */}
+        {showBufferingOverlay ? (
+          <BufferingOverlay
+            bufferingParticipant={snapshot.buffer.bufferingParticipant}
+            peerName={peerName}
+            percent={snapshot.buffer.percent}
+            strictSyncPaused={snapshot.sync.strictSyncPaused}
+          />
+        ) : null}
+        {/* AUD-16: the finished card. The final frame stays visible behind it
+            (this does not cover the frame), and it offers exactly one action. */}
+        {movieEnded ? (
+          <MovieFinishedOverlay
+            onBackToLobby={() => {
+              // The same `back_to_lobby` retreat the Ready Check and the
+              // media-missing screen use: it retracts readiness, clears any
+              // pending countdown and returns `screen` to LOBBY, which unmounts
+              // Cinema and runs the existing native-surface detach. Deliberately
+              // not `onLeave` — that raises the destructive Leave / End-for-
+              // everyone confirmation behind a non-destructive label (F14).
+              void backToLobby()
+                .then(onSnapshot)
+                .catch((error: unknown) => {
+                  console.error("back_to_lobby failed", error);
+                  showControlNotice("Movie Party could not return to the lobby.");
+                });
+            }}
+          />
+        ) : null}
         {snapshot.error != null &&
         snapshot.error.startsWith("MP-MEDIA-002") ? (
           <ErrorScreenView
@@ -988,6 +1045,11 @@ export function CinemaView({
         <CinemaControls
           visible={controlsVisible}
           isPlaying={snapshot.sync.roomState === "PLAYING"}
+          // AUD-16: an ended room disables play/pause/seek rather than offering
+          // an action it would refuse. The dock's own `disabled` attribute is
+          // what stops the handler firing; the `playbackToggleAction` guard
+          // above is the second line of defence.
+          playbackDisabled={!playbackControlsEnabled(snapshot.sync.roomState)}
           currentMs={snapshot.player.positionMs}
           durationMs={snapshot.player.durationMs}
           onSeekRelative={(deltaMs) => {
@@ -999,8 +1061,16 @@ export function CinemaView({
               });
           }}
           onTogglePlayback={() => {
-            const action = snapshot.sync.roomState === "PLAYING" ? pausePlayback : resumePlayback;
-            void action()
+            // AUD-16: at ENDED there is no correct action. Returning here is
+            // what stops this control calling `resumePlayback` -> `host_play`
+            // on an ended room (the button is also `disabled`, so this is the
+            // second of two guards). No replay is invented.
+            const action = playbackToggleAction(snapshot.sync.roomState);
+            if (action === "NONE") {
+              return;
+            }
+            const command = action === "PAUSE" ? pausePlayback : resumePlayback;
+            void command()
               .then(onSnapshot)
               .catch((error: unknown) => {
                 console.error("playback toggle failed", error);

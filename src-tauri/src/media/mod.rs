@@ -2,25 +2,27 @@ pub mod cache;
 pub mod local_perfect;
 pub mod manifest;
 pub mod player;
-// AUD-08 (NOT remediated): `shared_pipeline.rs` sits in this directory but is
-// deliberately NOT declared. Declaring it does not compile — it references
-// three APIs that have since changed:
-//   * `QuicServer::run()` now takes `Option<Arc<Mutex<LocalSyncCoordinator>>>`
-//   * `QuicClient::connect(..)` takes `display_name: String`, not `&str`
-//   * `QuicClient::send_shared_stream_packet` no longer exists
-// That third one matters: the post-remediation adversarial audit found that the
-// **shared-stream transport API is gone from `network/quic.rs` entirely**, so
-// this file is *orphaned* rather than merely stale — the capability it exists to
-// prove has been removed from the codebase.
+// AUD-08 (CLOSED): `shared_pipeline.rs` was deleted in this batch. It sat here
+// undeclared — never compiled by any build, its one `#[ignore]`d test unable to
+// run — because declaring it did not compile. It drove three APIs that no longer
+// exist in the shape it expected, and the decisive one was
+// `QuicClient::send_shared_stream_packet`: **the shared-stream transport API is
+// gone from `network/quic.rs` entirely**, so the file was *orphaned* rather than
+// merely stale — the capability it existed to prove had been removed from the
+// codebase.
 //
-// It is a macOS-only proof harness (`screencapture` + `ffmpeg
-// h264_videotoolbox`) for Provider Shared, which remains
-// `shared_available: false`. "Declare and repair it" is therefore not an
-// option: repairing it would mean either gutting the transport assertion (the
-// only thing it proves) or rebuilding a deleted send path, which is Shared
-// implementation work and out of scope. **Deleting it is the owner's call**;
-// left undeclared so it cannot silently rot further, with the finding recorded
-// in `shared_pipeline.rs` and in both audit reports.
+// That ruled out "declare and repair it". Making it compile would have meant
+// either gutting the transport assertion (the only thing the harness proved, so
+// the file would have become a shell still claiming coverage) or rebuilding a
+// deleted send path — which is Provider Shared implementation work, and Provider
+// Shared is deliberately outside the stable scope. Deleting it was the honest
+// option; the file remains recoverable from git history.
+//
+// Nothing here changes what the product can do: **Provider Shared is not
+// implemented and stays disabled** (`shared_available: false`; the stable path
+// is refused by `providers::sync::provider_mode_gate`). There is no capture,
+// encoding, encryption or QUIC media transport in this crate, and none was
+// added or removed by the deletion.
 pub mod shared_stream;
 pub mod stream;
 pub mod transfer;

@@ -33,6 +33,14 @@ type CinemaControlsProps = {
   durationMs: number | null;
   onSeekRelative: (deltaMs: number) => void;
   onTogglePlayback: () => void;
+  /**
+   * AUD-16: the movie has finished and the room has ended, so there is no
+   * correct play/pause/seek action. The controls are disabled rather than
+   * hidden — and this is a real `disabled`, not just a style, so the button
+   * cannot fire `onTogglePlayback` (which would call `host_play` on an ended
+   * room) even if it were reached by keyboard or a stray synthetic click.
+   */
+  playbackDisabled: boolean;
   microphoneEnabled: boolean;
   onToggleMicrophone: () => void;
   cameraEnabled: boolean;
@@ -70,6 +78,7 @@ export function CinemaControls({
   durationMs,
   onSeekRelative,
   onTogglePlayback,
+  playbackDisabled,
   microphoneEnabled,
   onToggleMicrophone,
   cameraEnabled,
@@ -131,12 +140,16 @@ export function CinemaControls({
 
         <div className="mt-5 flex items-center justify-between">
           <div className="flex items-center gap-3">
+            {/* AUD-16: an ended room must not offer "Play", which reads as
+                resume. The label states that playback is unavailable rather
+                than naming an action, because at ENDED there is no action. */}
             <button
               type="button"
               onClick={onTogglePlayback}
+              disabled={playbackDisabled}
               className="w-12 h-12 rounded-full bg-white text-black flex items-center justify-center hover:scale-105 transition"
               data-testid="cinema-play-btn"
-              aria-label={isPlaying ? "Pause" : "Play"}
+              aria-label={playbackDisabled ? "Playback unavailable" : isPlaying ? "Pause" : "Play"}
             >
               {isPlaying ? (
                 <Pause className="w-5 h-5" strokeWidth={2} />
@@ -151,6 +164,7 @@ export function CinemaControls({
               }}
               label="Back 10 seconds"
               testId="cinema-back-btn"
+              disabled={playbackDisabled}
             >
               <RotateCcw className="w-4 h-4" strokeWidth={1.6} />
             </IconBtn>
@@ -160,6 +174,7 @@ export function CinemaControls({
               }}
               label="Forward 10 seconds"
               testId="cinema-forward-btn"
+              disabled={playbackDisabled}
             >
               <RotateCw className="w-4 h-4" strokeWidth={1.6} />
             </IconBtn>
@@ -250,6 +265,7 @@ function IconBtn({
   active,
   hasDot,
   testId,
+  disabled,
 }: {
   children: React.ReactNode;
   onClick?: () => void;
@@ -257,11 +273,14 @@ function IconBtn({
   active?: boolean;
   hasDot?: boolean;
   testId?: string;
+  /** AUD-16: a real `disabled`, so the handler cannot fire. */
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       aria-label={label}
       data-testid={testId}
       className={`relative w-10 h-10 rounded-full flex items-center justify-center transition ${
