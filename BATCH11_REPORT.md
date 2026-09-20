@@ -191,6 +191,22 @@ Re-verified after the fix, full suite: **25 files / 317 tests passed**, the
 affected file at 8224 ms. Test counts are unchanged — no test was added, removed
 or skipped.
 
+Because the distinction mattered here, **every remaining frontend gate was then
+re-run against the committed tree** rather than left on the pre-commit numbers in
+the table above:
+
+| Gate, re-run at HEAD | Result |
+|---|---|
+| `tsc --noEmit` | exit 0, no output |
+| `eslint . --max-warnings=0` | exit 0, no output (1 m 32 s) |
+| `vite build` | exit 0, **2284 modules**, 12.61 s |
+| `vitest run` | 25 files / 317 tests passed |
+
+The Rust gates were not re-run, and do not need to be — `git diff 07cf4fe..HEAD
+-- src-tauri/` is **empty**, so the Rust content at HEAD is byte-identical to what
+`fmt`, `clippy` and `cargo test` measured. That is a mechanical check, not an
+assumption. `dist/` is gitignored, so rebuilding it left the tree clean.
+
 ### Count reconciliation
 
 | | Baseline | Final | Δ | Explained by |
