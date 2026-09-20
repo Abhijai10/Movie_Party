@@ -436,6 +436,53 @@ decision, so I have not invented one.
 Unchanged, and now documented as **orphaned** rather than stale: the shared-stream transport API is gone
 from `network/quic.rs`, so "declare and repair" is impossible. Awaiting detailed instructions.
 
+### ADV-06 — NEW BUG (P2, **pre-existing**): the release script masked a failure that could ship a degraded libmpv
+
+Found by adding a check I had been missing, not by reading code: **`actionlint` 1.7.12 with `shellcheck`
+0.10.0 integration over all four workflows.** I added it specifically because `release.yml` is the one
+workflow I *cannot execute* — dispatching it would build and publish a release.
+
+`release.yml`'s macOS libmpv staging step had:
+
+```bash
+export MPV_PYTHONPATH="$(/tmp/mpv-venv/bin/python -c 'import glad; ...')"
+```
+
+**SC2155**: the declaration's own exit status masks the substitution's. Demonstrated rather than
+asserted:
+
+```
+bash -e -c 'export X="$(false)"; echo reached'     ->  prints "reached", exit 0   (MASKED)
+bash -e -c 'X="$(false)"; export X; echo reached'  ->  aborts,           exit 1   (the fix)
+```
+
+So a failing `glad2` lookup **did not abort the step**. It left `MPV_PYTHONPATH` empty, libplacebo's
+meson would then build **without the OpenGL loader glad2 provides**, and the release would ship that
+libmpv — with nothing in the workflow able to notice, because the real-libmpv tests are skipped there.
+A silently degraded artifact on the irreversible path.
+
+**Fixed** by assigning, verifying, then exporting: the assignment now carries the substitution's status
+so `set -e` aborts, and an explicit empty-value guard fails with a clear `::error` instead of building
+something untrustworthy.
+
+**Pre-existing, not mine** — `git diff 3372d48 HEAD -- release.yml` shows my earlier change was +12/−1
+(the version-consistency job and the `needs` gate) and does not touch that line. It is in scope because
+the brief asked for a hidden-bug scan and the release path was on the list.
+
+**The checks are controlled, which is the point.** `actionlint` on a deliberately broken workflow fails
+with the exact diagnostics expected (a `needs:` reference to a non-existent job, an undefined
+`github.*` property), and the shellcheck integration is proven by the fact that it **found this SC2155
+before the fix and reported nothing after it**. Without those controls, "exit 0" would prove only that
+the tool ran.
+
+**Bonus verification:** actionlint's clean pass on `needs: [resolve-matrix, version-consistency]` means
+both job references resolve — and since the control proves actionlint checks exactly that, the
+release-path wiring I cannot execute is now verified structurally rather than assumed.
+
+**Limitation stated:** actionlint does **not** verify that a local `uses:` target file exists — the
+control's bad `uses:` was not flagged. Covered instead by `test -f` plus `ci.yml`, where the same
+reusable workflow already executes successfully on the real runner.
+
 ### CI verification of this second pass
 
 **Run `35506106235` @ `7aea3e2` → SUCCESS, all jobs** — macOS **571 passed / 0 failed**, Windows
@@ -443,7 +490,7 @@ from `network/quic.rs`, so "declare and repair" is impossible. Awaiting detailed
 workflow again. The counts are unchanged from the previous run because the ADV-05 fix replaced one
 assertion with a stronger one rather than adding a test.
 
-**Net across both passes: four of my own fixes had defects, and every one was found by asking a
+**Net across both passes: five defects found, four of them mine, and every one found by asking a
 different question than the one that produced the fix.**
 
 | Pass | Finding | Question that found it |
@@ -451,6 +498,10 @@ different question than the one that produced the fix.**
 | 1 | ADV-01 — projection depends on an uncalibrated clock | *What does this new value depend on, and who bounds it?* |
 | 1 | ADV-03 — the gate never runs on a tag push | *Does another path bypass the fix?* |
 | 2 | ADV-05 — the app says "peer is buffering" at the end of every film | *Who else reads this flag?* |
+| 2 | ADV-06 — a masked failure could ship a degraded libmpv (**pre-existing**) | *Can I validate the workflow I cannot execute?* |
 | — | AUD-08 — the file is orphaned, not stale | *Can this actually be repaired, or only documented?* |
+
+**CI verification of ADV-06:** run `35507117939` @ `d6d9964` → **SUCCESS, all jobs** (macOS, Windows,
+Frontend, `version-consistency / Version consistency`, both audits).
 
 
