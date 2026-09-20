@@ -207,6 +207,20 @@ The Rust gates were not re-run, and do not need to be — `git diff 07cf4fe..HEA
 `fmt`, `clippy` and `cargo test` measured. That is a mechanical check, not an
 assumption. `dist/` is gitignored, so rebuilding it left the tree clean.
 
+**Swept for the same risk elsewhere — clean, and stated as a negative result.**
+Exactly **two** test files touch the filesystem: `cspPolicy.test.ts` (one small
+file, `tauri.conf.json`) and this batch's `endOfMediaContracts.test.ts`. No test
+uses `node:fs/promises`, `require("fs")`, a dynamic `import("fs")` or
+`import.meta.glob`. Ranked by duration across the green run, the slowest file
+after the fixed one is `tmdbFeed.test.ts` at **409 ms** and everything else is
+under **10 ms** — 12× below the 5 s default. So the exposure was confined to the
+single test that failed, and it is closed.
+
+The fix was verified to be more than a widened timeout: vitest prints any test
+over 300 ms, and the fixed file now prints **none**. The crate-walk test
+previously appeared at 2555 ms; it is now under 300 ms because the cache is
+warmed before it runs, and the cost sits in the budgeted hook instead.
+
 ### Count reconciliation
 
 | | Baseline | Final | Δ | Explained by |
