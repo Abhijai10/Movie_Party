@@ -5,6 +5,14 @@
 #   ./scripts/make-test-media-macos.sh 6          # 6s fixture
 #   ./scripts/make-test-media-macos.sh 3 /tmp/x.mp4
 #
+# With `--with-audio` (any position after the script name) the output also gets
+# a mono 440 Hz AAC track. The committed default stays video-only: the render
+# tests depend on that fixture's duration and frame content, so regenerating it
+# with audio would be a silent behaviour change for them.
+#
+#   ./scripts/make-test-media-macos.sh 3 \
+#       src-tauri/tests/fixtures/movie_party_test_with_audio_320x240.mp4 --with-audio
+#
 # The fixture is COMMITTED to the repository at
 #   src-tauri/tests/fixtures/movie_party_test_320x240.mp4
 # and must stay committed: the real_* tests require it, and before Batch 5 they
@@ -32,6 +40,18 @@ SECONDS_TO_MAKE="${1:-3}"
 OUT="${2:-$REPO_ROOT/src-tauri/tests/fixtures/movie_party_test_320x240.mp4}"
 GENERATOR="$REPO_ROOT/scripts/make-test-media-macos.swift"
 
+# Forward `--with-audio` from any position. Collected rather than positional so
+# `./script --with-audio` works too. The `${arr[@]+...}` form is required:
+# under `set -u`, bash 3.2 (macOS) errors expanding an empty array.
+EXTRA_ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --with-audio) EXTRA_ARGS+=("$arg") ;;
+    esac
+done
+WITH_AUDIO=0
+[ "${#EXTRA_ARGS[@]}" -gt 0 ] && WITH_AUDIO=1
+
 if [ ! -f "$GENERATOR" ]; then
     echo "ERROR: generator not found at $GENERATOR"
     exit 1
@@ -46,7 +66,7 @@ fi
 mkdir -p "$(dirname "$OUT")"
 
 echo "Generating a ${SECONDS_TO_MAKE}s fixture at $OUT"
-swift "$GENERATOR" "$OUT" "$SECONDS_TO_MAKE"
+swift "$GENERATOR" "$OUT" "$SECONDS_TO_MAKE" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 
 # Structural sanity check: an ISO-MP4 with an H.264 (avc1) track. Deliberately
 # not a duration check — the tests validate duration themselves, and the point
@@ -62,6 +82,19 @@ for box in ftyp moov mdat avc1; do
         exit 1
     fi
 done
+
+# With audio requested, assert the audio sample entry really is there. `mp4a`
+# is the AAC sample entry in `stsd`; `soun` is the handler. Checking both means
+# a file that silently ended up video-only cannot be mistaken for a success.
+if [ "$WITH_AUDIO" = "1" ]; then
+    for box in soun mp4a; do
+        if ! strings -a "$OUT" | grep -q "$box"; then
+            echo "ERROR: --with-audio was requested but $OUT has no '$box' marker;"
+            echo "       the audio track was not written."
+            exit 1
+        fi
+    done
+fi
 
 echo "OK: $OUT ($(wc -c <"$OUT" | tr -d ' ') bytes)"
 echo

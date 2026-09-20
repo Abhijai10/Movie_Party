@@ -102,3 +102,43 @@ pub fn require_libmpv() -> PathBuf {
 pub fn require_runtime_and_fixture() -> (PathBuf, PathBuf) {
     (require_libmpv(), require_fixture())
 }
+
+/// The committed H.264 fixture **with a mono AAC track** (AUD-06).
+///
+/// Separate from [`FIXTURE_RELATIVE`] on purpose: the video-only fixture is
+/// depended on by the render tests (duration and frame content), so it must not
+/// gain an audio track. This one exists so audio handling can be exercised at
+/// all — before it, nothing in the repository had ever decoded a sound.
+///
+/// Regenerate with:
+///   ./scripts/make-test-media-macos.sh 3 \
+///       src-tauri/tests/fixtures/movie_party_test_with_audio_320x240.mp4 --with-audio
+pub const AUDIO_FIXTURE_RELATIVE: &str = "tests/fixtures/movie_party_test_with_audio_320x240.mp4";
+
+pub fn audio_fixture_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(AUDIO_FIXTURE_RELATIVE)
+}
+
+/// The audio-bearing fixture, or a loud failure. Same policy as the others: a
+/// missing committed fixture is a broken checkout, never a pass.
+pub fn require_audio_fixture() -> PathBuf {
+    let path = audio_fixture_path();
+    if !path.is_file() {
+        panic!(
+            "PREREQUISITE MISSING: the committed audio fixture is absent at {path:?}.\n\
+             \n\
+             This file is tracked in git, so a missing copy means the checkout is\n\
+             incomplete — NOT that this test may pass.\n\
+             \n\
+             Regenerate it:\n\
+             \n    ./scripts/make-test-media-macos.sh 3 {AUDIO_FIXTURE_RELATIVE} --with-audio\n"
+        );
+    }
+    eprintln!("PREREQUISITE OK: audio fixture at {path:?}");
+    path
+}
+
+/// The bundled runtime, the video-only fixture, and the audio fixture.
+pub fn require_runtime_fixture_and_audio() -> (PathBuf, PathBuf, PathBuf) {
+    (require_libmpv(), require_fixture(), require_audio_fixture())
+}

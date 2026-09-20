@@ -122,7 +122,7 @@ jobs:
             echo "libmpv runtime present — the bundled_libmpv_* tests will execute."
           else
             echo "BUNDLED_LIBMPV=0" >> "$GITHUB_ENV"
-            echo "::warning title=Real playback tests SKIPPED::No bundled libmpv runtime was staged, so the bundled_libmpv_* and production_player_* tests (real_playback_smoke_test, real_native_surface_e2e, real_sw_render_test, real_eof_detection_test, windows_native_surface_e2e) DO NOT EXECUTE in this job. They are reported as an explicit skip, not a pass. Stage the runtime with scripts/stage-libmpv-macos.sh (needs a local libmpv build) to run them."
+            echo "::warning title=Real playback tests SKIPPED::No bundled libmpv runtime was staged, so the bundled_libmpv_*, production_player_* and audio_bearing_fixture_* tests (real_playback_smoke_test, real_native_surface_e2e, real_sw_render_test, real_eof_detection_test, real_audio_test, windows_native_surface_e2e) DO NOT EXECUTE in this job. They are reported as an explicit skip, not a pass. Stage the runtime with scripts/stage-libmpv-macos.sh (needs a local libmpv build) to run them."
           fi
 
       - name: Tests
@@ -142,8 +142,9 @@ jobs:
               --skip bundled_runtime_is_loadable \
               --skip production_player_reports_completed_when_the_movie_ends \
               --skip production_player_is_not_completed_mid_playback \
-              --skip production_player_leaves_completed_after_seeking_back
-            echo "EXPLICIT SKIP: the 8 libmpv-dependent tests above did not execute (no libmpv runtime in this job). The committed media fixture they need IS present; only the runtime is missing."
+              --skip production_player_leaves_completed_after_seeking_back \
+              --skip audio_bearing_fixture_yields_an_audio_track
+            echo "EXPLICIT SKIP: the 9 libmpv-dependent tests above did not execute (no libmpv runtime in this job). The committed media fixtures they need ARE present; only the runtime is missing."
           fi
 
   # Dependency audits — ADVISORY, non-blocking by design. Failures surface
