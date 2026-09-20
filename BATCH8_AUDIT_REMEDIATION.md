@@ -5,8 +5,8 @@
 apply the smallest safe fix, add a regression test, add a negative control, then run the gates.
 **Date:** 2026-09-20
 **Baseline HEAD at start:** `e19c2eb` (branch `stabilization/v0.9.9-rc1`)
-**Verification target:** **`7f2d59a`** — the full code + test state, **CI-verified green on both
-platforms** (run `35502292851`). Earlier commits in the batch are listed in §9.
+**Verification target:** **`3372d48`** — the full code + test state, **CI-verified green on both
+platforms** (run `35502788709`). Earlier commits in the batch are listed in §9.
 
 ---
 
@@ -473,7 +473,9 @@ is *which value the drift comparison reads*, which is precisely the defect.
 
 ### Re-run: green on both platforms
 
-**CI run `35502292851` @ `7f2d59a` → SUCCESS, all six jobs.**
+**CI run `35502292851` @ `7f2d59a` → SUCCESS, all six jobs** — and the final run
+**`35502788709` @ `3372d48` is green too**, so the narrowed fix *and* the flaky-test fix are both
+verified.
 
 | Job | Result |
 |---|---|
@@ -514,7 +516,7 @@ and the audit's wording was already pointing at it.
 
 | Gate | Result |
 |---|---|
-| **CI run `35502292851` @ `7f2d59a`** | **✅ SUCCESS, all six jobs — macOS 568/0, Windows 559/0, Version consistency ✅** |
+| **CI run `35502788709` @ `3372d48`** | **✅ SUCCESS, all six jobs — macOS 568/0, Windows 559/0, Version consistency ✅** |
 | `cargo fmt --check` | **clean** |
 | `cargo clippy --all-targets --all-features -- -D warnings` | **exit 0, zero warnings** |
 | `cargo test` (all targets, CI's skip list) | **568 passed / 0 failed / 2 ignored / 8 filtered** across 17 targets |
@@ -619,8 +621,8 @@ updater — a documentation requirement, not a defect), AUD-14 (the `real_*` tar
 
 **The Windows gap is closed. What remains is real-hardware behaviour, not platform coverage.**
 
-`7f2d59a` **has been through CI and is green on both platforms** (run `35502292851`) — see §4d, which
-also records that the *first* push went red on macOS and why. The remote tip is now `7f2d59a`, not
+`3372d48` **has been through CI and is green on both platforms** (run `35502788709`) — see §4d, which
+also records that the *first* push went red on macOS and why. The remote tip is now `3372d48`, not
 `a44542a`.
 
 | Item | Status |
@@ -670,10 +672,11 @@ player, not the party.
 | This batch — end-of-media runtime test + CI skips | `f2a9b2f` | yes | ✅ |
 | This batch — audio fixture, generator flag, audio test | `1424116` | yes | ✅ |
 | This batch — docs (report, + amendments) | `33e0e4a`, `117e797` | yes | ❌ `117e797` **failed on macOS** (§4d) |
-| **This batch — narrowed AUD-01 + report** | **`7f2d59a`** | **yes** | **✅ both platforms** |
+| This batch — narrowed AUD-01 + report | `7f2d59a` | yes | ✅ both platforms |
+| **This batch — flaky-test fix + report** | **`3372d48`** | **yes** | **✅ both platforms** |
 | Previously CI-verified (Batch 7A) | `a44542a` | yes | ✅ |
 
-**`7f2d59a` is the SHA that matters for verification** — the complete code, test and fixture state,
+**`3372d48` is the SHA that matters for verification** — the complete code, test and fixture state,
 green on macOS and Windows. Note the honest path: the first push (`117e797`) failed on macOS, which is
 why the SHA moved. `f280b6c` is the remediation itself (9 files, +1635 / −57, including the audit
 report); the commits after it add tests, fixtures, documentation, and the AUD-01 narrowing.
@@ -691,7 +694,7 @@ No **P0 or P1 remains as an open code defect.** AUD-01 (P0), AUD-02 and AUD-03 (
 regression-tested; AUD-01's fix was proven non-vacuous by reproducing the original defect on demand
 (and re-proven after it was narrowed); AUD-03 and AUD-06 are verified against real libmpv.
 
-**`7f2d59a` is CI-verified green on both platforms** — macOS 568 passed / 0 failed, Windows 559
+**`3372d48` is CI-verified green on both platforms** — macOS 568 passed / 0 failed, Windows 559
 passed / 0 failed, plus the new version-consistency job. The path there was not clean: the first push
 (`117e797`) went **red on macOS** because my AUD-01 fix was too broad, and §4d records the failure, the
 diagnosis, the narrowing and the re-verification. Windows passed on the first push and every push
