@@ -12,6 +12,8 @@ release notes.
 and it matters, because the second one can add an asset to an *existing* release — so "frozen" is a
 convention here, not something the workflows enforce.
 
+There is also a third build workflow, `rc-build.yml`, which **cannot publish at all** — see below.
+
 ### `release.yml` — the main path
 
 Runs on:
@@ -45,6 +47,29 @@ Two consequences worth knowing before you dispatch it:
 
 So: treat dispatching either workflow against a `v*` tag as a publishing action, not a build.
 
+### `rc-build.yml` — the RC/test artifact build, which never publishes
+
+`rc-build.yml` is **manual-only** (`workflow_dispatch`) and exists for one purpose: producing the
+installers used for **private physical testing**, without any possibility of touching a release.
+
+```
+gh workflow run rc-build.yml --ref main
+```
+
+It builds **both** platforms by default (Windows x64 NSIS `.exe`, macOS Apple Silicon `.dmg`), using
+the same pinned Rust/Node/pnpm versions, the same libmpv staging process and the same pinned hashes as
+`ci.yml`/`release.yml`. It then:
+
+* uploads each installer with `actions/upload-artifact` (never a release asset);
+* writes a `SHA256SUMS.txt` next to each installer and uploads it with the artifact;
+* uses `if-no-files-found: error`, so a missing artifact fails the job instead of passing silently;
+* runs with `permissions: contents: read`, so the token **cannot** create a tag or a release even if a
+  step were added by mistake.
+
+It has no publishing step, no `tagName`, no `tauri-action`, and no `softprops/action-gh-release`. It
+is the safe way to produce a testable binary from any ref — including a bare `main` commit — whereas
+`build.yml` and `release.yml` both become publishing actions when pointed at a `v*` tag.
+
 ### `resolve-matrix`
 
 The `resolve-matrix` job in `release.yml` decides which legs run (`all` / `macos` / `windows`), so a
@@ -54,6 +79,12 @@ macOS-only rebuild does not pay for the Windows build again. Legs:
 |---|---|---|
 | macOS | `macos-latest` | `aarch64-apple-darwin` |
 | Windows | `windows-latest` | `x86_64-pc-windows-msvc` |
+
+It also resolves the **pre-release flag** in the same job, so the two legs cannot disagree. The
+default is `true`: v0.9.9 is a beta, and a release accidentally published as *stable* is far harder to
+walk back than one accidentally published as a *pre-release*. A tag push (which carries no inputs)
+takes that same default; a manual dispatch can opt out by setting the `prerelease` input to `false`.
+`tauri-action` receives the resolved value — there is no hardcoded `prerelease:` left in the workflow.
 
 ### The libmpv runtime is staged per platform, not committed
 
@@ -76,11 +107,58 @@ A **local** macOS release build needs the runtime staged by hand first
 (`./scripts/stage-libmpv-macos.sh`); otherwise the bundle simply ships without it and plays nothing.
 A system-wide `mpv` install is never used.
 
-### The TMDB secret
+### The TMDB credential
 
 `VITE_TMDB_TOKEN` (repo secret, never committed) is baked into the frontend at build time so both
 installs get Home posters out of the box. A key pasted in Settings overrides it per device, so a
 retired shared key never strands an install.
+
+**Decision: it is a client-side credential, and it is exposed in the built app.** This is stated
+plainly rather than glossed, because the opposite is easy to assume:
+
+* Vite **statically inlines** every `VITE_*` value into the JavaScript bundle. The key is therefore
+  present in `dist/` and in every installer built from it, and is **recoverable by anyone who has an
+  installer** — no special tooling required.
+* It follows that the key must be **safe to expose** and **rotatable**, and it is treated that way.
+  "Not committed to the repo" prevents a *source* leak (forks, archives, `git log`); it does **not**
+  make the value secret in the shipped product, and the project does not claim that it does.
+* **If it must remain secret, it cannot be shipped this way.** The options would be to serve it from
+  a backend, or to require each device to paste its own key in Settings and ship no default at all.
+  Neither is warranted for a private two-person RC, so for this release the credential stays bundled
+  and is documented as public-and-rotatable instead.
+
+The comments in `src/home/tmdbFeed.ts`, `src/vite-env.d.ts`, `.env.example`, `release.yml` and the
+README all say the same thing, so the claim cannot drift between them.
+
+### Gating: what must be true before a `v*` tag is pushed
+
+**A `v*` tag is never safe merely because the version-consistency check passed.** That check proves the
+four version declarations agree — nothing more. It says nothing about whether the code works, whether
+the tests pass on the tagged commit, or whether the product has ever been run by a human.
+
+The release procedure is therefore a strict sequence, and each step consumes the *output* of the
+previous one. The **same commit SHA** must survive all of it:
+
+| # | Step | Evidence required | Where |
+|---|---|---|---|
+| 1 | Freeze the candidate | One exact SHA, recorded | — |
+| 2 | Full CI green **on that SHA** | `ci.yml` run whose `headSha` equals the candidate — every job, not just "started" | Actions → CI |
+| 3 | Physical beta green **on that SHA** | Two devices, both built from that SHA, real media, real audio, recorded evidence | `BATCH7B_REAL_BETA_VALIDATION.md` |
+| 4 | Final read-only GO audit **on that SHA** | No P0/P1, no unresolved stable-scope P2, tested SHA == SHA to be tagged | audit report |
+| 5 | Tag + release | Only now | `release.yml` |
+
+Two rules that fall out of this:
+
+* **If any source or workflow change lands after step 2, the SHA moves and steps 2–4 must be repeated.**
+  A documentation-only commit also moves `HEAD`; the equivalence check
+  (`git diff --stat <audited-sha>..HEAD -- src/ src-tauri/` prints nothing) is what lets a doc commit be
+  waved through, and it must be *run*, not assumed.
+* **CI success is not a substitute for step 3.** `ci.yml` skips the real-libmpv and real-Chrome tests
+  by design, so a green CI run opened no window, played no frame and produced no sound.
+
+This is a documentation-only gate: the workflows cannot enforce step 3, so the enforcement is the
+procedure above. Adding automation for a step that fundamentally requires two physical machines would
+be theatre.
 
 ---
 
