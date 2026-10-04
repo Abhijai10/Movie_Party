@@ -35,6 +35,15 @@ while **never being committed** to the repo:
    (GitHub → Settings → Secrets and variables → Actions → New repository secret).
    `.github/workflows/release.yml` passes it to the build.
 
+> **Not committing it is not the same as keeping it secret.** `VITE_*` values are
+> statically inlined by Vite into the shipped JavaScript bundle, so the key is
+> **recoverable from any built installer** by anyone who has one. Treat it as a
+> public client credential: it must be safe to expose, and it must be rotatable.
+> Do not put anything in `VITE_TMDB_TOKEN` that would be damaging to leak — this is
+> why the design deliberately does not claim the installed app protects it. If a
+> credential ever *must* stay secret, it cannot be shipped this way; it would have to
+> live behind a server, or be entered per device in Settings.
+
 **If the shared key stops working**, any device can paste a replacement key in
 **Settings → General → "Trending posters (TMDB)"** — a pasted key always overrides the
 bundled one on that device, no rebuild needed. With no key at all the app falls back to

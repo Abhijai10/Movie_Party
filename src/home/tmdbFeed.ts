@@ -113,8 +113,17 @@ export const TMDB_TOKEN_STORAGE_KEY = "mp_tmdb_token";
  * call time (not a module const) so tests can stub the env per-case; in
  * a production build the call site is still replaced by the inlined
  * literal. It is deliberately NOT committed: a key in the repo would
- * leak into any fork or archive of the source. Resolution priority per
- * device:
+ * leak into any fork or archive of the source.
+ *
+ * **Inlining makes it public, not secret.** Because Vite substitutes the
+ * literal into the shipped JavaScript, the key is recoverable from any built
+ * installer. It is therefore treated as a public, rotatable client
+ * credential: it must be safe to expose, and it is assumed to be. Do not put
+ * anything here that would be damaging to leak — a credential that genuinely
+ * must stay secret cannot be shipped in a client bundle at all. See
+ * docs/RELEASE_PROCESS.md § "The TMDB credential".
+ *
+ * Resolution priority per device:
  *   1. A key pasted in Settings → General (localStorage) — always wins,
  *      so if the shared key dies it can be swapped per device without a
  *      new build.
