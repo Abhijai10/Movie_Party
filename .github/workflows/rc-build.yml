@@ -1,0 +1,231 @@
+name: RC build (test artifacts — never publishes)
+
+# Manual-only. Produces the PRIVATE release-candidate installers used for
+# physical beta testing — nothing else.
+#
+#   gh workflow run rc-build.yml --ref main
+#
+# Difference from the other two build workflows, and the reason this one
+# exists:
+#
+#   * release.yml  publishes a GitHub Release when pointed at a v* tag.
+#   * build.yml    is Windows-only, and attaches the installer to a release
+#                  when pointed at a v* tag.
+#   * rc-build.yml builds BOTH platforms, uploads only workflow artifacts,
+#                  and has NO publishing step at all — there is nothing here
+#                  that can create a tag, create a release, or add an asset to
+#                  an existing release. `permissions: contents: read` makes
+#                  that a property of the token, not just of the YAML.
+#
+# Toolchain pins, the libmpv staging process and its hashes are copied from
+# ci.yml / release.yml verbatim so an RC artifact is built the same way a
+# release artifact would be.
+
+on:
+  workflow_dispatch:
+
+# Read-only on purpose: this workflow must be incapable of writing to the
+# repository, so it can never create or modify a tag or a release.
+permissions:
+  contents: read
+
+jobs:
+  # Resolve the version once, from package.json, so the artifact names carry
+  # the real version without a fifth hand-maintained copy of it. This job is
+  # read-only and builds nothing.
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(python3 -c "import json;print(json.load(open('package.json'))['version'])")"
+          if [ -z "$VERSION" ]; then
+            echo "::error title=No version::package.json declares no version, so the RC artifacts cannot be named."
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building RC test artifacts for version $VERSION"
+
+  windows:
+    name: Windows x64 RC installer
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.10.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: pnpm
+
+      # Pinned toolchain — same rationale as ci.yml / release.yml: never let the
+      # build toolchain drift from the one the code was verified against.
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      # Identical to build.yml / release.yml, including the pinned SHA-256:
+      # the DLL staged here is bundled into the installer, so pinning the asset
+      # *name* is not enough (ADV-08).
+      - name: Download and stage libmpv (Windows)
+        shell: pwsh
+        run: |
+          $mpvRelease = "20260830"
+          $mpvAsset = "mpv-dev-x86_64-20260830-git-e8673660ab.7z"
+          $mpvSha256 = "7310560BD25CC760282E8754A389302629C6E748261030C3870E1CB2F80CDC48"
+          $mpvUrl = "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/$mpvRelease/$mpvAsset"
+          $archive = Join-Path $env:RUNNER_TEMP "mpv-dev.7z"
+          $extract = Join-Path $env:RUNNER_TEMP "mpv-dev"
+          Invoke-WebRequest -Uri $mpvUrl -OutFile $archive
+          $actualHash = (Get-FileHash -Path $archive -Algorithm SHA256).Hash
+          if ($actualHash -ne $mpvSha256) {
+            throw "libmpv archive failed its integrity check: expected $mpvSha256 but got $actualHash. Refusing to stage an unverified DLL."
+          }
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          & "C:\Program Files\7-Zip\7z.exe" x $archive "-o$extract" -y | Out-Null
+          $dll = Get-ChildItem -Path $extract -Recurse -Filter "libmpv-2.dll" | Select-Object -First 1
+          if (-not $dll) { throw "libmpv-2.dll was not found in the downloaded archive" }
+          $stageDir = "src-tauri/mpv_runtime"
+          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+          Copy-Item $dll.FullName (Join-Path $stageDir "mpv-2.dll") -Force
+          Get-Item (Join-Path $stageDir "mpv-2.dll") | Select-Object Name, Length
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm tauri build
+
+      # Discover the installer rather than hardcoding a path, and fail loudly
+      # if the build produced nothing — `if-no-files-found: error` would
+      # otherwise be the first thing to notice.
+      - name: Locate the NSIS installer
+        id: bundle
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path target -Recurse -Filter *.exe -File |
+            Where-Object { $_.FullName -like '*\release\bundle\nsis\*' } |
+            Select-Object -First 1
+          if (-not $exe) {
+            throw "tauri build finished but no NSIS .exe was found under target\**\release\bundle\nsis\"
+          }
+          "dir=$($exe.DirectoryName)" >> $env:GITHUB_OUTPUT
+          "Found installer: $($exe.FullName)"
+
+      - name: SHA-256 checksums
+        shell: pwsh
+        run: |
+          $dir = "${{ steps.bundle.outputs.dir }}"
+          $lines = Get-ChildItem -Path $dir -Filter *.exe -File | ForEach-Object {
+            $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "{0}  {1}" -f $hash, $_.Name
+          }
+          $lines | Set-Content -Path (Join-Path $dir "SHA256SUMS.txt") -Encoding ascii
+          $lines
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Movie-Party-v${{ needs.version.outputs.version }}-RC-Windows-x64
+          path: |
+            ${{ steps.bundle.outputs.dir }}/*.exe
+            ${{ steps.bundle.outputs.dir }}/SHA256SUMS.txt
+          if-no-files-found: error
+          compression-level: 0
+
+  macos:
+    name: macOS arm64 RC DMG
+    needs: version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.10.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      # Identical to release.yml. Homebrew's mpv is GPL and cannot be bundled in
+      # this proprietary app, so the LGPL runtime is compiled from pinned,
+      # SHA-256-verified sources (ADV-09).
+      - name: Stage LGPL libmpv runtime (macOS)
+        shell: bash
+        run: |
+          brew install meson ninja pkg-config freetype fribidi libpng \
+            brotli gettext pcre2 glib
+          python3 -m venv /tmp/mpv-venv
+          /tmp/mpv-venv/bin/pip install --quiet glad2 jinja2 markupsafe
+          # Declare and assign separately, then verify (SC2155): under `set -e`
+          # a failing lookup inside `export X="$(...)"` does NOT abort, and an
+          # empty MPV_PYTHONPATH would silently build libplacebo without its
+          # OpenGL loader.
+          MPV_PYTHONPATH="$(/tmp/mpv-venv/bin/python -c 'import glad; import os; print(os.path.dirname(os.path.dirname(glad.__file__)))')"
+          if [ -z "$MPV_PYTHONPATH" ]; then
+            echo "::error title=glad2 not importable::MPV_PYTHONPATH came back empty, so libplacebo would be built without its OpenGL loader. Refusing to build a libmpv that cannot be trusted."
+            exit 1
+          fi
+          export MPV_PYTHONPATH
+          echo "MPV_PYTHONPATH=$MPV_PYTHONPATH"
+          bash ./scripts/build-libmpv-macos.sh
+          ls -la src-tauri/mpv_runtime/
+
+      - run: pnpm install --frozen-lockfile
+
+      # Explicit target, matching release.yml: the project ships Apple Silicon.
+      - run: pnpm tauri build --target aarch64-apple-darwin
+
+      - name: Locate the DMG
+        id: bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg="$(find target -type f -name '*.dmg' -path '*/release/bundle/dmg/*' | head -n 1)"
+          if [ -z "$dmg" ]; then
+            echo "::error title=No DMG produced::tauri build finished but no .dmg was found under target/**/release/bundle/dmg/"
+            exit 1
+          fi
+          dir="$(dirname "$dmg")"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "Found DMG: $dmg"
+
+      - name: SHA-256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.bundle.outputs.dir }}"
+          shasum -a 256 ./*.dmg > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Movie-Party-v${{ needs.version.outputs.version }}-RC-macOS-arm64
+          path: |
+            ${{ steps.bundle.outputs.dir }}/*.dmg
+            ${{ steps.bundle.outputs.dir }}/SHA256SUMS.txt
+          if-no-files-found: error
+          compression-level: 0

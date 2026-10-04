@@ -18,9 +18,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v0.9.4)"
+        description: "Release tag (e.g. v0.9.9)"
         required: true
-        default: "v0.9.4"
+        default: "v0.9.9"
       only:
         description: "Build only this OS leg (macos / windows / all)"
         required: false
@@ -30,6 +30,17 @@ on:
           - all
           - macos
           - windows
+      prerelease:
+        # v0.9.9 is a BETA. The default is therefore `true`, because a release
+        # that is accidentally published as stable is far harder to walk back
+        # than one that is accidentally published as a pre-release — and the
+        # previous hardcoded `false` made every release stable by default.
+        # A tag push has no inputs and uses the same safe default; see the
+        # `resolve-matrix` job, which is the single place this is decided.
+        description: "Publish as a GitHub pre-release (beta)"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -54,6 +65,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       legs: ${{ steps.pick.outputs.legs }}
+      prerelease: ${{ steps.pick.outputs.prerelease }}
     steps:
       - id: pick
         shell: bash
@@ -68,6 +80,24 @@ jobs:
           esac
           echo "legs=$LEGS" >> "$GITHUB_OUTPUT"
           echo "Building legs: $LEGS"
+
+          # Pre-release flag — resolved in exactly one place so the two legs
+          # cannot disagree. v0.9.9 is a beta, so the default is `true`: a
+          # release accidentally marked stable is far harder to walk back than
+          # one accidentally marked pre-release. A tag push carries no inputs
+          # and therefore takes the same safe default; a manual dispatch can
+          # opt out explicitly by setting the `prerelease` input to false.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PRERELEASE="${{ inputs.prerelease }}"
+          else
+            PRERELEASE="true"
+          fi
+          case "$PRERELEASE" in
+            true|false) ;;
+            *) echo "::error title=Bad prerelease input::expected true or false, got '$PRERELEASE'"; exit 1 ;;
+          esac
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE"
 
   publish-tauri:
     name: Release ${{ matrix.os }}
@@ -178,6 +208,12 @@ jobs:
       # so both installs (owner + friend) get posters out of the box. A
       # key pasted in Settings always overrides it per device, so a
       # retired shared key never strands an install.
+      #
+      # HONESTY NOTE: because Vite inlines it, this value is NOT secret in
+      # the shipped app — it is recoverable from any installer. It must
+      # therefore be a public, rotatable client credential, and it is treated
+      # as one. Do not move anything here that would be damaging to leak.
+      # See docs/RELEASE_PROCESS.md § "The TMDB credential".
       # ── Release body: derived from the tag's own notes, never hardcoded ──
       # The previous body was a hardcoded string matching the v0.9.5 section
       # of RELEASE_NOTES.md verbatim, and it was reused unchanged for v0.9.5,
@@ -249,5 +285,8 @@ jobs:
           # v0.9.5/v0.9.6/v0.9.8 all ended up describing v0.9.5.
           releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
-          prerelease: false
+          # v0.9.9 is a beta. Resolved once in `resolve-matrix` (default: true
+          # for both a tag push and a manual dispatch) rather than hardcoded
+          # here, so the pre-release flag cannot drift between the two legs.
+          prerelease: ${{ needs.resolve-matrix.outputs.prerelease }}
           args: ${{ matrix.args }}
