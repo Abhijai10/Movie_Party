@@ -867,6 +867,9 @@ export type StoredSchedule = {
 
 export type AppMetadataInfo = {
   appName: string;
+  /** The application version, e.g. "0.9.9". Derived on the Rust side from the
+   *  crate's package metadata, so it always matches the shipped manifests. */
+  appVersion: string;
   protocolMajor: number;
   protocolMinor: number;
 };

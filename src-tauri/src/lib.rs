@@ -220,6 +220,7 @@ fn init_listener(app: tauri::AppHandle, runtime: tauri::State<'_, app_runtime::A
 fn app_metadata() -> AppMetadata {
     AppMetadata {
         app_name: APP_NAME,
+        app_version: env!("CARGO_PKG_VERSION"),
         protocol_major: PROTOCOL_MAJOR,
         protocol_minor: PROTOCOL_MINOR,
     }
@@ -1053,6 +1054,13 @@ fn retention_save_as(
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 struct AppMetadata {
     app_name: &'static str,
+    /// The application version, taken from the crate's own package metadata
+    /// (`src-tauri/Cargo.toml`). This is deliberately NOT a second hardcoded
+    /// literal: `CARGO_PKG_VERSION` is the compile-time value of the same
+    /// declaration the version-consistency gate compares against
+    /// `package.json`, `tauri.conf.json` and `Cargo.lock`, so there is exactly
+    /// one place to bump and no way for this field to drift from the others.
+    app_version: &'static str,
     protocol_major: u16,
     protocol_minor: u16,
 }
@@ -1068,6 +1076,41 @@ mod tests {
         assert_eq!(metadata.app_name, APP_NAME);
         assert_eq!(metadata.protocol_major, 1);
         assert_eq!(metadata.protocol_minor, 0);
+    }
+
+    /// The Settings "App version" row used to render the app *name*, because
+    /// `app_metadata()` carried no version field at all and the frontend fell
+    /// back to `info.appName`. These two assertions are the regression guard
+    /// for that defect: the reported version must be the crate's real package
+    /// version, and it must never be the app name.
+    #[test]
+    fn metadata_reports_the_package_version_not_the_app_name() {
+        let metadata = app_metadata();
+
+        assert_eq!(metadata.app_version, env!("CARGO_PKG_VERSION"));
+        assert!(
+            !metadata.app_version.is_empty(),
+            "the version reported to the UI must never be empty"
+        );
+        assert_ne!(
+            metadata.app_version, metadata.app_name,
+            "the version field must not echo the app name"
+        );
+        // A real semver-shaped version, not a placeholder.
+        let parts: Vec<&str> = metadata.app_version.split('.').collect();
+        assert_eq!(
+            parts.len(),
+            3,
+            "expected a three-part version, got {:?}",
+            metadata.app_version
+        );
+        for part in parts {
+            assert!(
+                !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()),
+                "every version component must be numeric, got {:?}",
+                metadata.app_version
+            );
+        }
     }
 
     /// §16: the invite QR renderer produces a real scannable SVG for a

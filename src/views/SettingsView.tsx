@@ -26,6 +26,11 @@ import {
   readTmdbStatus,
   setTmdbToken,
 } from "../home/tmdbFeed";
+import {
+  metadataDisplay,
+  UNKNOWN_METADATA,
+  type MetadataDisplay,
+} from "./settingsMetadata";
 
 /**
  * UI_UX_SPEC §55–§62 — Settings.
@@ -148,10 +153,7 @@ export function SettingsView({ snapshot, onBack, onSnapshot }: SettingsViewProps
 
   const [capabilities, setCapabilities] = useState<ProviderCapability[]>([]);
   const [tailscale, setTailscale] = useState<TailscaleReadiness | null>(null);
-  const [metadata, setMetadata] = useState<{ appVersion: string; protocol: string }>({
-    appVersion: "—",
-    protocol: "—",
-  });
+  const [metadata, setMetadata] = useState<MetadataDisplay>(UNKNOWN_METADATA);
   const [exportedBundle, setExportedBundle] = useState<string | null>(null);
   // TMDB hero key: stored only in localStorage on this device.
   const [tmdbTokenSaved, setTmdbTokenSaved] = useState<boolean>(() =>
@@ -235,11 +237,11 @@ export function SettingsView({ snapshot, onBack, onSnapshot }: SettingsViewProps
       if (!cancelled) setTailscale(readiness);
     });
     void getAppMetadataInfo().then((info) => {
-      if (!cancelled && info) {
-        setMetadata({
-          appVersion: info.appName,
-          protocol: `V${String(info.protocolMajor)}.${String(info.protocolMinor)}`,
-        });
+      if (!cancelled) {
+        // The row labelled "App version" shows the real version — never the
+        // app name. See settingsMetadata.ts for why this mapping is a tested
+        // pure function rather than inline JSX.
+        setMetadata(metadataDisplay(info));
       }
     });
     return () => {
