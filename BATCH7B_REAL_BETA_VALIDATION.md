@@ -24,45 +24,57 @@ unproven.**
 
 ## 1. Build under test — provenance must be recorded per device
 
-The stabilized code exists only on the candidate branch; there is no released installer for it.
-Pick **one** of the two options below and record which one was used on **both** devices.
+The stabilized code is on `main`. Physical beta testing uses **installers built by the RC artifact
+workflow**, not local builds, so that both devices run the same bytes and the provenance is recorded
+by CI rather than by hand.
 
 | Option | Build | SHA | Notes |
 |---|---|---|---|
-| **A (recommended)** | Local build from `stabilization/v0.9.9-rc1` | `260cb06d2914b5133e1562712d661f2a0054209e` | The **v0.9.9 candidate**: Batches 1–11 plus the 0.9.9 version bump (all four declarations read `0.9.9`). Requires toolchain + libmpv staging on macOS. |
-| **B (fallback)** | GitHub Release **v0.9.8** installer | `bb225778434e3f07923e03e85d7d7cc1db79146c` | **Does NOT contain the Batch 1 sequence-reorder fix, nor anything from Batches 2–11.** A run on Option B validates v0.9.8, not the 0.9.9 candidate, and must be labelled as such in the sign-off. |
+| **A (recommended)** | `.github/workflows/rc-build.yml` artifacts (Windows `.exe`, macOS `.dmg`) | **`FINAL_MAIN_SHA`** | The frozen RC candidate. Dispatched with `gh workflow run rc-build.yml --ref main`; the workflow uploads both installers plus a `SHA256SUMS.txt` per platform and **creates no tag and no release**. The SHA it built is the run's `headSha` — record it. |
+| **B (fallback)** | Local build from `main` | **`FINAL_MAIN_SHA`** | Only if the artifacts cannot be installed. Requires toolchain + libmpv staging on macOS (see below). Record the SHA you actually built. |
+
+**`FINAL_MAIN_SHA` is the tip of `main` for this task.** The concrete 40-character value is recorded in
+`FINAL_MAIN_RECONCILIATION_AND_RC_BUILD_REPORT.md` §7, and can always be obtained from a checkout with:
+
+```bash
+git rev-parse origin/main
+```
+
+The superseded candidate `746775d` must **not** be used, and neither must `260cb06` (the earlier Batch 12
+anchor) — both are ancestors of `FINAL_MAIN_SHA` and both predate the pre-beta fixes in this task.
 
 ### Confirming you are on the candidate
 
-`260cb06` is the commit that makes the version `0.9.9`; it is the code this beta is
-about. Documentation commits may follow it on the branch and change no application
-code, so confirm your checkout is code-identical to the candidate **before** testing:
+`FINAL_MAIN_SHA` is the tip of `main`; documentation commits made *after* the RC artifacts were built
+change no application or workflow code, so confirm your checkout is code-identical to the candidate
+**before** testing:
 
 ```bash
-git rev-parse HEAD                                   # what you actually built
-git diff --stat 260cb06..HEAD -- src/ src-tauri/     # must print nothing
+git rev-parse HEAD                                        # what you actually built
+git diff --stat FINAL_MAIN_SHA..HEAD -- src/ src-tauri/ .github/   # must print nothing
 ```
 
-If that diff prints anything, you are **not** on the candidate. Record the SHA you
-really built and report the discrepancy rather than proceeding.
+If that diff prints anything, you are **not** on the candidate. Record the SHA you really built and
+report the discrepancy rather than proceeding.
 
-**The application cannot display its own version.** Settings → *App version* shows the
-app **name** — `app_metadata` returns only `app_name`/`protocol_major`/`protocol_minor`,
-and the view binds the name into a row labelled "App version" (`SettingsView.tsx`).
-There is no version field to read. So per-device provenance **cannot** be taken from the
-UI; record it from the build you installed, using the commands above.
+**The Settings screen now displays the real application version.** `Settings → Diagnostics → App
+version` reads a `app_version` field that the backend derives from the crate's own package metadata
+(`CARGO_PKG_VERSION`), so it agrees with the shipped manifests by construction. You may use it as a
+cross-check — but the authoritative per-device provenance is still the **installer filename and its
+SHA-256**, because the version alone does not distinguish two different commits.
 
 **Record before starting:**
 
 ```
 Device A (host) : OS + version ..............  Build option (A/B): ....  SHA: ............
 Device B (guest): OS + version ..............  Build option (A/B): ....  SHA: ............
-Candidate both devices must match: 260cb06d2914b5133e1562712d661f2a0054209e
+Candidate both devices must match: FINAL_MAIN_SHA  (see §7 of the reconciliation report)
+Installer SHA-256 (A): ..........................  Installer SHA-256 (B): ..........................
 ```
 
 Both devices **must** run the same SHA. A mixed-version run is not a valid beta result.
 
-### macOS libmpv prerequisite (Option A)
+### macOS libmpv prerequisite (Option B only)
 
 A clean checkout has no bundled libmpv (`src-tauri/mpv_runtime/*` is gitignored). On macOS the
 runtime must be built and staged first:
@@ -119,7 +131,7 @@ artefact is a NOT TESTED.
 | Two physical devices (one Windows, one macOS ideally — cross-platform is the real risk) | everything | all tests BLOCKED |
 | Tailscale installed and **signed in to the same tailnet** on both devices | T01–T28 | T02, T03, T04, T16, T17, T27 BLOCKED |
 | Real media: ≥1 feature-length file (~2 h), ≥1 large file (≥4 GB), and multiple containers/codecs (MP4/H.264, MKV/H.265, and at least one audio-only or 5.1 track) | T05, T21, T22, T23 | those tests BLOCKED |
-| libmpv staged (macOS, Option A) | all local playback | all local playback BLOCKED |
+| libmpv staged (macOS, Option B only) | all local playback | all local playback BLOCKED |
 | Camera + microphone, with OS permission granted to the app | T26 | T26 BLOCKED |
 | Provider accounts (Netflix / Prime / JioHotstar) signed in on the **managed Chrome** profile, on both devices | T25 | T25 BLOCKED (sync) |
 | Working DRM playback in the managed browser | T25 | T25 BLOCKED — note that **Provider Shared is deliberately unavailable** (§5) |
@@ -593,6 +605,43 @@ two real devices with this codebase.**
 
 ## 7. Exact next action
 
+### 7.1 The intended physical validation, in order
+
+Both devices run **the same `FINAL_MAIN_SHA`**, installed from the RC artifacts, on **one Tailscale
+tailnet**, with a **real feature-length movie that has audio**. Work down this list; each step assumes
+the previous one passed.
+
+| # | Step | Notes / evidence channel |
+|---|---|---|
+| 1 | Install the Windows `.exe` on Device B | Record installer filename + SHA-256 |
+| 2 | Install the macOS `.dmg` on Device A | Record DMG filename + SHA-256; expect the Gatekeeper first-launch step (ad-hoc signed, not notarized) |
+| 3 | Both devices on the **same tailnet** | `tailscale status` on each; `tailscale ping <peer>` must answer |
+| 4 | Create the party (host) and **invite / join** | E1 |
+| 5 | **Countdown** → both enter Cinema together | E1 |
+| 6 | **Playback** of the real movie | E1 + E2 |
+| 7 | **Pause / resume** | E1 + E2 |
+| 8 | **Forward seek** | E1 + E2 |
+| 9 | **Backward seek** | E1 + E2 |
+| 10 | **Guest buffering behaviour** — room pauses for the slow peer | E1 + E2 |
+| 11 | **Disconnect** Device B (drop Tailscale / sleep) | E1 |
+| 12 | **Reconnect** → both converge again | E1 + E2 |
+| 13 | **Late join** — guest leaves, rejoins mid-film | E1 + E2 |
+| 14 | **Audio/video sync** — both users hear audio, in sync with picture | E1 (**human observation only**) |
+| 15 | **Observed playback drift** over a long stretch | E3 (dev HUD, ms) where reachable; otherwise E2 (1 s resolution) |
+| 16 | **End of media** — *Movie Finished* card, controls disabled, single **Back to Lobby** | E1 |
+| 17 | **Leave / end party** — and confirm stale playback state does not survive | E1 + E4 |
+| 18 | **Optional call modes** (off / audio / video) | E1 |
+| 19 | **Chat / reactions** | E1 |
+| 20 | **Ghost Mode** | E1 |
+| 21 | **Privacy Mode** | E1 |
+| 22 | **Provider Sync** — YouTube first; then authorized Netflix / Prime / JioHotstar sessions where available | E1; single-peer mechanism is already covered, **two-peer convergence is not** |
+
+**Provider Shared is excluded and must remain disabled.** Do not enable it, and do not treat its
+absence as a failure. T25 in §4 covers the provider path; the Shared diagnostic may be *run* to record
+that it correctly reports itself unavailable, but it must not be turned on.
+
+### 7.2 Rules
+
 1. **Execute T01–T02 first.** If two devices on a shared tailnet cannot be arranged, the entire
    matrix stays BLOCKED and the beta remains unproven — report that plainly rather than substituting
    a loopback or single-machine run.
@@ -605,7 +654,10 @@ two real devices with this codebase.**
 5. **Report failures as findings, not as tests to retry.** A format that fails on Windows, or a
    drift figure that exceeds expectation, is the result.
 6. **Do not modify Provider Shared**, and do not enable experimental capture to make T25 pass.
+7. **A green build is not a beta result.** CI and the artifact workflow prove the installers were
+   built from the right SHA; they prove nothing about whether a movie plays, whether audio is
+   audible, or whether two peers converge.
 
 ---
 
-*Batch 7B — procedure only. No application code was modified. Provider Shared untouched.*
+*Batch 7B — procedure only. No application code was modified by this document. Provider Shared untouched.*
