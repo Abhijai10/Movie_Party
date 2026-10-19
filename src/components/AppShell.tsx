@@ -614,7 +614,10 @@ export function AppShell() {
           );
           return false;
         }
-        const partySnapshot = await createLocalParty(null);
+        // The managed browser is already open and signed in; it becomes the
+        // room's media, so it must survive room creation. Tearing it down here
+        // is what made "Create party" fail with MP-PROVIDER-002.
+        const partySnapshot = await createLocalParty(null, true);
         if (!createFlow.current.isCurrent(token)) return false;
         if (partySnapshot.screen !== "LOBBY") {
           applySnapshot(partySnapshot);
@@ -1125,6 +1128,16 @@ function createRoomErrorMessage(error: unknown): string {
       return "Tailscale is connected but has no private address Movie Party can use. Check its network.";
     if (error.code === "MP-NET-TS-006")
       return "Tailscale is off. Open the Tailscale app and turn it on.";
+    // Provider-flow failures. These were previously shown as the raw backend
+    // string (or the generic fallback), which told the user nothing actionable.
+    if (error.code === "MP-PROVIDER-002")
+      return "That page does not belong to the selected provider. Open the provider again, sign in, then create the party.";
+    if (error.code === "MP-PROVIDER-003")
+      return "Open the provider browser first, then create the party.";
+    if (error.code === "MP-PROVIDER-004")
+      return "Finish signing in and open the movie in the provider window before creating the party.";
+    if (error.code === "MP-CAPTURE-001")
+      return "Provider Shared is experimental and unavailable. Use Provider Sync mode.";
   }
   if (!developmentPreviewEnabled) {
     return fallback;

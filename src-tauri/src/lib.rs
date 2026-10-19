@@ -393,8 +393,13 @@ fn request_end_party(
 async fn create_local_party(
     runtime: tauri::State<'_, app_runtime::AppRuntime>,
     media_path: Option<String>,
+    // Optional so an older frontend build keeps working; absent means `false`,
+    // which is the original tear-everything-down behaviour.
+    keep_provider_session: Option<bool>,
 ) -> Result<app_runtime::AppSnapshot, String> {
-    runtime.create_local_party(media_path).await
+    runtime
+        .create_local_party(media_path, keep_provider_session.unwrap_or(false))
+        .await
 }
 
 #[tauri::command]
@@ -659,9 +664,7 @@ fn launch_provider(
     mode: String,
     runtime: tauri::State<'_, app_runtime::AppRuntime>,
 ) -> Result<app_runtime::AppSnapshot, String> {
-    use crate::providers::sync::{
-        provider_accepts_url, provider_id_from_str, provider_mode_gate, ProviderModeGate,
-    };
+    use crate::providers::sync::{provider_id_from_str, provider_mode_gate, ProviderModeGate};
 
     // F56/F57: the mode gate stays doubly enforced. The diagnostic is only
     // consulted for PROVIDER_SHARED (as before), and even a verified device is
@@ -696,9 +699,19 @@ fn launch_provider(
         return Ok(snapshot);
     }
 
-    if !provider_accepts_url(provider, &url) {
-        return Err("MP-PROVIDER-002 provider URL mismatch".to_string());
-    }
+    // The UI's copy of the page URL can be stale or empty by the time the user
+    // presses "Create party" — see `resolve_provider_launch_url`. Fall back to
+    // the page the backend itself opened for this provider rather than rejecting
+    // a flow that is actually valid.
+    let snapshot = runtime.snapshot();
+    let url = crate::providers::sync::resolve_provider_launch_url(
+        provider,
+        &url,
+        snapshot.provider.provider_id.as_deref(),
+        snapshot.provider.url.as_deref(),
+        &provider_id,
+    )
+    .ok_or_else(|| "MP-PROVIDER-002 provider URL mismatch".to_string())?;
     let session = launch_provider_chrome(&runtime, &provider_id, &url)?;
     Ok(runtime.store_launched_provider(provider_id, url, session))
 }

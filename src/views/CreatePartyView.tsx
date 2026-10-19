@@ -301,6 +301,32 @@ export function CreatePartyView({
               />
             ))}
           </div>
+
+          {/*
+            Errors live HERE, directly under the source cards, rather than at
+            the bottom of the right-hand panel. The old placement was below the
+            fold: at the default window size a failed "Create party" produced a
+            message the user could not see at all — it only appeared in
+            fullscreen. A failure that silently looks like a no-op is worse than
+            the failure itself.
+          */}
+          {(status === "error" || error) && (
+            <div
+              role="alert"
+              aria-live="assertive"
+              className="mt-6 flex items-start gap-2.5 rounded-xl border border-[#F87171]/30 bg-[#F87171]/[0.06] px-4 py-3 text-[#FCA5A5] text-sm leading-relaxed"
+              data-testid="create-error"
+            >
+              <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+              <span>
+                {error ??
+                  sourceError ??
+                  (selected === "stream"
+                    ? "Choose an available provider, a supported mode, and its matching page URL."
+                    : "Unsupported source. Try MP4, MKV or a direct URL.")}
+              </span>
+            </div>
+          )}
         </motion.section>
 
         <motion.section
@@ -620,20 +646,6 @@ export function CreatePartyView({
               </motion.div>
             )}
           </AnimatePresence>
-
-          {(status === "error" || error) && (
-            <div
-              className="mt-4 flex items-center gap-2 text-[#F87171] text-xs tracking-wider"
-              data-testid="create-error"
-            >
-              <AlertCircle className="w-4 h-4" />{" "}
-              {error ??
-                sourceError ??
-                (selected === "stream"
-                  ? "Choose an available provider, a supported mode, and its matching page URL."
-                  : "Unsupported source. Try MP4, MKV or a direct URL.")}
-            </div>
-          )}
 
           {selected !== "stream" && (
             <>

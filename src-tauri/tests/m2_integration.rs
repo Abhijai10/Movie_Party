@@ -84,7 +84,7 @@ async fn setup_host_guest() -> (AppRuntime, AppRuntime, String) {
     write_temp_media(&media);
 
     let host_snap = host
-        .create_local_party(Some(media.to_string_lossy().to_string()))
+        .create_local_party(Some(media.to_string_lossy().to_string()), false)
         .await
         .expect("host create_local_party");
 
@@ -967,7 +967,7 @@ mod env_tests {
         let _g0 = scoped("MOVIE_PARTY_DEV_LOOPBACK", "");
         std::env::remove_var("MOVIE_PARTY_DEV_LOOPBACK");
         let r0 = AppRuntime::new();
-        match r0.create_local_party(None).await {
+        match r0.create_local_party(None, false).await {
             Ok(snap) => {
                 assert_eq!(snap.network.transport, "quic");
                 assert!(
@@ -997,7 +997,7 @@ mod env_tests {
         // 0 → Tailscale path (same behavior as no env var).
         let _g1 = scoped("MOVIE_PARTY_DEV_LOOPBACK", "0");
         let r1 = AppRuntime::new();
-        match r1.create_local_party(None).await {
+        match r1.create_local_party(None, false).await {
             Ok(snap) => {
                 assert!(
                     snap.network.path.starts_with("Listening on 100."),
@@ -1017,7 +1017,7 @@ mod env_tests {
         let _g2 = scoped("MOVIE_PARTY_DEV_LOOPBACK", "1");
         let r2 = AppRuntime::new();
         let snap = r2
-            .create_local_party(None)
+            .create_local_party(None, false)
             .await
             .expect("loopback create_local_party must succeed");
         assert_eq!(snap.network.transport, "quic");
@@ -1119,7 +1119,7 @@ mod env_tests {
         let guest = AppRuntime::new();
 
         let host_snap = host
-            .create_local_party(None)
+            .create_local_party(None, false)
             .await
             .expect("host create_local_party over real Tailscale");
         assert!(
@@ -1173,7 +1173,7 @@ mod env_tests {
         let guest = AppRuntime::new();
 
         let snap = host
-            .create_local_party(None)
+            .create_local_party(None, false)
             .await
             .expect("host create loopback");
         let invite = snap.room.invite_code.expect("invite code");
@@ -1214,7 +1214,10 @@ async fn m5_call_signal_offer_arrives_at_guest() {
     let host = AppRuntime::new();
     let guest = AppRuntime::new();
 
-    let snap = host.create_local_party(None).await.expect("host create");
+    let snap = host
+        .create_local_party(None, false)
+        .await
+        .expect("host create");
     let invite = snap.room.invite_code.unwrap();
     guest.join_party(invite).await.expect("guest join");
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -1248,7 +1251,10 @@ async fn m5_call_signal_answer_arrives_at_host() {
     let host = AppRuntime::new();
     let guest = AppRuntime::new();
 
-    let snap = host.create_local_party(None).await.expect("host create");
+    let snap = host
+        .create_local_party(None, false)
+        .await
+        .expect("host create");
     let invite = snap.room.invite_code.unwrap();
     guest.join_party(invite).await.expect("guest join");
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -1283,7 +1289,10 @@ async fn m5_call_signal_ice_arrives_bidirectional() {
     let host = AppRuntime::new();
     let guest = AppRuntime::new();
 
-    let snap = host.create_local_party(None).await.expect("host create");
+    let snap = host
+        .create_local_party(None, false)
+        .await
+        .expect("host create");
     let invite = snap.room.invite_code.unwrap();
     guest.join_party(invite).await.expect("guest join");
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -1340,7 +1349,7 @@ async fn test_w_guest_joins_second_room_cleanly_from_running_app() {
     let media_a = temp_media_path();
     write_temp_media(&media_a);
     let snap_a = host_a
-        .create_local_party(Some(media_a.to_string_lossy().to_string()))
+        .create_local_party(Some(media_a.to_string_lossy().to_string()), false)
         .await
         .expect("host A create");
     let invite_a = snap_a.room.invite_code.clone().expect("invite A");
@@ -1363,7 +1372,7 @@ async fn test_w_guest_joins_second_room_cleanly_from_running_app() {
     let media_b = temp_media_path();
     write_temp_media(&media_b);
     let snap_b = host_b
-        .create_local_party(Some(media_b.to_string_lossy().to_string()))
+        .create_local_party(Some(media_b.to_string_lossy().to_string()), false)
         .await
         .expect("host B create");
     let invite_b = snap_b.room.invite_code.clone().expect("invite B");

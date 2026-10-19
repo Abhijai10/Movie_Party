@@ -159,6 +159,47 @@ pub fn provider_accepts_url(provider: ProviderId, url: &str) -> bool {
     }
 }
 
+/// Which URL to launch the managed browser with.
+///
+/// ## Why this exists
+///
+/// The UI sends the page URL from its own snapshot. By the time the user presses
+/// "Create party" that copy can be **stale or empty** — for example if they
+/// changed the provider dropdown after opening the browser, or if room creation
+/// tore the session down and the UI kept the old value. The old code then
+/// rejected a flow that was actually valid, with
+/// `MP-PROVIDER-002 provider URL mismatch`, and the user saw a button that did
+/// nothing.
+///
+/// The backend's own record of the page it opened is authoritative **provided it
+/// belongs to the same provider the user is creating the party for**. That
+/// condition is the safety boundary: we never accept a stored URL from a
+/// different provider, and we never accept a URL outside the allowlist.
+///
+/// Returns `None` when neither URL is acceptable; the caller turns that into
+/// `MP-PROVIDER-002`.
+pub fn resolve_provider_launch_url(
+    provider: ProviderId,
+    incoming: &str,
+    stored_provider_id: Option<&str>,
+    stored_url: Option<&str>,
+    selected_provider_id: &str,
+) -> Option<String> {
+    if provider_accepts_url(provider, incoming) {
+        return Some(incoming.to_string());
+    }
+    // Only trust the stored URL when it was opened for this same provider.
+    if stored_provider_id != Some(selected_provider_id) {
+        return None;
+    }
+    let stored = stored_url?;
+    if provider_accepts_url(provider, stored) {
+        Some(stored.to_string())
+    } else {
+        None
+    }
+}
+
 /// Outcome of validating a requested provider mode on the stable path.
 ///
 /// F56/F57: this is the security boundary that keeps Provider Shared out of the
@@ -1190,5 +1231,109 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Provider launch URL ──────────────────────────────────────────────
+    //
+    // Regression guards for the "Create party does nothing" defect.
+    //
+    // The fact these pin, which is easy to miss: for YouTube
+    // `provider_accepts_url` requires a real 11-character VIDEO id, so the home
+    // page the app itself opens (`https://www.youtube.com/`) is rejected BY
+    // DESIGN. The fall-through path therefore cannot carry a YouTube room at
+    // all — the flow only works through `launch_provider`'s "reuse the open
+    // session" branch. Room creation used to destroy that session, which is
+    // exactly why the button did nothing.
+
+    const YT_VIDEO: &str = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+
+    #[test]
+    fn provider_launch_url_prefers_the_incoming_url_when_it_matches() {
+        let resolved = resolve_provider_launch_url(
+            ProviderId::YouTube,
+            YT_VIDEO,
+            Some("youtube"),
+            Some("https://www.youtube.com/"),
+            "youtube",
+        );
+        assert_eq!(resolved.as_deref(), Some(YT_VIDEO));
+    }
+
+    #[test]
+    fn provider_launch_url_falls_back_to_the_page_the_backend_opened() {
+        for incoming in ["", "not a url", "https://www.netflix.com/watch/1"] {
+            let resolved = resolve_provider_launch_url(
+                ProviderId::YouTube,
+                incoming,
+                Some("youtube"),
+                Some(YT_VIDEO),
+                "youtube",
+            );
+            assert_eq!(
+                resolved.as_deref(),
+                Some(YT_VIDEO),
+                "incoming {incoming:?} should fall back to the page the backend opened"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_launch_url_accepts_a_provider_home_page_for_host_based_providers() {
+        // Netflix/Prime/JioHotstar are host-based, so the page the app opens is
+        // itself an acceptable launch destination.
+        let resolved = resolve_provider_launch_url(
+            ProviderId::Netflix,
+            "https://www.netflix.com/browse",
+            None,
+            None,
+            "netflix",
+        );
+        assert_eq!(resolved.as_deref(), Some("https://www.netflix.com/browse"));
+    }
+
+    #[test]
+    fn provider_launch_url_refuses_a_stored_url_from_another_provider() {
+        // Safety boundary: the stored page belongs to Netflix while the user is
+        // creating a YouTube party. It must never be borrowed.
+        let resolved = resolve_provider_launch_url(
+            ProviderId::YouTube,
+            "",
+            Some("netflix"),
+            Some("https://www.netflix.com/watch/1"),
+            "youtube",
+        );
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn provider_launch_url_refuses_when_nothing_is_acceptable() {
+        // No stored record at all -> a hard failure, not a silent guess.
+        assert_eq!(
+            resolve_provider_launch_url(ProviderId::YouTube, "", None, None, "youtube"),
+            None
+        );
+        // Stored provider matches, but its URL is outside the allowlist.
+        assert_eq!(
+            resolve_provider_launch_url(
+                ProviderId::YouTube,
+                "",
+                Some("youtube"),
+                Some("https://example.com/not-a-provider"),
+                "youtube",
+            ),
+            None
+        );
+    }
+
+    /// Documents WHY the fix is "keep the session alive" rather than "loosen the
+    /// allowlist": the page the app itself opens for YouTube is not an
+    /// acceptable launch URL, so the reuse branch is the only viable path.
+    #[test]
+    fn youtube_home_page_is_not_a_launch_url_by_design() {
+        assert!(!provider_accepts_url(
+            ProviderId::YouTube,
+            "https://www.youtube.com/"
+        ));
+        assert!(provider_accepts_url(ProviderId::YouTube, YT_VIDEO));
     }
 }

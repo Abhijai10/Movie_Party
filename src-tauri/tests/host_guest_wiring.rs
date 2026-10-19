@@ -52,7 +52,7 @@ async fn test_host_guest_wiring() {
     std::fs::write(&media_path, b"dummy media content").unwrap();
 
     let host_snapshot = host
-        .create_local_party(Some(media_path.to_string_lossy().to_string()))
+        .create_local_party(Some(media_path.to_string_lossy().to_string()), false)
         .await
         .expect("host should create party");
 
@@ -153,7 +153,7 @@ async fn guest_rejects_tampered_invite_certificate_fingerprint() {
 
     let host = AppRuntime::new();
     let host_snapshot = host
-        .create_local_party(None)
+        .create_local_party(None, false)
         .await
         .expect("host should create party");
     let invite_code = host_snapshot.room.invite_code.expect("invite code");

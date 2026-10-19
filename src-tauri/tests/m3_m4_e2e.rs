@@ -24,7 +24,7 @@ async fn test_e2e_host_guest_manifest_transfer() {
 
     let host = AppRuntime::new();
     let host_snap = host
-        .create_local_party(Some(path.to_str().unwrap().to_string()))
+        .create_local_party(Some(path.to_str().unwrap().to_string()), false)
         .await
         .expect("host");
     assert!(host_snap.media.is_some());

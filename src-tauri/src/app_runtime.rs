@@ -2004,6 +2004,11 @@ impl AppRuntime {
     pub fn attach_launched_provider(&self, provider_id: String, url: String) -> AppSnapshot {
         // (re)attach the watch worker for the reused session.
         self.spawn_provider_watch_worker();
+        // Room creation aborts the crash watcher along with every other
+        // session task, and this path reuses the session that survived it — so
+        // the watcher has to be put back, or a Chrome crash after attaching
+        // would go unnoticed and recovery would never fire.
+        self.spawn_chrome_crash_watcher();
         let mut state = self.lock();
         state.provider.mode = "PROVIDER_SYNC".to_string();
         state.provider.provider_id = Some(provider_id);
@@ -2771,6 +2776,7 @@ impl AppRuntime {
     pub async fn create_local_party(
         &self,
         media_path: Option<String>,
+        keep_provider_session: bool,
     ) -> Result<AppSnapshot, String> {
         // Lifecycle hygiene: a duplicate create call (double-tap, stale UI)
         // must never leave the previous host server running. Abort any
@@ -2837,8 +2843,10 @@ impl AppRuntime {
             // towards a deadline from the previous session must abort.
             bump_session_generation(&mut state);
             // MP-07: hand the blocking teardown to the caller so it runs with
-            // the lock released.
-            DeferredTeardown::take(&mut state)
+            // the lock released. In the provider flow the managed browser is
+            // the room's media and is attached immediately afterwards, so it
+            // must survive this step (see `DeferredTeardown::take`).
+            DeferredTeardown::take(&mut state, keep_provider_session)
         };
 
         // MP-07: blocking Chrome/player teardown happens with the lock free.
@@ -3175,7 +3183,7 @@ impl AppRuntime {
             // into this one. See the same clear in `leave_party`.
             state.committed_playback = None;
             // MP-07: blocking Chrome/player teardown is deferred past the lock.
-            DeferredTeardown::take(&mut state)
+            DeferredTeardown::take(&mut state, false)
         };
 
         // MP-07: run the blocking teardown with the state lock released.
@@ -6495,7 +6503,7 @@ impl AppRuntime {
         // tail of this function) — closing them performs a CDP round-trip and
         // a libmpv teardown that can block for seconds, and doing that under
         // the global lock freezes every other task that needs the room.
-        let teardown = DeferredTeardown::take(&mut state);
+        let teardown = DeferredTeardown::take(&mut state, false);
         // §52: a GUEST who received the movie over Local Perfect gets the
         // retention question (keep / remove / save-as) — never silent
         // deletion, never silent keeping. The HOST keeps its own source
@@ -7608,9 +7616,23 @@ struct DeferredTeardown {
 }
 
 impl DeferredTeardown {
-    fn take(state: &mut AppRuntimeState) -> Self {
+    /// Take the resources that must be closed outside the lock.
+    ///
+    /// `keep_chrome` exists for ONE caller: `create_local_party` in the provider
+    /// flow. That flow creates the room first and then attaches the *already
+    /// open* managed browser to it (`launch_provider` → `attach_launched_provider`).
+    /// Tearing the browser down here made that attach impossible: the session
+    /// was already gone by the time `launch_provider` looked for it, so it fell
+    /// through to the URL allowlist and failed with
+    /// "MP-PROVIDER-002 provider URL mismatch" — the "Create party does nothing"
+    /// defect. Passing `true` keeps the browser alive across room creation.
+    fn take(state: &mut AppRuntimeState, keep_chrome: bool) -> Self {
         Self {
-            chrome_session: state.chrome_session.take(),
+            chrome_session: if keep_chrome {
+                None
+            } else {
+                state.chrome_session.take()
+            },
             player: state.player.take(),
         }
     }
@@ -9357,7 +9379,7 @@ mod tests {
             prev: std::env::var_os("MOVIE_PARTY_DEV_LOOPBACK"),
         };
         let r0 = AppRuntime::new();
-        assert_not_dev_loopback(r0.create_local_party(None).await);
+        assert_not_dev_loopback(r0.create_local_party(None, false).await);
         r0.leave_party();
         drop(_g0);
 
@@ -9368,7 +9390,7 @@ mod tests {
         };
         std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "0");
         let r1 = AppRuntime::new();
-        assert_not_dev_loopback(r1.create_local_party(None).await);
+        assert_not_dev_loopback(r1.create_local_party(None, false).await);
         r1.leave_party();
         drop(_g1);
 
@@ -9380,7 +9402,7 @@ mod tests {
         std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
         let r2 = AppRuntime::new();
         let snap = r2
-            .create_local_party(None)
+            .create_local_party(None, false)
             .await
             .expect("loopback create_local_party must succeed");
         assert_eq!(snap.network.transport, "quic");
@@ -9406,7 +9428,7 @@ mod tests {
 
         let r3 = AppRuntime::new();
         let media_snap = r3
-            .create_local_party(Some(movie.to_string_lossy().to_string()))
+            .create_local_party(Some(movie.to_string_lossy().to_string()), false)
             .await
             .expect("loopback create_local_party with media must succeed");
         assert_eq!(media_snap.screen, "LOBBY");
@@ -9525,7 +9547,7 @@ mod tests {
         std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
         let runtime = AppRuntime::new();
         let first = runtime
-            .create_local_party(None)
+            .create_local_party(None, false)
             .await
             .expect("first create_local_party");
         assert_eq!(first.screen, "LOBBY");
@@ -9536,7 +9558,7 @@ mod tests {
         // abort the first server and produce a fresh session, never a leak
         // or a duplicated listener.
         let second = runtime
-            .create_local_party(None)
+            .create_local_party(None, false)
             .await
             .expect("second create_local_party");
         assert_eq!(second.screen, "LOBBY");
@@ -9575,7 +9597,7 @@ mod tests {
 
         let runtime = AppRuntime::new();
         let first = runtime
-            .create_local_party(None)
+            .create_local_party(None, false)
             .await
             .expect("create_local_party");
         assert!(runtime.lock().host_session.is_some());
@@ -12601,7 +12623,7 @@ mod session_lifecycle_tests {
         // lock, release the lock, then run the teardown.
         let teardown = {
             let mut state = runtime.lock();
-            DeferredTeardown::take(&mut state)
+            DeferredTeardown::take(&mut state, false)
         };
         assert!(
             runtime.lock().player.is_none(),

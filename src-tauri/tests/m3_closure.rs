@@ -87,7 +87,7 @@ async fn uncached_http_range_triggers_real_quic_fetch_and_serves() {
 
     let host = AppRuntime::new();
     let host_snap = host
-        .create_local_party(Some(path.to_str().unwrap().to_string()))
+        .create_local_party(Some(path.to_str().unwrap().to_string()), false)
         .await
         .expect("host");
     let invite_code = host_snap.room.invite_code.clone().expect("invite");
@@ -195,7 +195,7 @@ async fn cache_write_contention_eventually_persists_chunk() {
 
     let host = AppRuntime::new();
     let host_snap = host
-        .create_local_party(Some(path.to_str().unwrap().to_string()))
+        .create_local_party(Some(path.to_str().unwrap().to_string()), false)
         .await
         .expect("host");
     let invite_code = host_snap.room.invite_code.clone().expect("invite");
@@ -360,7 +360,7 @@ async fn guest_fetch_media_owns_session_and_leave_releases_everything() {
 
     let host = AppRuntime::new();
     let host_snap = host
-        .create_local_party(Some(path.to_str().unwrap().to_string()))
+        .create_local_party(Some(path.to_str().unwrap().to_string()), false)
         .await
         .expect("host");
     let invite_code = host_snap.room.invite_code.clone().expect("invite");
@@ -427,7 +427,7 @@ async fn reconnect_reuses_single_session_worker() {
 
     let host = AppRuntime::new();
     let host_snap = host
-        .create_local_party(Some(path.to_str().unwrap().to_string()))
+        .create_local_party(Some(path.to_str().unwrap().to_string()), false)
         .await
         .expect("host");
     let invite_code = host_snap.room.invite_code.clone().expect("invite");
@@ -537,7 +537,7 @@ async fn guest_starvation_pauses_host_and_guest_with_consensus_resume() {
 
     let host = AppRuntime::new();
     let host_snap = host
-        .create_local_party(Some(path.to_str().unwrap().to_string()))
+        .create_local_party(Some(path.to_str().unwrap().to_string()), false)
         .await
         .expect("host");
     let invite_code = host_snap.room.invite_code.clone().expect("invite");

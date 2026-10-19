@@ -502,7 +502,7 @@ async fn test_17_appruntime_player_dispatch() {
 
     let runtime = AppRuntime::new();
     let snap = runtime
-        .create_local_party(Some(path.to_str().unwrap().to_string()))
+        .create_local_party(Some(path.to_str().unwrap().to_string()), false)
         .await
         .expect("create_local_party");
 
@@ -567,7 +567,7 @@ async fn test_18_player_buffering_feeds_strict_sync() {
 
     let runtime = AppRuntime::new();
     let _snap = runtime
-        .create_local_party(Some(path.to_str().unwrap().to_string()))
+        .create_local_party(Some(path.to_str().unwrap().to_string()), false)
         .await
         .expect("create_local_party");
 

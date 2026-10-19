@@ -521,9 +521,19 @@ export async function requestEndParty(): Promise<AppSnapshot> {
   return invokeSnapshot("request_end_party");
 }
 
-export async function createLocalParty(mediaPath: string | null): Promise<AppSnapshot> {
+export async function createLocalParty(
+  mediaPath: string | null,
+  /**
+   * Provider flow only: keep the already-open managed browser alive across room
+   * creation, because it is attached to the new room immediately afterwards.
+   * Without this the browser is torn down here and `launch_provider` can no
+   * longer find it (the "Create party does nothing" defect).
+   */
+  keepProviderSession = false,
+): Promise<AppSnapshot> {
   return invokeSnapshot("create_local_party", {
     mediaPath: mediaPath && mediaPath.trim().length > 0 ? mediaPath : null,
+    keepProviderSession,
   });
 }
 
