@@ -174,15 +174,21 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $mpvRelease = "20260830"
-          $mpvAsset = "mpv-dev-x86_64-20260830-git-e8673660ab.7z"
+          # NOTE ON RETENTION: mpv-winbuild-cmake publishes a DAILY build and
+          # prunes old releases after roughly 8 days. The previous pin
+          # (20260830) disappeared upstream and this step started failing with
+          # a 404 -- correctly, because the integrity check refused to stage the
+          # HTML error page. When that happens again, re-pin to a current
+          # release and recompute the hash; do NOT delete the check.
+          $mpvRelease = "20261019"
+          $mpvAsset = "mpv-dev-x86_64-20261019-git-6a262d11f6.7z"
           # SHA-256 of that exact asset, as published by GitHub for this
           # release. Verified below before anything is extracted: the DLL this
           # stages is bundled into the Windows installer and shipped, and pinning
           # the *name* does not pin the *bytes* -- an asset replaced at the same
           # URL would otherwise be staged silently. (Found by the
           # post-remediation adversarial audit, ADV-08.)
-          $mpvSha256 = "7310560BD25CC760282E8754A389302629C6E748261030C3870E1CB2F80CDC48"
+          $mpvSha256 = "CA8604754170DB6F1B23139D8449782B1AE294A883211131954D30085985F77B"
           $mpvUrl = "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/$mpvRelease/$mpvAsset"
           $archive = Join-Path $env:RUNNER_TEMP "mpv-dev.7z"
           $extract = Join-Path $env:RUNNER_TEMP "mpv-dev"
