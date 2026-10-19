@@ -1956,31 +1956,66 @@ impl AppRuntime {
         provider_id: &str,
     ) -> Result<(bool, bool), String> {
         use crate::providers::sync::{
-            detect_media_command, login_required_command, provider_id_from_str,
+            detect_media_command, login_required_command, provider_accepts_url,
+            provider_id_from_str,
         };
 
         let provider = provider_id_from_str(provider_id)
             .ok_or_else(|| "MP-PROVIDER-002 unsupported provider".to_string())?;
 
         let mut state = self.lock();
-        let session = state
-            .chrome_session
-            .as_mut()
-            .ok_or_else(|| "MP-PROVIDER-003 browser not launched".to_string())?;
+        // The session borrow must end before `state.provider` can be written, so
+        // every CDP result is collected inside this block.
+        let (login_required, media_detected, current_url) = {
+            let session = state
+                .chrome_session
+                .as_mut()
+                .ok_or_else(|| "MP-PROVIDER-003 browser not launched".to_string())?;
 
-        let mut page = session
-            .connect_page()
-            .map_err(|e| format!("MP-PROVIDER-003 CDP unavailable: {e}"))?;
+            let mut page = session
+                .connect_page()
+                .map_err(|e| format!("MP-PROVIDER-003 CDP unavailable: {e}"))?;
 
-        let login_result = page
-            .execute(&login_required_command(provider, 1))
-            .map_err(|e| format!("MP-PROVIDER-003 CDP login check failed: {e}"))?;
-        let login_required = login_result["result"]["value"].as_bool().unwrap_or(false);
+            let login_result = page
+                .execute(&login_required_command(provider, 1))
+                .map_err(|e| format!("MP-PROVIDER-003 CDP login check failed: {e}"))?;
+            let login_required = login_result["result"]["value"].as_bool().unwrap_or(false);
 
-        let detect_result = page
-            .execute(&detect_media_command(provider, 2))
-            .map_err(|e| format!("MP-PROVIDER-003 CDP media detection failed: {e}"))?;
-        let media_detected = detect_result["result"]["value"].as_bool().unwrap_or(false);
+            let detect_result = page
+                .execute(&detect_media_command(provider, 2))
+                .map_err(|e| format!("MP-PROVIDER-003 CDP media detection failed: {e}"))?;
+            let media_detected = detect_result["result"]["value"].as_bool().unwrap_or(false);
+
+            // Which page is the user ACTUALLY on? The launch URL is the
+            // provider's HOME page, so without this the room advertises
+            // "https://www.youtube.com/" as the thing both people are watching,
+            // and the guest has no idea which video. Reading it here also gives
+            // "change the video without recreating the party" for free: the user
+            // navigates in the managed browser and re-checks status.
+            let url_command = crate::providers::chrome::CdpCommand {
+                id: 3,
+                method: "Runtime.evaluate",
+                params: serde_json::json!({
+                    "expression": "location.href",
+                    "returnByValue": true,
+                }),
+            };
+            let current_url = page
+                .execute(&url_command)
+                .ok()
+                .and_then(|value| value["result"]["value"].as_str().map(str::to_owned));
+
+            (login_required, media_detected, current_url)
+        };
+
+        // Only adopt it when it is a real provider CONTENT url. For YouTube that
+        // means a concrete video id, so the home page and /results search pages
+        // are rejected and never become the room's media by accident.
+        if let Some(url) = current_url {
+            if provider_accepts_url(provider, &url) {
+                state.provider.url = Some(url);
+            }
+        }
 
         Ok((login_required, media_detected))
     }
