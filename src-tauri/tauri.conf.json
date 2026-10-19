@@ -48,6 +48,10 @@
     "resources": [
       "mpv_runtime/"
     ],
+    "macOS": {
+      "signingIdentity": "-",
+      "hardenedRuntime": false
+    },
     "windows": {
       "nsis": {
         "installMode": "currentUser"
