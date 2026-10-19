@@ -200,6 +200,51 @@ older sections — they are the historical record and the source for that tag's 
 **Current state: ad-hoc signed, NOT notarized.** There is no Apple Developer ID signature and no
 notarization ticket, because notarization requires a paid Apple Developer account.
 
+**The ad-hoc signature is now actually applied at build time.** `tauri.conf.json` carries:
+
+```json
+"macOS": { "signingIdentity": "-", "hardenedRuntime": false }
+```
+
+This was **missing until 2026-10-20**, and its absence was a real defect, not merely a missing
+notarization ticket. With no `signingIdentity`, Tauri did not codesign the bundle at all — the app
+shipped with only the **linker's** ad-hoc signature on the Mach-O executable, no
+`Contents/_CodeSignature/CodeResources`, and a hash-based identifier (`movie_party-<hex>`) instead of
+`app.movieparty.desktop`. The result:
+
+* `codesign --verify --deep --strict` failed with
+  **"code has no resources but signature indicates they must be present"**;
+* `spctl -a -t exec` rejected the app for that reason;
+* macOS therefore reported *"'Movie Party' is damaged and can't be opened"* — the **damaged**
+  wording, not the usual "unidentified developer" one. A genuinely invalid bundle signature is a
+  different and worse condition than an unnotarized one, and it is why the documented workaround
+  could not be relied on.
+
+With `signingIdentity: "-"` the build prints `Signing with identity "-"`, and the result verifies:
+`_CodeSignature/CodeResources` is present, `codesign --verify --deep --strict` reports **"valid on
+disk" / "satisfies its Designated Requirement"**, the identifier is `app.movieparty.desktop`, and
+`flags=0x2(adhoc)` replaces `flags=0x20002(adhoc,linker-signed)`. Gatekeeper still rejects the app
+(it is not notarized), but for the **normal** reason, so the Control-click → Open workaround behaves
+as documented.
+
+**`hardenedRuntime` is deliberately `false`.** Hardened runtime enables library validation, which
+would refuse to load the unsigned bundled `libmpv.dylib` and its siblings from
+`Contents/Resources/mpv_runtime/` — the app would build, sign and then fail to play anything. Since
+there is no notarization to require hardened runtime, turning it off is the correct trade for this
+build. If a Developer ID is ever obtained, hardened runtime becomes mandatory and the dylibs must be
+signed with the same identity (or an
+`com.apple.security.cs.disable-library-validation` entitlement added).
+
+### Windows signing — unsigned, and that is the whole story
+
+The NSIS installer carries **no Authenticode signature** (verified: the PE Certificate Table is
+empty). Windows SmartScreen therefore blocks the first run with *"Windows protected your PC"*. There
+is no build-side fix without a paid code-signing certificate; the only remedy is the documented
+**More info → Run anyway** bypass, which is now in the README and the release body.
+
+Do not describe the Windows installer as signed, and do not treat a SmartScreen prompt as evidence of
+a corrupt download.
+
 Consequences, and what to tell users:
 
 * Gatekeeper **will** refuse the first launch. The wording varies by macOS version — most commonly

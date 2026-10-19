@@ -38,6 +38,32 @@ xattr -d com.apple.quarantine "/Applications/Movie Party.app"
 Do **not** disable Gatekeeper system-wide to work around this. The README carries the same
 walkthrough; it is the authoritative version if the two ever disagree.
 
+### Windows first launch — read this before reporting a broken download
+
+The Windows installer is **not code-signed**. There is no Authenticode certificate, because that
+requires a paid code-signing certificate. Windows therefore shows **SmartScreen** the first time the
+installer is run:
+
+> **Windows protected your PC** — Microsoft Defender SmartScreen prevented an unrecognized app from
+> starting. Running this app might put your PC at risk.
+
+**This does not mean the download is corrupted, and it is not a build failure.** It means Microsoft
+has never seen this file before. To install it:
+
+1. Click **More info** (the link inside the dialog).
+2. Click **Run anyway**.
+3. Complete the installer normally.
+
+You may see a second, similar prompt from User Account Control; the installer runs per-user
+(`installMode: currentUser`), so it does not require administrator rights.
+
+If Windows *deletes* the file instead of prompting, check **Windows Security → Protection history**
+and restore it, then repeat the steps above. Do not disable SmartScreen or Defender system-wide.
+
+The same caveat applies to the installed app itself: it is unsigned, so the first launch may prompt
+again. This is the Windows equivalent of the macOS Gatekeeper section above, and it is the same
+trade-off — the project has no paid signing certificates for either platform.
+
 ### Updates — there are none, by design
 
 Movie Party has **no update mechanism**. There is no Tauri updater plugin, no update signing key, and

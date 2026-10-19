@@ -113,6 +113,20 @@ On a **Windows 11 x64** machine the user needs:
 
 No Git, Rust, Node, pnpm, or repository clone is required to install or run the app.
 
+**SmartScreen will block the first run — this is expected, not a broken download.** The installer is
+**not code-signed** (there is no Authenticode certificate; that requires a paid code-signing
+certificate). Windows shows:
+
+> **Windows protected your PC** — Microsoft Defender SmartScreen prevented an unrecognized app from
+> starting.
+
+To install: click **More info** → **Run anyway** → complete the installer. If Windows deletes the file
+instead of prompting, restore it from **Windows Security → Protection history** and repeat. Do **not**
+disable SmartScreen or Defender system-wide.
+
+This is the Windows counterpart of the macOS Gatekeeper section above, and it is the same trade-off:
+the project has no paid signing certificate on either platform.
+
 > **Status note:** the release build is available and distributable, but physical two-device
 > verification (Local Perfect playback, strict synchronization, deep-link join on real Windows
 > and macOS machines) is **pending**. Implementation completeness is code-level; it is not yet
