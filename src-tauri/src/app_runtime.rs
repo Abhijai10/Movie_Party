@@ -1683,7 +1683,7 @@ impl AppRuntime {
     /// paused for both (strict sync, §14).
     fn spawn_chrome_crash_watcher(&self) {
         let inner = Arc::clone(&self.inner);
-        let task = tokio::spawn(async move {
+        let task = spawn_on_runtime(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 let (exists, alive) = {
@@ -5501,7 +5501,7 @@ impl AppRuntime {
         use crate::providers::sync::{buffer_command, position_command};
 
         let runtime = self.clone();
-        let task = tokio::spawn(async move {
+        let task = spawn_on_runtime(async move {
             let mut command_id: u64 = 1;
             loop {
                 tokio::time::sleep(PROVIDER_WATCH_INTERVAL).await;
@@ -7665,6 +7665,30 @@ impl DeferredTeardown {
 fn storage_failure_message(context: &str, error: &crate::storage::StorageError) -> String {
     eprintln!("MovieParty: MP-STORE-001 {context}: {error}");
     format!("MP-STORE-001 {context}")
+}
+
+/// Spawn a detached task on a Tokio runtime, from **any** thread.
+///
+/// `tokio::spawn` panics with "there is no reactor running, must be called from
+/// the context of a Tokio 1.x runtime" when there is no runtime on the current
+/// thread — and a *synchronous* Tauri command is exactly that context.
+///
+/// `launch_provider` is synchronous and reaches the provider watch worker and
+/// the Chrome crash watcher, so a bare `tokio::spawn` there aborted the process
+/// with SIGABRT the first time that path became reachable ("Create party" closed
+/// the app). Tauri keeps one global runtime for the whole app, so fall back to
+/// it instead of panicking.
+///
+/// Returns a `tokio::task::JoinHandle` on both paths, so callers that store the
+/// handle keep the same field type.
+fn spawn_on_runtime<F>(future: F) -> tokio::task::JoinHandle<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle.spawn(future),
+        Err(_) => tauri::async_runtime::handle().inner().spawn(future),
+    }
 }
 
 fn snapshot_from_state(state: &AppRuntimeState) -> AppSnapshot {
@@ -12657,6 +12681,39 @@ mod session_lifecycle_tests {
         assert!(
             closed.load(Ordering::SeqCst),
             "teardown must complete once the player is released"
+        );
+    }
+}
+
+#[cfg(test)]
+mod runtime_spawn_tests {
+    use super::*;
+
+    /// Regression guard for the SIGABRT on "Create party".
+    ///
+    /// `launch_provider` is a **synchronous** Tauri command, and it reaches
+    /// `attach_launched_provider` → the provider watch worker and the Chrome
+    /// crash watcher. A bare `tokio::spawn` there panics with
+    /// "there is no reactor running, must be called from the context of a Tokio
+    /// 1.x runtime"; because the panic crosses the command boundary the whole
+    /// process aborts (EXC_CRASH / SIGABRT, `abort() called`).
+    ///
+    /// A plain `#[test]` has no runtime context — exactly the failing condition.
+    /// If `spawn_on_runtime` is ever replaced by `tokio::spawn`, this test goes
+    /// red and takes the test binary down with it.
+    #[test]
+    fn attaching_a_provider_from_a_synchronous_context_does_not_panic() {
+        let runtime = AppRuntime::new_without_emitter();
+        let snapshot = runtime.attach_launched_provider(
+            "youtube".to_string(),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ".to_string(),
+        );
+
+        assert_eq!(snapshot.screen, "LOBBY");
+        assert_eq!(snapshot.provider.provider_id.as_deref(), Some("youtube"));
+        assert_eq!(
+            snapshot.provider.url.as_deref(),
+            Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
         );
     }
 }
