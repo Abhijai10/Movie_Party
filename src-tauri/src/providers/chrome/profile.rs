@@ -454,6 +454,51 @@ mod tests {
             Err(ManagedChromeError::ProfileBusy)
         );
     }
+    #[cfg(windows)]
+    #[test]
+    fn native_live_lock_prevents_reset_and_legacy_move() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let root = Root::new();
+        let legacy = Root::new();
+        let source = legacy.0.join("youtube");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("sentinel"), b"keep legacy session").unwrap();
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .share_mode(0)
+            .open(source.join("lockfile"))
+            .unwrap();
+        assert_eq!(
+            migrate_legacy_profile(&root.0, &legacy.0, "youtube"),
+            Err(ManagedChromeError::ProfileBusy)
+        );
+        assert!(source.join("sentinel").exists());
+        drop(lock);
+        migrate_legacy_profile(&root.0, &legacy.0, "youtube").unwrap();
+        let destination = root.0.join("youtube");
+        assert_eq!(
+            fs::read(destination.join("sentinel")).unwrap(),
+            b"keep legacy session"
+        );
+
+        let lock = OpenOptions::new()
+            .write(true)
+            .share_mode(0)
+            .open(destination.join("lockfile"))
+            .unwrap();
+        assert_eq!(
+            reset_profile(&root.0, "youtube", true),
+            Err(ManagedChromeError::ProfileBusy)
+        );
+        assert!(destination.join("sentinel").exists());
+        drop(lock);
+        reset_profile(&root.0, "youtube", true).unwrap();
+        assert!(!destination.exists());
+    }
+
     #[test]
     fn reset_requires_confirmation_and_exclusive_ownership() {
         let root = Root::new();
