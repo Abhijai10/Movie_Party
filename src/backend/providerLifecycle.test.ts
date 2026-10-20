@@ -1,12 +1,51 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { BackendCommandError, createLocalParty, launchProvider } from "./appRuntime";
+import {
+  BackendCommandError,
+  createLocalParty,
+  launchProvider,
+  resetProviderSession,
+  providerSessionErrorMessage,
+} from "./appRuntime";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 afterEach(() => vi.restoreAllMocks());
 
 describe("provider room command boundary", () => {
+  it.each([
+    "MP-PROVIDER-001",
+    "MP-PROVIDER-003",
+    "MP-PROVIDER-005",
+    "MP-PROVIDER-006",
+    "MP-PROVIDER-007",
+  ])("surfaces actionable profile recovery for %s without raw paths", (code) => {
+    const message = providerSessionErrorMessage(
+      new BackendCommandError("open_provider_browser", `${code} /private/sensitive/path`),
+    );
+    expect(message).toBeTruthy();
+    expect(message).not.toContain("/private/sensitive/path");
+  });
+  it("does not imply confirmation when requesting a reset", async () => {
+    vi.mocked(invoke).mockRejectedValueOnce("MP-PROVIDER-007 confirmation required");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(resetProviderSession("youtube", false)).rejects.toMatchObject({
+      code: "MP-PROVIDER-007",
+    });
+    expect(invoke).toHaveBeenLastCalledWith("reset_provider_session", {
+      providerId: "youtube",
+      confirmed: false,
+    });
+  });
+
+  it("sends the explicitly confirmed reset to the selected provider only", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ screen: "SETTINGS" });
+    await resetProviderSession("netflix", true);
+    expect(invoke).toHaveBeenLastCalledWith("reset_provider_session", {
+      providerId: "netflix",
+      confirmed: true,
+    });
+  });
   it("carries the signed-in browser preservation flag into room creation", async () => {
     vi.mocked(invoke).mockResolvedValueOnce({ screen: "LOBBY" });
     await createLocalParty(null, true);

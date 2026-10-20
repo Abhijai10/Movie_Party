@@ -570,6 +570,22 @@ export async function checkProviderStatus(providerId: string): Promise<AppSnapsh
   return invokeSnapshot("check_provider_status", { providerId });
 }
 
+export async function resetProviderSession(providerId: string, confirmed: boolean): Promise<AppSnapshot> {
+  return invokeSnapshot("reset_provider_session", { providerId, confirmed });
+}
+
+export function providerSessionErrorMessage(error: unknown): string | null {
+  if (!(error instanceof BackendCommandError)) return null;
+  switch (error.code) {
+    case "MP-PROVIDER-001": return "Install Google Chrome, then open the provider again. Saved provider sessions are kept.";
+    case "MP-PROVIDER-003": return "The managed browser did not respond. Close its Movie Party window, then open the provider again.";
+    case "MP-PROVIDER-005": return "This provider profile is still in use. Close its Movie Party browser window and retry. Your ordinary Chrome can stay open.";
+    case "MP-PROVIDER-006": return "Movie Party could not use its saved browser data. Check app-data permissions, or use Reset provider session in Settings if the data is corrupt. Sign-ins are never removed automatically.";
+    case "MP-PROVIDER-007": return "Confirm Reset provider session before removing its saved sign-in.";
+    default: return null;
+  }
+}
+
 export async function navigateProviderTitle(
   providerId: string,
   title: string,

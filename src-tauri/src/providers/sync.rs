@@ -504,7 +504,10 @@ pub fn command_error_to_runtime_error(
         | crate::providers::chrome::ManagedChromeError::Io(_) => ProviderRuntimeError::Unknown,
         // Launch/config errors cannot occur on an already-running session
         // but map honestly rather than silently succeeding.
-        crate::providers::chrome::ManagedChromeError::ChromeUnavailable
+        crate::providers::chrome::ManagedChromeError::ProfileBusy
+        | crate::providers::chrome::ManagedChromeError::Profile(_)
+        | crate::providers::chrome::ManagedChromeError::ConfirmationRequired
+        | crate::providers::chrome::ManagedChromeError::ChromeUnavailable
         | crate::providers::chrome::ManagedChromeError::NonLocalCdpBind
         | crate::providers::chrome::ManagedChromeError::InvalidProviderProfile
         | crate::providers::chrome::ManagedChromeError::InvalidCdpPort => {

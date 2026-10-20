@@ -104,7 +104,21 @@ impl ChromeProcessOwner {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|error| ManagedChromeError::Process(error.to_string()))?;
-        Ok(Self::adopt(child))
+        let owner = Self::adopt(child);
+        #[cfg(windows)]
+        let mut owner = owner;
+        #[cfg(windows)]
+        if owner.job.is_none() {
+            // Fail closed rather than running a persistent browser without
+            // whole-tree ownership. Kill by the live process handle, never by
+            // a PID from disk or by the user's Chrome executable name.
+            if let Some(mut child) = owner.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            return Err(ManagedChromeError::Process("Windows could not assign Movie Party Chrome to its private job; browser launch was stopped".into()));
+        }
+        Ok(owner)
     }
 
     /// Takes ownership of an already-spawned child.

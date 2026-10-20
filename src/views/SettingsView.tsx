@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ProviderSessionReset } from "./ProviderSessionReset";
 import { motion } from "framer-motion";
 import { ArrowLeft, Download, RotateCcw } from "lucide-react";
 import { CinemaButton } from "../components/mp/CinemaButton";
@@ -14,6 +15,7 @@ import {
   getProviderCapabilities,
   getTailscaleReadiness,
   openProviderBrowser,
+  providerSessionErrorMessage,
   setDisplayName,
   type AppSnapshot,
   type ProviderCapability,
@@ -45,8 +47,8 @@ import {
  * Label for the provider session control (F10).
  *
  * The action behind it is a status re-check: Movie Party's provider session
- * lives inside its managed browser, and no command clears a signed-in provider
- * profile. The control therefore must not promise a logout or a reset. Exported
+ * lives inside its managed browser. This control must not promise a logout;
+ * resetting a profile is a separate, confirmed action below. Exported
  * so the honesty of this copy is pinned by a test rather than by review.
  */
 export const PROVIDER_RECHECK_LABEL = "Re-check provider session";
@@ -152,6 +154,25 @@ export function SettingsView({ snapshot, onBack, onSnapshot }: SettingsViewProps
   }, [nameDraft, snapshot.participants, onSnapshot]);
 
   const [capabilities, setCapabilities] = useState<ProviderCapability[]>([]);
+  const [providerMessages, setProviderMessages] = useState<Record<string, string>>({});
+  const [providerBusy, setProviderBusy] = useState<string | null>(null);
+  const providerAction = async (id: string, action: () => Promise<AppSnapshot>) => {
+    setProviderBusy(id);
+    try {
+      const next = await action();
+      onSnapshot?.(next);
+      setProviderMessages((previous) => ({ ...previous, [id]: next.error ?? next.provider.state }));
+    } catch (error) {
+      setProviderMessages((previous) => ({
+        ...previous,
+        [id]:
+          providerSessionErrorMessage(error) ??
+          "Could not check this provider. Open its Movie Party browser and retry.",
+      }));
+    } finally {
+      setProviderBusy(null);
+    }
+  };
   const [tailscale, setTailscale] = useState<TailscaleReadiness | null>(null);
   const [metadata, setMetadata] = useState<MetadataDisplay>(UNKNOWN_METADATA);
   const [exportedBundle, setExportedBundle] = useState<string | null>(null);
@@ -640,17 +661,16 @@ export function SettingsView({ snapshot, onBack, onSnapshot }: SettingsViewProps
                     <div className="mt-4 flex flex-wrap gap-3">
                       <CinemaButton
                         variant="neutral"
+                        disabled={providerBusy != null}
                         onClick={() => {
-                          void (async () => {
-                            await openProviderBrowser(capability.id);
-                          })();
+                          void providerAction(capability.id, () => openProviderBrowser(capability.id));
                         }}
                       >
                         Open Provider
                       </CinemaButton>
                       <CinemaButton
                         variant="neutral"
-                        disabled={diagnosticRunning != null}
+                        disabled={diagnosticRunning != null || providerBusy != null}
                         onClick={() => {
                           runDiagnostic(capability.id);
                         }}
@@ -663,22 +683,25 @@ export function SettingsView({ snapshot, onBack, onSnapshot }: SettingsViewProps
                         variant="neutral"
                         icon={RotateCcw}
                         iconPos="left"
-                        disabled={diagnosticRunning != null}
+                        disabled={diagnosticRunning != null || providerBusy != null}
                         onClick={() => {
-                          // F10: this is a status re-check, NOT a logout. The
-                          // provider session lives in Movie Party's managed
-                          // browser, and there is no command that clears a
-                          // signed-in provider profile — so the control
-                          // describes what it actually does instead of
-                          // claiming to log the user out. (It previously
-                          // demanded a "Confirm reset — logs you out" step and
-                          // then only re-checked status.)
-                          void checkProviderStatus(capability.id);
+                          // Rechecking does not clear any browser data.
+                          void providerAction(capability.id, () => checkProviderStatus(capability.id));
                         }}
                       >
                         {PROVIDER_RECHECK_LABEL}
                       </CinemaButton>
                     </div>
+                    {providerMessages[capability.id] && (
+                      <p role="status" className="mt-3 text-sm text-white/80">
+                        {providerMessages[capability.id]}
+                      </p>
+                    )}
+                    <ProviderSessionReset
+                      providerId={capability.id}
+                      name={capability.displayName}
+                      onSnapshot={onSnapshot}
+                    />
                   </article>
                 );
               })}

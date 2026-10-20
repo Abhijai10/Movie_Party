@@ -1,4 +1,5 @@
 mod process;
+pub mod profile;
 
 use std::{
     fs,
@@ -14,12 +15,42 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::json;
 use thiserror::Error;
 
+#[cfg(unix)]
+pub use process::kill_live_chrome_tree;
 use process::ChildPoll;
 pub use process::{install_shutdown_hardening, ChromeProcessOwner};
 
+static ACTIVE_SESSIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[derive(Debug)]
+struct SessionActivity;
+impl SessionActivity {
+    fn new() -> Self {
+        ACTIVE_SESSIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+impl Drop for SessionActivity {
+    fn drop(&mut self) {
+        ACTIVE_SESSIONS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A CDP worker may temporarily own the session outside AppRuntime's slot.
+/// Give its stale-generation cleanup time to flush Chrome before app exit.
+pub fn wait_for_session_shutdown(timeout: Duration) -> bool {
+    let start = Instant::now();
+    while ACTIVE_SESSIONS.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    true
+}
+
 /// How long a freshly launched Chrome gets to open its CDP endpoint before the
 /// launch is declared failed. See [`launch_managed_chrome`].
-const CDP_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+const CDP_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub const CDP_BIND_HOST: &str = "127.0.0.1";
 pub const DEFAULT_CDP_PORT: u16 = 9222;
@@ -44,6 +75,12 @@ pub enum ManagedChromeError {
     CdpCommand(String),
     #[error("MP-PROVIDER-004 invalid CDP port")]
     InvalidCdpPort,
+    #[error("MP-PROVIDER-005 managed profile is busy. Close its Movie Party Chrome window and retry; your ordinary Chrome can stay open")]
+    ProfileBusy,
+    #[error("MP-PROVIDER-006 {0}")]
+    Profile(String),
+    #[error("MP-PROVIDER-007 confirm Reset provider session before removing sign-in data")]
+    ConfirmationRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,8 +97,11 @@ impl ChromeLaunchPlan {
         vec![
             format!("--user-data-dir={}", self.profile_path.display()),
             format!("--remote-debugging-address={}", self.cdp_host),
-            format!("--remote-debugging-port={}", self.cdp_port),
+            // Chrome chooses a port and writes its browser endpoint into this
+            // profile's DevToolsActivePort. Never trust a pre-existing listener.
+            "--remote-debugging-port=0".to_owned(),
             "--no-first-run".to_owned(),
+            "--restore-last-session".to_owned(),
             "--new-window".to_owned(),
             self.url.clone(),
         ]
@@ -93,6 +133,8 @@ pub struct CdpTarget {
 pub struct ManagedChromeSession {
     process: ChromeProcessOwner,
     pub plan: ChromeLaunchPlan,
+    lease: profile::ProfileLease,
+    _activity: SessionActivity,
 }
 
 #[derive(Debug)]
@@ -110,10 +152,14 @@ pub fn default_chrome_candidates() -> Vec<PathBuf> {
             ),
         ]
     } else if cfg!(target_os = "windows") {
-        vec![
+        let mut candidates = vec![
             PathBuf::from(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
             PathBuf::from(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
-        ]
+        ];
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            candidates.push(PathBuf::from(local).join("Google/Chrome/Application/chrome.exe"));
+        }
+        candidates
     } else {
         vec![PathBuf::from("google-chrome"), PathBuf::from("chromium")]
     }
@@ -142,19 +188,15 @@ pub fn build_launch_plan(
     executable: PathBuf,
     profiles_root: &Path,
     provider_id: &str,
-    cdp_port: u16,
     url: &str,
 ) -> Result<ChromeLaunchPlan, ManagedChromeError> {
-    if cdp_port == 0 {
-        return Err(ManagedChromeError::InvalidCdpPort);
-    }
     let profile_path = provider_profile_path(profiles_root, provider_id)?;
 
     Ok(ChromeLaunchPlan {
         executable,
         profile_path,
         cdp_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
-        cdp_port,
+        cdp_port: 0, // Filled from this launch's DevToolsActivePort after validation.
         url: url.to_owned(),
     })
 }
@@ -208,28 +250,59 @@ pub fn launch_managed_chrome(
 /// [`launch_managed_chrome`] with an explicit CDP startup budget, so the
 /// failure paths can be tested without waiting the full production timeout.
 pub fn launch_managed_chrome_with_timeout(
-    plan: ChromeLaunchPlan,
+    mut plan: ChromeLaunchPlan,
     cdp_startup_timeout: Duration,
 ) -> Result<ManagedChromeSession, ManagedChromeError> {
     validate_cdp_bind(plan.cdp_host)?;
-    fs::create_dir_all(&plan.profile_path)
-        .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
+    let mut lease = profile::ProfileLease::acquire(&plan.profile_path)?;
+    lease.validate_data()?;
+    lease.update(profile::LaunchState::Launching, None)?;
+    let endpoint_file = plan.profile_path.join("DevToolsActivePort");
+    match fs::remove_file(&endpoint_file) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ManagedChromeError::Profile(error.to_string())),
+    }
 
     // The owner takes responsibility the instant the process exists, so no
     // later `?` can drop a live tree on the floor. It also publishes the tree
     // for the signal/panic shutdown paths.
-    let mut process = ChromeProcessOwner::spawn(&plan)?;
-
-    if let Err(error) = wait_for_cdp_or_child_exit(&mut process, plan.cdp_port, cdp_startup_timeout)
-    {
-        // This launch owns the tree and nothing else has ever seen it, so it is
-        // killed and reaped right here — the session that would have taken
-        // ownership does not exist, so its `Drop` will never run.
+    let mut process = match ChromeProcessOwner::spawn(&plan) {
+        Ok(process) => process,
+        Err(error) => {
+            let _ = lease.update(profile::LaunchState::LaunchFailed, None);
+            return Err(error);
+        }
+    };
+    // Record ownership before waiting on CDP. Keep the exclusive lease until
+    // this exact process tree has been terminated and reaped.
+    if let Err(error) = lease.update(profile::LaunchState::Launching, process.id()) {
         process.terminate_tree();
         return Err(error);
     }
 
-    Ok(ManagedChromeSession { process, plan })
+    match wait_for_cdp_or_child_exit(&mut process, &endpoint_file, cdp_startup_timeout) {
+        Ok(port) => plan.cdp_port = port,
+        Err(error) => {
+            // This launch owns the tree and nothing else has ever seen it, so it is
+            // killed and reaped right here — the session that would have taken
+            // ownership does not exist, so its `Drop` will never run.
+            process.terminate_tree();
+            let _ = lease.update(profile::LaunchState::LaunchFailed, None);
+            return Err(error);
+        }
+    }
+
+    if let Err(error) = lease.update(profile::LaunchState::Running, process.id()) {
+        process.terminate_tree();
+        return Err(error);
+    }
+    Ok(ManagedChromeSession {
+        process,
+        plan,
+        lease,
+        _activity: SessionActivity::new(),
+    })
 }
 
 impl ManagedChromeSession {
@@ -261,6 +334,9 @@ impl ManagedChromeSession {
     /// Never returns Err: teardown must not abort the caller's cleanup path.
     /// Safe to call repeatedly — the owner's teardown is idempotent.
     pub fn close_gracefully(&mut self) {
+        let unexpected = self.lease.record.state == profile::LaunchState::UnexpectedExit
+            || (self.lease.record.state == profile::LaunchState::Running
+                && !self.process.is_alive());
         if self.process.is_alive() {
             if let Ok(mut page) = self.connect_page() {
                 let id = page.next_command_id();
@@ -278,6 +354,14 @@ impl ManagedChromeSession {
         // browser exiting does not mean its renderer/GPU children exited, and
         // those are exactly what a single-PID kill leaked (MP-22).
         self.process.terminate_tree();
+        let state = if unexpected {
+            profile::LaunchState::UnexpectedExit
+        } else {
+            profile::LaunchState::Closed
+        };
+        if let Err(error) = self.lease.update(state, None) {
+            tracing::warn!(%error, "Could not persist managed Chrome close state");
+        }
     }
 
     pub fn close(mut self) -> Result<(), ManagedChromeError> {
@@ -328,7 +412,13 @@ fn configure_process_isolation(command: &mut Command) {
 impl ManagedChromeSession {
     /// Check if the Chrome process is still alive.
     pub fn is_alive(&mut self) -> bool {
-        self.process.is_alive()
+        let alive = self.process.is_alive();
+        if !alive && matches!(self.lease.record.state, profile::LaunchState::Running) {
+            let _ = self
+                .lease
+                .update(profile::LaunchState::UnexpectedExit, self.process.id());
+        }
+        alive
     }
 
     /// Full health check: verify Chrome is alive and CDP is responsive.
@@ -363,10 +453,10 @@ impl CdpPageSession {
         let mut stream = std::net::TcpStream::connect((host.as_str(), port))
             .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
         stream
-            .set_read_timeout(Some(Duration::from_secs(20)))
+            .set_read_timeout(Some(Duration::from_secs(5)))
             .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
         stream
-            .set_write_timeout(Some(Duration::from_secs(20)))
+            .set_write_timeout(Some(Duration::from_secs(5)))
             .map_err(|error| ManagedChromeError::Io(error.to_string()))?;
         let key = STANDARD.encode(*b"MoviePartyCdpKey!");
         let request = format!(
@@ -447,21 +537,18 @@ fn is_valid_provider_id(provider_id: &str) -> bool {
 /// CdpTimeout error 10 seconds later).
 fn wait_for_cdp_or_child_exit(
     process: &mut ChromeProcessOwner,
-    port: u16,
+    endpoint_file: &Path,
     timeout: Duration,
-) -> Result<(), ManagedChromeError> {
+) -> Result<u16, ManagedChromeError> {
     let start = Instant::now();
     loop {
-        if http_get(port, "/json/version").is_ok() {
-            return Ok(());
-        }
         match process.poll() {
             // Chrome exited before CDP came up: surface the real cause, not a
             // timeout. This is the "Chrome exits unexpectedly" launch-time
             // symptom.
             ChildPoll::Exited(status) => {
                 return Err(ManagedChromeError::Process(format!(
-                    "Chrome exited during launch with status {status}"
+                    "Chrome exited during launch with status {status}. Close any Movie Party browser using this profile and retry. If Chrome was updated, retry with the installed version; reset a corrupt session only after confirmation"
                 )));
             }
             ChildPoll::Running => {}
@@ -469,11 +556,54 @@ fn wait_for_cdp_or_child_exit(
                 return Err(ManagedChromeError::Io(error));
             }
         }
+        if let Ok(contents) = fs::read_to_string(endpoint_file) {
+            if let Ok((port, browser_path)) = parse_active_endpoint(&contents) {
+                if let Ok(body) = http_get(port, "/json/version") {
+                    if version_matches_endpoint(&body, port, browser_path) && process.is_alive() {
+                        return Ok(port);
+                    }
+                }
+            }
+        }
         if start.elapsed() >= timeout {
+            #[cfg(test)]
+            if let Ok(contents) = fs::read_to_string(endpoint_file) {
+                eprintln!("Startup endpoint diagnostic: {contents:?}");
+                if let Ok((port, path)) = parse_active_endpoint(&contents) {
+                    eprintln!(
+                        "Version response diagnostic: {:?}; expected path {path}",
+                        http_get(port, "/json/version")
+                    );
+                }
+            }
             return Err(ManagedChromeError::CdpTimeout);
         }
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn parse_active_endpoint(contents: &str) -> Result<(u16, &str), ManagedChromeError> {
+    let mut lines = contents.lines();
+    let port = lines
+        .next()
+        .and_then(|v| v.parse::<u16>().ok())
+        .filter(|v| *v != 0)
+        .ok_or(ManagedChromeError::MalformedCdpResponse)?;
+    let path = lines
+        .next()
+        .filter(|v| v.starts_with("/devtools/browser/") && !v.contains(['?', '#', '\\', '\r', ' ']))
+        .ok_or(ManagedChromeError::MalformedCdpResponse)?;
+    Ok((port, path))
+}
+
+fn version_matches_endpoint(body: &str, port: u16, browser_path: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value["webSocketDebuggerUrl"].as_str().map(str::to_owned))
+        .and_then(|url| parse_ws_url(&url).ok())
+        .is_some_and(|(host, actual_port, path)| {
+            host == CDP_BIND_HOST && actual_port == port && path == browser_path
+        })
 }
 
 fn fetch_targets(port: u16) -> Result<Vec<CdpTarget>, ManagedChromeError> {
@@ -773,16 +903,14 @@ mod tests {
     /// Wraps an isolated child in a session, standing in for a real Chrome.
     #[cfg(unix)]
     fn session_over(child: Child) -> ManagedChromeSession {
+        let root = std::env::temp_dir().join(format!("mp-session-{}", uuid::Uuid::now_v7()));
+        let lease = profile::ProfileLease::acquire(&root.join("youtube")).expect("profile lease");
         ManagedChromeSession {
+            lease,
+            _activity: SessionActivity::new(),
             process: ChromeProcessOwner::adopt(child),
-            plan: build_launch_plan(
-                PathBuf::from("/bin/true"),
-                Path::new("/tmp/MoviePartyProfiles"),
-                "youtube",
-                9222,
-                "about:blank",
-            )
-            .expect("plan"),
+            plan: build_launch_plan(PathBuf::from("/bin/true"), &root, "youtube", "about:blank")
+                .expect("plan"),
         }
     }
 
@@ -882,14 +1010,8 @@ mod tests {
                 pids = pid_file.display()
             ),
         );
-        let plan = build_launch_plan(
-            executable,
-            root.path(),
-            "youtube",
-            allocate_local_cdp_port().expect("cdp port"),
-            "about:blank",
-        )
-        .expect("plan");
+        let plan =
+            build_launch_plan(executable, root.path(), "youtube", "about:blank").expect("plan");
 
         let error = launch_managed_chrome_with_timeout(plan, Duration::from_millis(800))
             .expect_err("a browser that never opens CDP must fail the launch");
@@ -927,14 +1049,8 @@ mod tests {
                 pids = pid_file.display()
             ),
         );
-        let plan = build_launch_plan(
-            executable,
-            root.path(),
-            "youtube",
-            allocate_local_cdp_port().expect("cdp port"),
-            "about:blank",
-        )
-        .expect("plan");
+        let plan =
+            build_launch_plan(executable, root.path(), "youtube", "about:blank").expect("plan");
 
         let error = launch_managed_chrome_with_timeout(plan, Duration::from_secs(5))
             .expect_err("a browser that exits immediately must fail the launch");
@@ -1005,7 +1121,6 @@ mod tests {
             PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
             Path::new("/tmp/MoviePartyProfiles"),
             "prime",
-            DEFAULT_CDP_PORT,
             "https://www.primevideo.com/",
         )
         .expect("launch plan");
@@ -1014,7 +1129,7 @@ mod tests {
         assert!(args
             .iter()
             .any(|arg| arg == "--remote-debugging-address=127.0.0.1"));
-        assert!(args.iter().any(|arg| arg == "--remote-debugging-port=9222"));
+        assert!(args.iter().any(|arg| arg == "--remote-debugging-port=0"));
         // The profile dir arg must point at the dedicated provider profile —
         // asserted by parsed path, not by rendered string, because
         // Path::display() emits platform separators (backslashes on Windows)
@@ -1029,16 +1144,15 @@ mod tests {
     }
 
     #[test]
-    fn launch_plan_rejects_ephemeral_cdp_port_zero() {
+    fn launch_plan_uses_chrome_selected_ephemeral_port() {
         let plan = build_launch_plan(
             PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
             Path::new("/tmp/MoviePartyProfiles"),
             "youtube",
-            0,
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
         );
 
-        assert_eq!(plan, Err(ManagedChromeError::InvalidCdpPort));
+        assert_eq!(plan.expect("plan").cdp_port, 0);
     }
 
     #[test]
@@ -1049,7 +1163,6 @@ mod tests {
             executable.clone(),
             Path::new("/tmp/MoviePartyProfiles"),
             "youtube",
-            DEFAULT_CDP_PORT,
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
         )
         .expect("launch plan");
@@ -1065,6 +1178,170 @@ mod tests {
             validate_cdp_bind(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))),
             Err(ManagedChromeError::NonLocalCdpBind)
         );
+    }
+
+    #[test]
+    fn endpoint_must_match_this_profiles_new_browser_on_loopback() {
+        let (port, path) =
+            parse_active_endpoint("53121\n/devtools/browser/unique-launch\n").unwrap();
+        let response = |host: &str, port: u16, path: &str| {
+            serde_json::json!({
+                "webSocketDebuggerUrl": format!("ws://{host}:{port}{path}")
+            })
+            .to_string()
+        };
+        assert!(version_matches_endpoint(
+            &response("127.0.0.1", port, path),
+            port,
+            path
+        ));
+        assert!(!version_matches_endpoint(
+            &response("100.64.0.1", port, path),
+            port,
+            path
+        ));
+        assert!(!version_matches_endpoint(
+            &response("127.0.0.1", port + 1, path),
+            port,
+            path
+        ));
+        assert!(!version_matches_endpoint(
+            &response("127.0.0.1", port, "/devtools/browser/other"),
+            port,
+            path
+        ));
+        assert!(!version_matches_endpoint("{}", port, path));
+        for invalid in [
+            "0\n/devtools/browser/id",
+            "53121\nhttp://external",
+            "bad",
+            "65536\n/devtools/browser/id",
+        ] {
+            assert!(parse_active_endpoint(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn missing_executable_does_not_erase_profile_and_records_launch_failure() {
+        let root = TempProfile::new("mp-missing-chrome");
+        let profile = root.path().join("youtube");
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(profile.join("sentinel"), b"keep sign-in storage").unwrap();
+        let plan = build_launch_plan(
+            root.path().join("nonexistent-chrome"),
+            root.path(),
+            "youtube",
+            "about:blank",
+        )
+        .unwrap();
+        assert!(matches!(
+            launch_managed_chrome(plan),
+            Err(ManagedChromeError::Process(_))
+        ));
+        assert!(profile.join("sentinel").exists());
+        let record: profile::OwnershipRecord =
+            serde_json::from_slice(&fs::read(root.path().join(".youtube.ownership")).unwrap())
+                .unwrap();
+        assert_eq!(record.state, profile::LaunchState::LaunchFailed);
+        assert_eq!(record.pid, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_party_keeps_the_owned_browser_until_leave() {
+        struct LoopbackEnv(Option<std::ffi::OsString>);
+        impl Drop for LoopbackEnv {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", value),
+                    None => std::env::remove_var("MOVIE_PARTY_DEV_LOOPBACK"),
+                }
+            }
+        }
+        let _env = LoopbackEnv(std::env::var_os("MOVIE_PARTY_DEV_LOOPBACK"));
+        std::env::set_var("MOVIE_PARTY_DEV_LOOPBACK", "1");
+        let session = session_over(spawn_isolated("/bin/sleep", "300"));
+        let pid = session.process.id().unwrap() as i32;
+        let profile = session.plan.profile_path.clone();
+        fs::write(profile.join("session-sentinel"), b"persistent").unwrap();
+        let runtime = crate::app_runtime::AppRuntime::new_without_emitter();
+        runtime.open_provider_browser("youtube".into(), session);
+        runtime.update_provider_readiness(crate::providers::sync::ProviderReadiness::PlaybackReady);
+        runtime.create_local_party(None, true).await.unwrap();
+        assert!(runtime.session_matches_provider("youtube"));
+        assert!(process_exists(pid), "room creation killed its browser");
+        runtime.attach_launched_provider(
+            "youtube".into(),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ".into(),
+        );
+        assert!(
+            runtime.prepare_provider_reset("youtube").is_err(),
+            "reset must refuse an active room"
+        );
+        runtime.leave_party();
+        assert!(wait_for_process_exit(pid, Duration::from_secs(5)));
+        assert_eq!(
+            fs::read(profile.join("session-sentinel")).unwrap(),
+            b"persistent"
+        );
+        let _ = fs::remove_dir_all(profile.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unexpected_browser_exit_releases_profile_and_requires_readiness_again() {
+        let mut session = session_over(spawn_isolated("/bin/sleep", "300"));
+        let profile = session.plan.profile_path.clone();
+        // The fixture is an owned isolated process, not real authenticated Chrome.
+        session
+            .lease
+            .update(profile::LaunchState::Running, session.process.id())
+            .unwrap();
+        let pid = session.process.id().unwrap() as i32;
+        let runtime = crate::app_runtime::AppRuntime::new_without_emitter();
+        runtime.open_provider_browser("youtube".into(), session);
+        runtime.update_provider_readiness(crate::providers::sync::ProviderReadiness::PlaybackReady);
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+        let deadline = Instant::now() + Duration::from_secs(6);
+        while runtime.snapshot().provider.readiness
+            != crate::providers::sync::ProviderReadiness::NotStarted
+        {
+            assert!(
+                Instant::now() < deadline,
+                "crash watcher did not invalidate readiness"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(!runtime.snapshot().participants[0].media_ready);
+        // Wait for the out-of-lock teardown to finish before testing the lease.
+        while profile::ProfileLease::acquire(&profile).is_err() {
+            assert!(
+                Instant::now() < deadline,
+                "dead browser kept its profile locked"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let record: profile::OwnershipRecord = serde_json::from_slice(
+            &fs::read(profile.parent().unwrap().join(".youtube.ownership")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record.state, profile::LaunchState::UnexpectedExit);
+        runtime.leave_party();
+        let _ = fs::remove_dir_all(profile.parent().unwrap());
+    }
+
+    #[test]
+    fn shutdown_wait_includes_sessions_held_outside_runtime_state() {
+        let activity = SessionActivity::new();
+        assert!(!wait_for_session_shutdown(Duration::ZERO));
+        let cleanup = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            drop(activity);
+        });
+        assert!(wait_for_session_shutdown(Duration::from_secs(2)));
+        cleanup.join().unwrap();
     }
 
     #[test]
@@ -1087,7 +1364,7 @@ mod tests {
         require_visible_chrome_consent();
         let executable = find_chrome(&default_chrome_candidates()).expect("Chrome installed");
         let root = TempProfile::new("movie-party-chrome");
-        let plan = build_launch_plan(executable, root.path(), "youtube", 9333, "about:blank")
+        let plan = build_launch_plan(executable, root.path(), "youtube", "about:blank")
             .expect("launch plan");
         let session = launch_managed_chrome(plan).expect("launch Chrome");
         let targets = session.targets().expect("targets");
@@ -1107,6 +1384,109 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "opens visible Chrome twice using only a disposable local-page profile"]
+    fn real_chrome_profile_storage_survives_managed_close_and_relaunch() {
+        require_visible_chrome_consent();
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        struct LocalPage {
+            stop: Arc<AtomicBool>,
+            thread: Option<std::thread::JoinHandle<()>>,
+        }
+        impl Drop for LocalPage {
+            fn drop(&mut self) {
+                self.stop.store(true, Ordering::SeqCst);
+                if let Some(thread) = self.thread.take() {
+                    thread.join().unwrap();
+                }
+            }
+        }
+        let listener = std::net::TcpListener::bind((CDP_BIND_HOST, 0)).unwrap();
+        let origin = format!(
+            "http://127.0.0.1:{}/",
+            listener.local_addr().unwrap().port()
+        );
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let running = stop.clone();
+        let server = std::thread::spawn(move || {
+            while !running.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut socket, _)) => {
+                        socket
+                            .set_read_timeout(Some(Duration::from_secs(1)))
+                            .unwrap();
+                        let mut buffer = [0; 4096];
+                        let _ = socket.read(&mut buffer);
+                        let body = "<html><title>Movie Party profile test</title><body>Disposable local storage test only</body></html>";
+                        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                        let _ = socket.write_all(response.as_bytes());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(error) => panic!("local fixture server: {error}"),
+                }
+            }
+        });
+        let _server = LocalPage {
+            stop,
+            thread: Some(server),
+        };
+        let root = TempProfile::new("movie-party-storage");
+        let executable = find_chrome(&default_chrome_candidates()).unwrap();
+        let mut plan = build_launch_plan(executable, root.path(), "youtube", &origin).unwrap();
+        let session = launch_managed_chrome(plan.clone()).unwrap();
+        let page_for_origin = |session: &ManagedChromeSession| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(target) = session
+                    .targets()
+                    .unwrap()
+                    .into_iter()
+                    .find(|target| target.target_type == "page" && target.url == origin)
+                {
+                    let mut page =
+                        CdpPageSession::connect(&target.web_socket_debugger_url).unwrap();
+                    if page.evaluate("document.title").unwrap()["result"]["value"]
+                        == "Movie Party profile test"
+                    {
+                        break page;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "Chrome did not restore its local test tab"
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        };
+        let mut page = page_for_origin(&session);
+        let saved = page.evaluate("localStorage.setItem('movie-party-test', 'local-sentinel'); sessionStorage.setItem('movie-party-test', 'session-sentinel'); true").unwrap();
+        assert_eq!(saved["result"]["value"].as_bool(), Some(true));
+        drop(page);
+        session.close().unwrap();
+        assert!(root.path().join("youtube/Local State").is_file());
+        plan.url = "about:blank".into();
+        let relaunched = launch_managed_chrome(plan).unwrap();
+        let mut page = page_for_origin(&relaunched);
+        assert_eq!(
+            page.evaluate("localStorage.getItem('movie-party-test')")
+                .unwrap()["result"]["value"],
+            "local-sentinel"
+        );
+        assert_eq!(
+            page.evaluate("sessionStorage.getItem('movie-party-test')")
+                .unwrap()["result"]["value"],
+            "session-sentinel"
+        );
+        drop(page);
+        relaunched.close().unwrap();
+    }
+
+    #[test]
     #[ignore = "launches real Chrome and uses the live YouTube page"]
     fn real_youtube_provider_sync_uses_chrome_cdp() {
         require_visible_chrome_consent();
@@ -1114,7 +1494,7 @@ mod tests {
         assert!(is_youtube_url(url));
         let executable = find_chrome(&default_chrome_candidates()).expect("Chrome installed");
         let root = TempProfile::new("movie-party-youtube");
-        let plan = build_launch_plan(executable, root.path(), "youtube", 9336, "about:blank")
+        let plan = build_launch_plan(executable, root.path(), "youtube", "about:blank")
             .expect("launch plan");
         let session = launch_managed_chrome(plan).expect("launch Chrome");
         let mut page = session.connect_page().expect("page websocket");

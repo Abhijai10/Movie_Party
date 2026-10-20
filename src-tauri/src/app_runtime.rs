@@ -1683,36 +1683,44 @@ impl AppRuntime {
     /// paused for both (strict sync, §14).
     fn spawn_chrome_crash_watcher(&self) {
         let inner = Arc::clone(&self.inner);
+        let generation = self.lock().chrome_generation;
         let task = spawn_on_runtime(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                let (exists, alive) = {
+                let crashed = {
                     let mut state = inner.lock();
-                    match state.chrome_session.as_mut() {
-                        None => (false, false),
-                        Some(session) => (true, session.is_alive()),
+                    if state.chrome_generation != generation {
+                        break;
                     }
-                };
-                if !exists {
-                    // Session closed gracefully / torn down — stop watching.
-                    break;
-                }
-                if !alive {
-                    let mut state = inner.lock();
-                    // Take the dead session out so Drop's graceful close
-                    // path does not operate on a corpse (it would only
-                    // wait on an already-exited child).
-                    state.chrome_session = None;
-                    // MP-08: the browser identity moved on — a CDP round-trip
-                    // still holding this session must not put it back.
+                    // Dispatch/poll temporarily takes the session out of state.
+                    // That is not a close and must not end crash monitoring.
+                    let Some(session) = state.chrome_session.as_mut() else {
+                        continue;
+                    };
+                    if session.is_alive() {
+                        continue;
+                    }
+                    let dead = state.chrome_session.take();
                     bump_chrome_generation(&mut state);
+                    if state.room_state == RoomState::Playing {
+                        let _ = state
+                            .sync_coordinator
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .buffer_low(PeerRole::Host, state.sync.position_ms);
+                    }
                     let plan = recovery_plan(FailureEvent::ChromeCrash);
                     apply_recovery_to_state(&mut state, FailureEvent::ChromeCrash, plan);
-                    let out = snapshot_from_state(&state);
-                    drop(state);
-                    inner.emit(out);
-                    break;
+                    (dead, snapshot_from_state(&state), state.chrome_generation)
+                };
+                // Whole-tree cleanup and disk record flushing may block.
+                // Release the state lock before either operation.
+                let (dead, snapshot, closed_generation) = crashed;
+                let _ = tokio::task::spawn_blocking(move || drop(dead)).await;
+                if inner.lock().chrome_generation == closed_generation {
+                    inner.emit(snapshot);
                 }
+                break;
             }
         });
         let mut state = self.lock();
@@ -1784,6 +1792,33 @@ impl AppRuntime {
         }
     }
 
+    pub fn prepare_provider_reset(&self, provider_id: &str) -> Result<(), String> {
+        let state = self.lock();
+        if state.host_session.is_some() || state.client.is_some() {
+            return Err(
+                "MP-PROVIDER-006 leave the party before resetting a provider session".into(),
+            );
+        }
+        let matches = state.provider.provider_id.as_deref() == Some(provider_id);
+        drop(state);
+        if matches {
+            self.close_provider_session();
+        }
+        Ok(())
+    }
+
+    pub fn provider_session_was_reset(&self, provider_id: &str) -> AppSnapshot {
+        let mut state = self.lock();
+        if state.provider.provider_id.as_deref() == Some(provider_id) {
+            state.provider.readiness = crate::providers::sync::ProviderReadiness::NotStarted;
+            state.provider.url = None;
+            state.provider.state = "Session reset; open the provider to sign in again".into();
+            state.local_participant.media_ready = false;
+            state.error = None;
+        }
+        snapshot_from_state(&state)
+    }
+
     pub fn store_launched_provider(
         &self,
         provider_id: String,
@@ -1806,6 +1841,7 @@ impl AppRuntime {
         // the provider browser is the room media — start the
         // position/buffer watch worker (idempotent replace).
         self.spawn_provider_watch_worker();
+        self.spawn_chrome_crash_watcher();
         let mut state = self.lock();
         state.provider.mode = "PROVIDER_SYNC".to_string();
         state.provider.provider_id = Some(provider_id);
@@ -1851,6 +1887,7 @@ impl AppRuntime {
             previous
         };
         drop(previous);
+        self.spawn_chrome_crash_watcher();
         let mut state = self.lock();
         state.provider.mode = "GENERIC_LINK".to_string();
         state.provider.provider_id = None;
@@ -1899,6 +1936,7 @@ impl AppRuntime {
             previous
         };
         drop(previous);
+        self.spawn_chrome_crash_watcher();
         let mut state = self.lock();
         state.provider.mode = "PROVIDER_SYNC".to_string();
         state.provider.provider_id = Some(provider_id);
@@ -7916,6 +7954,8 @@ fn apply_recovery_to_state(state: &mut AppRuntimeState, event: FailureEvent, pla
         }
         FailureEvent::ChromeCrash | FailureEvent::ProviderPageClosed => {
             state.provider.state = "Recovery required".to_string();
+            state.provider.readiness = crate::providers::sync::ProviderReadiness::NotStarted;
+            state.local_participant.media_ready = false;
         }
         FailureEvent::ProviderLogout => {
             state.provider.state = "Login required".to_string();
@@ -12723,6 +12763,44 @@ mod session_lifecycle_tests {
 #[cfg(test)]
 mod runtime_spawn_tests {
     use super::*;
+
+    #[test]
+    fn provider_exit_invalidates_ready_and_keeps_the_selected_content_for_retry() {
+        let runtime = AppRuntime::new_without_emitter();
+        let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+        runtime.update_provider_readiness(crate::providers::sync::ProviderReadiness::PlaybackReady);
+        runtime.attach_launched_provider("youtube".into(), url.into());
+        let recovered = runtime.handle_failure_event(FailureEvent::ChromeCrash);
+        assert_eq!(
+            recovered.provider.readiness,
+            crate::providers::sync::ProviderReadiness::NotStarted
+        );
+        assert_eq!(recovered.provider.url.as_deref(), Some(url));
+        assert!(!recovered.participants[0].media_ready);
+        assert!(recovered.sync.strict_sync_paused);
+        assert!(runtime.validate_provider_ready_for_room().is_err());
+        runtime.leave_party();
+    }
+
+    #[test]
+    fn resetting_one_provider_does_not_change_another_provider() {
+        let runtime = AppRuntime::new_without_emitter();
+        runtime.attach_launched_provider(
+            "youtube".into(),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ".into(),
+        );
+        let unchanged = runtime.provider_session_was_reset("netflix");
+        assert_eq!(unchanged.provider.provider_id.as_deref(), Some("youtube"));
+        assert!(unchanged.provider.url.is_some());
+        let reset = runtime.provider_session_was_reset("youtube");
+        assert_eq!(
+            reset.provider.readiness,
+            crate::providers::sync::ProviderReadiness::NotStarted
+        );
+        assert!(reset.provider.url.is_none());
+        assert!(!reset.participants[0].media_ready);
+        runtime.leave_party();
+    }
 
     /// Exercise both branches of the runtime fallback and prove that attaching
     /// again replaces the workers, rather than leaving duplicate pollers alive.

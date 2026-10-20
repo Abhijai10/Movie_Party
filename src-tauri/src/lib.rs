@@ -40,6 +40,9 @@ enum TailscaleSetupAction {
 #[derive(Default)]
 struct PendingDeepLinks(Mutex<Vec<String>>);
 
+#[derive(Default)]
+struct ChromeOperations(Mutex<()>);
+
 impl PendingDeepLinks {
     fn push(&self, url: String) {
         let mut links = self
@@ -67,6 +70,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|_, _, _| {}))
         .manage(app_runtime::AppRuntime::new_without_emitter())
         .manage(PendingDeepLinks::default())
+        .manage(ChromeOperations::default())
         .manage(media::player::native_surface::NativeVideoSurfaceState::default())
         .setup(|app| {
             // M4: Initialize the SQLite database on startup, restore identity,
@@ -159,6 +163,7 @@ pub fn run() {
             open_provider_browser,
             check_provider_status,
             navigate_provider_title,
+            reset_provider_session,
             create_schedule,
             create_and_broadcast_schedule,
             update_and_broadcast_schedule,
@@ -194,6 +199,15 @@ pub fn run() {
             if matches!(event, tauri::RunEvent::Exit) {
                 let runtime = app_handle.state::<app_runtime::AppRuntime>();
                 runtime.close_provider_session();
+                if !crate::providers::chrome::wait_for_session_shutdown(
+                    std::time::Duration::from_secs(25),
+                ) {
+                    tracing::warn!(
+                        "Managed Chrome did not finish graceful shutdown within 25 seconds"
+                    );
+                    #[cfg(unix)]
+                    crate::providers::chrome::kill_live_chrome_tree();
+                }
             }
         }),
         Err(error) => {
@@ -659,11 +673,14 @@ fn pick_save_folder() -> Result<String, String> {
 
 #[tauri::command]
 fn launch_provider(
+    app: tauri::AppHandle,
+    operations: tauri::State<'_, ChromeOperations>,
     provider_id: String,
     url: String,
     mode: String,
     runtime: tauri::State<'_, app_runtime::AppRuntime>,
 ) -> Result<app_runtime::AppSnapshot, String> {
+    let _operation = operations.0.lock().unwrap_or_else(|e| e.into_inner());
     use crate::providers::sync::{provider_id_from_str, provider_mode_gate, ProviderModeGate};
 
     // F56/F57: the mode gate stays doubly enforced. The diagnostic is only
@@ -712,29 +729,76 @@ fn launch_provider(
         &provider_id,
     )
     .ok_or_else(|| "MP-PROVIDER-002 provider URL mismatch".to_string())?;
-    let session = launch_provider_chrome(&runtime, &provider_id, &url)?;
+    let session = launch_provider_chrome(&app, &runtime, &provider_id, &url)?;
     Ok(runtime.store_launched_provider(provider_id, url, session))
 }
 
 /// Finds Chrome, allocates a local CDP port, and launches a fresh managed
 /// browser session for a provider URL. Closes any previous provider session.
 fn launch_provider_chrome(
+    app: &tauri::AppHandle,
     runtime: &app_runtime::AppRuntime,
     provider_id: &str,
     url: &str,
 ) -> Result<crate::providers::chrome::ManagedChromeSession, String> {
     use crate::providers::chrome::{
-        allocate_local_cdp_port, build_launch_plan, default_chrome_candidates, find_chrome,
-        launch_managed_chrome,
+        build_launch_plan, default_chrome_candidates, find_chrome, launch_managed_chrome,
     };
 
     let chrome_path = find_chrome(&default_chrome_candidates()).map_err(|e| e.to_string())?;
-    let profiles_root = std::env::temp_dir().join("MoviePartyProfiles");
-    let cdp_port = allocate_local_cdp_port().map_err(|e| e.to_string())?;
-    let plan = build_launch_plan(chrome_path, &profiles_root, provider_id, cdp_port, url)
+    let profiles_root = prepare_managed_profile(app, provider_id)?;
+    let plan = build_launch_plan(chrome_path, &profiles_root, provider_id, url)
         .map_err(|e| e.to_string())?;
     runtime.close_provider_session();
     launch_managed_chrome(plan).map_err(|e| e.to_string())
+}
+
+/// Stable across app updates; Chrome owns all credential encryption in this
+/// dedicated non-default user-data directory. Never migrate ordinary profiles.
+fn managed_profiles_root(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_local_data_dir()
+        .map(|path| path.join("managed-chrome").join("profiles"))
+        .map_err(|e| format!("MP-PROVIDER-006 could not locate application data: {e}"))
+}
+
+fn prepare_managed_profile(
+    app: &tauri::AppHandle,
+    provider: &str,
+) -> Result<std::path::PathBuf, String> {
+    let root = managed_profiles_root(app)?;
+    crate::providers::chrome::profile::migrate_legacy_profile(
+        &root,
+        &std::env::temp_dir().join("MoviePartyProfiles"),
+        provider,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(root)
+}
+
+#[tauri::command]
+fn reset_provider_session(
+    app: tauri::AppHandle,
+    operations: tauri::State<'_, ChromeOperations>,
+    provider_id: String,
+    confirmed: bool,
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<app_runtime::AppSnapshot, String> {
+    let _operation = operations.0.lock().unwrap_or_else(|e| e.into_inner());
+    if !confirmed {
+        return Err(crate::providers::chrome::ManagedChromeError::ConfirmationRequired.to_string());
+    }
+    if crate::providers::sync::provider_id_from_str(&provider_id).is_none() {
+        return Err("MP-PROVIDER-002 unsupported provider".into());
+    }
+    runtime.prepare_provider_reset(&provider_id)?;
+    crate::providers::chrome::profile::reset_profile(
+        &managed_profiles_root(&app)?,
+        &provider_id,
+        confirmed,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(runtime.provider_session_was_reset(&provider_id))
 }
 
 /// Opens the selected provider's home page in the managed browser so the user
@@ -742,9 +806,12 @@ fn launch_provider_chrome(
 /// for the same provider instead of spawning a duplicate browser process.
 #[tauri::command]
 fn open_provider_browser(
+    app: tauri::AppHandle,
+    operations: tauri::State<'_, ChromeOperations>,
     provider_id: String,
     runtime: tauri::State<'_, app_runtime::AppRuntime>,
 ) -> Result<app_runtime::AppSnapshot, String> {
+    let _operation = operations.0.lock().unwrap_or_else(|e| e.into_inner());
     use crate::providers::sync::{provider_home_url, provider_id_from_str};
 
     let provider = provider_id_from_str(&provider_id)
@@ -761,7 +828,7 @@ fn open_provider_browser(
         return Ok(runtime.update_provider_readiness(readiness));
     }
 
-    let session = launch_provider_chrome(&runtime, &provider_id, &url)?;
+    let session = launch_provider_chrome(&app, &runtime, &provider_id, &url)?;
     Ok(runtime.open_provider_browser(provider_id, session))
 }
 
@@ -809,12 +876,14 @@ fn navigate_provider_title(
 
 #[tauri::command]
 fn launch_generic_link(
+    app: tauri::AppHandle,
+    operations: tauri::State<'_, ChromeOperations>,
     url: String,
     runtime: tauri::State<'_, app_runtime::AppRuntime>,
 ) -> Result<app_runtime::AppSnapshot, String> {
+    let _operation = operations.0.lock().unwrap_or_else(|e| e.into_inner());
     use crate::providers::chrome::{
-        allocate_local_cdp_port, build_launch_plan, default_chrome_candidates, find_chrome,
-        launch_managed_chrome,
+        build_launch_plan, default_chrome_candidates, find_chrome, launch_managed_chrome,
     };
 
     if !crate::providers::sync::generic_link_accepts_url(&url) {
@@ -825,13 +894,8 @@ fn launch_generic_link(
         Ok(path) => path,
         Err(error) => return Ok(runtime.generic_link_unavailable(url, error.to_string())),
     };
-    let profiles_root = std::env::temp_dir().join("MoviePartyProfiles");
-    let cdp_port = match allocate_local_cdp_port() {
-        Ok(port) => port,
-        Err(error) => return Ok(runtime.generic_link_unavailable(url, error.to_string())),
-    };
-    let plan = match build_launch_plan(chrome_path, &profiles_root, "generic-link", cdp_port, &url)
-    {
+    let profiles_root = prepare_managed_profile(&app, "generic-link")?;
+    let plan = match build_launch_plan(chrome_path, &profiles_root, "generic-link", &url) {
         Ok(plan) => plan,
         Err(error) => return Ok(runtime.generic_link_unavailable(url, error.to_string())),
     };

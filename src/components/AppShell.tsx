@@ -19,6 +19,7 @@ import {
   markReady,
   navigateProviderTitle,
   openProviderBrowser,
+  providerSessionErrorMessage,
   openTailscaleSetup,
   setSharedControls,
   showHome,
@@ -1117,6 +1118,8 @@ export function AppShell() {
 
 function createRoomErrorMessage(error: unknown): string {
   const fallback = "Movie Party could not create the room.";
+  const providerMessage = providerSessionErrorMessage(error);
+  if (providerMessage) return providerMessage;
   if (error instanceof BackendCommandError) {
     if (error.code === "MP-NET-TS-001")
       return "Install Tailscale before creating a private cinema.";
