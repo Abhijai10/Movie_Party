@@ -12724,6 +12724,114 @@ mod session_lifecycle_tests {
 mod runtime_spawn_tests {
     use super::*;
 
+    /// Exercise both branches of the runtime fallback and prove that attaching
+    /// again replaces the workers, rather than leaving duplicate pollers alive.
+    fn assert_provider_worker_lifecycle() {
+        let runtime = AppRuntime::new_without_emitter();
+        let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+        runtime.update_provider_readiness(crate::providers::sync::ProviderReadiness::PlaybackReady);
+        runtime.attach_launched_provider("youtube".into(), url.into());
+        let (old_watch, old_crash) = {
+            let mut state = runtime.lock();
+            (
+                state.provider_watch_task.take().expect("provider worker"),
+                state
+                    .chrome_crash_watcher_task
+                    .take()
+                    .expect("crash watcher"),
+            )
+        };
+        let old_watch_id = old_watch.id();
+        let old_crash_id = old_crash.id();
+        let old_watch_abort = old_watch.abort_handle();
+        let old_crash_abort = old_crash.abort_handle();
+        {
+            let mut state = runtime.lock();
+            state.provider_watch_task = Some(old_watch);
+            state.chrome_crash_watcher_task = Some(old_crash);
+        }
+        let snapshot = runtime.attach_launched_provider("youtube".into(), url.into());
+        assert_eq!(snapshot.provider.mode, "PROVIDER_SYNC");
+        assert_eq!(
+            snapshot.provider.readiness,
+            crate::providers::sync::ProviderReadiness::PlaybackReady
+        );
+        assert!(snapshot.participants[0].media_ready);
+        let (watch, crash) = {
+            let mut state = runtime.lock();
+            (
+                state
+                    .provider_watch_task
+                    .take()
+                    .expect("replacement provider worker"),
+                state
+                    .chrome_crash_watcher_task
+                    .take()
+                    .expect("replacement crash watcher"),
+            )
+        };
+        assert_ne!(watch.id(), old_watch_id);
+        assert_ne!(crash.id(), old_crash_id);
+        let watch_abort = watch.abort_handle();
+        let crash_abort = crash.abort_handle();
+        // Put the live workers back so the real leave path must abort them.
+        {
+            let mut state = runtime.lock();
+            state.provider_watch_task = Some(watch);
+            state.chrome_crash_watcher_task = Some(crash);
+        }
+        let ended = runtime.leave_party();
+        assert_eq!(ended.provider.mode, "LOCAL_PERFECT");
+        assert_eq!(
+            ended.provider.readiness,
+            crate::providers::sync::ProviderReadiness::NotStarted
+        );
+        assert!(ended.provider.url.is_none());
+        assert!(ended.provider.provider_id.is_none());
+        assert!(runtime.lock().provider_watch_task.is_none());
+        assert!(runtime.lock().chrome_crash_watcher_task.is_none());
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        for worker in [old_watch_abort, old_crash_abort, watch_abort, crash_abort] {
+            while !worker.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(worker.is_finished(), "replaced/ended worker must stop");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn provider_workers_replace_and_cleanup_inside_tokio() {
+        assert_provider_worker_lifecycle();
+    }
+
+    #[test]
+    fn provider_workers_replace_and_cleanup_without_entered_runtime() {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert_provider_worker_lifecycle();
+    }
+
+    #[test]
+    fn provider_transient_and_failure_states_refuse_room_creation() {
+        use crate::providers::sync::ProviderReadiness;
+        let runtime = AppRuntime::new_without_emitter();
+        for readiness in [
+            ProviderReadiness::Launching,
+            ProviderReadiness::Navigating,
+            ProviderReadiness::Unavailable,
+            ProviderReadiness::Error,
+        ] {
+            runtime.update_provider_readiness(ProviderReadiness::PlaybackReady);
+            runtime.update_provider_readiness(readiness);
+            let error = runtime
+                .validate_provider_ready_for_room()
+                .expect_err("must reject");
+            assert!(
+                error.starts_with("MP-PROVIDER-004"),
+                "{readiness:?}: {error}"
+            );
+        }
+    }
+
     /// Regression guard for the SIGABRT on "Create party".
     ///
     /// `launch_provider` is a **synchronous** Tauri command, and it reaches
