@@ -13,6 +13,21 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 afterEach(() => vi.restoreAllMocks());
 
 describe("provider room command boundary", () => {
+  it("carries content confirmation into the backend attachment gate", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ screen: "LOBBY" });
+    await launchProvider(
+      "youtube",
+      "https://www.youtube.com/watch?v=abcdefghijk",
+      "PROVIDER_SYNC",
+      "observed-key",
+    );
+    expect(invoke).toHaveBeenLastCalledWith("launch_provider", {
+      providerId: "youtube",
+      url: "https://www.youtube.com/watch?v=abcdefghijk",
+      mode: "PROVIDER_SYNC",
+      selectionKey: "observed-key",
+    });
+  });
   it.each([
     "MP-PROVIDER-001",
     "MP-PROVIDER-003",

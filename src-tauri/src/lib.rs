@@ -163,6 +163,10 @@ pub fn run() {
             open_provider_browser,
             check_provider_status,
             navigate_provider_title,
+            get_provider_content,
+            confirm_provider_content,
+            browse_provider_content,
+            validate_provider_content,
             reset_provider_session,
             create_schedule,
             create_and_broadcast_schedule,
@@ -676,6 +680,7 @@ fn launch_provider(
     app: tauri::AppHandle,
     operations: tauri::State<'_, ChromeOperations>,
     provider_id: String,
+    selection_key: Option<String>,
     url: String,
     mode: String,
     runtime: tauri::State<'_, app_runtime::AppRuntime>,
@@ -707,6 +712,14 @@ fn launch_provider(
 
     let provider = provider_id_from_str(&provider_id)
         .ok_or_else(|| "MP-PROVIDER-002 unsupported provider".to_string())?;
+
+    let key = selection_key
+        .as_deref()
+        .ok_or("Preview and confirm content before creating a provider party.")?;
+    runtime.validate_confirmed_provider_content(&provider_id, key)?;
+    // Treat the observed canonical identity as authoritative, including for
+    // direct IPC callers with a valid key but a different or unsafe URL.
+    let url = runtime.confirmed_provider_url(&provider_id, key, &url)?;
 
     // Reuse an existing managed session for the same provider when the
     // browser is already open and ready; otherwise launch a fresh one.
@@ -872,6 +885,61 @@ fn navigate_provider_title(
 
     runtime.navigate_provider_to(&provider_id, &url)?;
     Ok(runtime.update_provider_readiness(crate::providers::sync::ProviderReadiness::Navigating))
+}
+
+#[tauri::command]
+async fn get_provider_content(
+    provider_id: String,
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<crate::providers::content::ChooserSnapshot, String> {
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || runtime.refresh_provider_content(&provider_id))
+        .await
+        .map_err(|_| "Browser observation failed. Refresh the chooser.".to_string())?
+}
+
+#[tauri::command]
+async fn confirm_provider_content(
+    provider_id: String,
+    target_id: String,
+    selection_key: String,
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<crate::providers::content::ChooserSnapshot, String> {
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        runtime.confirm_provider_content(&provider_id, &target_id, &selection_key)
+    })
+    .await
+    .map_err(|_| "Content confirmation failed. Refresh the chooser.".to_string())?
+}
+
+#[tauri::command]
+async fn browse_provider_content(
+    provider_id: String,
+    input: String,
+    direct: bool,
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<crate::providers::content::ChooserSnapshot, String> {
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        runtime.browse_provider_content(&provider_id, &input, direct)
+    })
+    .await
+    .map_err(|_| "Browser navigation failed. Retry in Chrome.".to_string())?
+}
+
+#[tauri::command]
+async fn validate_provider_content(
+    provider_id: String,
+    selection_key: String,
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<(), String> {
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        runtime.validate_confirmed_provider_content(&provider_id, &selection_key)
+    })
+    .await
+    .map_err(|_| "Content verification failed. Refresh the chooser.".to_string())?
 }
 
 #[tauri::command]

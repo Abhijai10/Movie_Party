@@ -22,14 +22,8 @@ import {
 import { CinemaButton } from "../components/mp/CinemaButton";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { SourceCard } from "../components/mp/SourceCard";
-import {
-  isGenericLink,
-  providerModeStatus,
-  providerReadinessAction,
-  providerReadinessMessage,
-  providerSelectLabels,
-  resolveProviderSelectValue,
-} from "../providers/providerSelection";
+import { isGenericLink } from "../providers/providerSelection";
+import { ProviderContentChooser } from "./ProviderContentChooser";
 import {
   droppedPathErrorMessage,
   mediaFileNameFromPath,
@@ -40,7 +34,13 @@ type SourceKind = "local" | "stream" | "link";
 
 export type CreatePartyRequest =
   | { source: "local"; mediaPath: string | null }
-  | { source: "provider"; providerId: string; url: string; mode: ProviderMode }
+  | {
+      source: "provider";
+      providerId: string;
+      url: string;
+      mode: ProviderMode;
+      selectionKey: string;
+    }
   | { source: "link"; url: string };
 
 export type ProviderStatus = {
@@ -82,24 +82,18 @@ export function CreatePartyView({
   isCreating,
   error,
   providerCapabilities,
-  provider,
   onBack,
   onCreateParty,
   onOpenProvider,
-  onCheckProviderStatus,
-  onNavigateProviderTitle,
 }: CreatePartyViewProps) {
   const [selected, setSelected] = useState<SourceKind>("local");
   const [dragOver, setDragOver] = useState(false);
   const [path, setPath] = useState("");
   const [providerId, setProviderId] = useState("");
-  const [providerMode, setProviderMode] = useState<ProviderMode>("PROVIDER_SYNC");
   const [status, setStatus] = useState<"idle" | "error">("idle");
   /** Honest reason a local source was refused (F3). */
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [preparing, setPreparing] = useState(false);
-  const [providerBusy, setProviderBusy] = useState(false);
-  const [titleInput, setTitleInput] = useState("");
 
   const pick = (key: SourceKind) => {
     setSelected(key);
@@ -174,30 +168,11 @@ export function CreatePartyView({
   }, [applyDroppedPaths]);
 
   const activeSource = path.trim();
-  const selectedProvider = providerCapabilities.find((provider) => provider.id === providerId) ?? null;
   const hasSelection = Boolean(activeSource);
-  const providerStatus = providerModeStatus(selectedProvider, providerMode);
-  const canPrepareProvider = selected !== "stream" || providerStatus.canPrepare;
   const selectedMovieName = mediaFileNameFromPath(path);
-
-  // Provider readiness: only trust the snapshot when it matches the selected
-  // provider; a stale session from a different provider is NOT_STARTED.
-  const effectiveReadiness: ProviderReadiness =
-    selected === "stream" && provider.providerId === providerId
-      ? provider.readiness
-      : "NOT_STARTED";
-  const readinessAction = providerReadinessAction(effectiveReadiness);
-  const readinessMessage = providerReadinessMessage(effectiveReadiness, selectedProvider?.displayName ?? "Provider");
 
   const prepare = () => {
     if (!hasSelection) {
-      setStatus("error");
-      return;
-    }
-    if (
-      selected === "stream" &&
-      !providerStatus.canPrepare
-    ) {
       setStatus("error");
       return;
     }
@@ -209,44 +184,7 @@ export function CreatePartyView({
     setPreparing(true);
   };
 
-  const openProviderSession = async () => {
-    setProviderBusy(true);
-    try {
-      await onOpenProvider(providerId);
-    } finally {
-      setProviderBusy(false);
-    }
-  };
-
-  const checkProviderSession = async () => {
-    setProviderBusy(true);
-    try {
-      await onCheckProviderStatus(providerId);
-    } finally {
-      setProviderBusy(false);
-    }
-  };
-
-  const openProviderTitle = async () => {
-    if (!titleInput.trim()) return;
-    setProviderBusy(true);
-    try {
-      await onNavigateProviderTitle(providerId, titleInput.trim());
-    } finally {
-      setProviderBusy(false);
-    }
-  };
-
   const create = () => {
-    if (selected === "stream" && selectedProvider) {
-      void onCreateParty({
-        source: "provider",
-        providerId: selectedProvider.id,
-        url: provider.url ?? "",
-        mode: providerMode,
-      });
-      return;
-    }
     if (selected === "link") {
       void onCreateParty({ source: "link", url: activeSource });
       return;
@@ -272,12 +210,14 @@ export function CreatePartyView({
         </span>
       </header>
 
-      <main className="relative z-10 max-w-[1300px] mx-auto px-12 mt-10 grid grid-cols-12 gap-10 h-[calc(100vh-130px)]">
+      <main
+        className={`relative z-10 max-w-[1300px] mx-auto px-12 mt-10 grid grid-cols-12 gap-10 h-[calc(100vh-130px)] ${selected === "stream" ? "provider-create-layout" : ""}`}
+      >
         <motion.section
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.7, ease: "easeOut" }}
-          className="col-span-12 lg:col-span-7 flex flex-col"
+          className={`col-span-12 ${selected === "stream" ? "provider-create-sources" : "lg:col-span-7"} flex flex-col`}
         >
           <h1 className="font-serif-display text-white text-[56px] leading-[0.98] tracking-tight">
             What are we <span className="italic">watching</span> tonight?
@@ -286,7 +226,9 @@ export function CreatePartyView({
             Choose a source, prepare the room, and send the invitation when everything is ready.
           </p>
 
-          <div className="mt-10 grid grid-cols-3 gap-4">
+          <div
+            className={`mt-10 grid ${selected === "stream" ? "grid-cols-1" : "grid-cols-3"} gap-4`}
+          >
             {sources.map((s) => (
               <SourceCard
                 key={s.key}
@@ -333,7 +275,7 @@ export function CreatePartyView({
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.7, ease: "easeOut", delay: 0.15 }}
-          className="col-span-12 lg:col-span-5 flex flex-col"
+          className={`col-span-12 ${selected === "stream" ? "provider-create-panel" : "lg:col-span-5"} flex flex-col min-h-0`}
         >
           <span className="text-[11px] tracking-[0.28em] uppercase text-white/50 mb-4">
             Selection
@@ -450,169 +392,15 @@ export function CreatePartyView({
             )}
 
             {selected === "stream" && (
-              <motion.div
-                key="stream"
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                transition={{ duration: 0.3 }}
-                className="flex-1 flex flex-col"
-              >
-                <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-6 flex-1 flex flex-col">
-                  <label
-                    htmlFor="provider-source-select"
-                    className="text-[11px] tracking-[0.24em] uppercase text-white/45"
-                  >
-                    Provider
-                  </label>
-                  <select
-                    id="provider-source-select"
-                    value={resolveProviderSelectValue(providerCapabilities, providerId)}
-                    onChange={(event) => {
-                      setProviderId(event.target.value);
-                      setStatus("idle");
-                    }}
-                    disabled={providerCapabilities.length === 0}
-                    className="provider-select mt-3 w-full appearance-none rounded-xl border border-white/10 px-4 py-3 text-sm focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-                    data-testid="provider-select"
-                  >
-                    {providerSelectLabels(providerCapabilities).map((option) => (
-                      <option key={option.value} value={option.value} disabled={option.disabled}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-
-                  <span className="mt-6 text-[11px] tracking-[0.24em] uppercase text-white/45">
-                    Mode
-                  </span>
-                  <div className="mt-3 grid grid-cols-2 gap-3">
-                    <button
-                      type="button"
-                      aria-pressed={providerMode === "PROVIDER_SYNC"}
-                      onClick={() => {
-                        setProviderMode("PROVIDER_SYNC");
-                        setStatus("idle");
-                      }}
-                      className={`rounded-xl border px-4 py-3 text-left transition ${
-                        providerMode === "PROVIDER_SYNC"
-                          ? "border-[#9F7AEA]/60 bg-[#6B46C1]/30 text-white"
-                          : "border-white/10 bg-white/[0.03] text-white/65 hover:bg-white/[0.06]"
-                      }`}
-                      data-testid="provider-sync-mode"
-                    >
-                      <span className="block text-sm">Sync</span>
-                      <span className="mt-1 block text-[10px] text-white/45">Both viewers sign in</span>
-                    </button>
-                    <button
-                      type="button"
-                      aria-disabled={!selectedProvider?.sharedAvailable}
-                      disabled={!selectedProvider?.sharedAvailable}
-                      onClick={() => {
-                        setProviderMode("PROVIDER_SHARED");
-                        setStatus("idle");
-                      }}
-                      className="rounded-xl border border-white/10 bg-white/[0.02] px-4 py-3 text-left text-white/40 transition disabled:cursor-not-allowed disabled:opacity-60"
-                      data-testid="provider-shared-mode"
-                    >
-                      <span className="block text-sm">Shared</span>
-                      <span className="mt-1 block text-[10px]">Experimental</span>
-                    </button>
-                  </div>
-
-                  {selectedProvider && !selectedProvider.sharedAvailable ? (
-                    <p className="mt-3 text-white/40 text-xs leading-relaxed" data-testid="provider-shared-status">
-                      {selectedProvider.sharedReason}
-                    </p>
-                  ) : null}
-
-                  {/* Provider session status wizard */}
-                  <div className="mt-6 rounded-xl border border-white/10 bg-white/[0.03] p-4">
-                    <span className="text-[10px] tracking-[0.24em] uppercase text-white/45">
-                      Session status
-                    </span>
-                    <p className="mt-2 text-white/70 text-xs leading-relaxed">
-                      {readinessMessage}
-                    </p>
-                    {readinessAction.enabled && (
-                      <div className="mt-3">
-                        {readinessAction.next === "open" && (
-                          <CinemaButton
-                            onClick={() => {
-                              void openProviderSession();
-                            }}
-                            disabled={providerBusy}
-                            icon={providerBusy ? Loader2 : Play}
-                            className={`w-full ${providerBusy ? "[&_svg]:animate-spin" : ""}`}
-                          >
-                            {providerBusy ? "Opening..." : readinessAction.label}
-                          </CinemaButton>
-                        )}
-                        {readinessAction.next === "check" && (
-                          <CinemaButton
-                            onClick={() => {
-                              void checkProviderSession();
-                            }}
-                            disabled={providerBusy}
-                            icon={providerBusy ? Loader2 : undefined}
-                            className={`w-full ${providerBusy ? "[&_svg]:animate-spin" : ""}`}
-                          >
-                            {providerBusy ? "Checking..." : readinessAction.label}
-                          </CinemaButton>
-                        )}
-                        {readinessAction.next === "title" && (
-                          <div className="space-y-3">
-                            <input
-                              type="text"
-                              value={titleInput}
-                              onChange={(e) => {
-                                setTitleInput(e.target.value);
-                              }}
-                              placeholder="Enter movie or show title"
-                              className="w-full bg-transparent border-b border-white/15 pb-2 text-white text-base focus:outline-none focus:border-[#9F7AEA]/60 transition font-mono-mp"
-                              data-testid="provider-title-input"
-                            />
-                            <CinemaButton
-                              onClick={() => {
-                                void openProviderTitle();
-                              }}
-                              disabled={providerBusy || !titleInput.trim()}
-                              icon={providerBusy ? Loader2 : Play}
-                              className={`w-full ${providerBusy ? "[&_svg]:animate-spin" : ""}`}
-                            >
-                              {providerBusy
-                                ? "Opening…"
-                                : `Open in ${selectedProvider?.displayName ?? "provider"}`}
-                            </CinemaButton>
-                          </div>
-                        )}
-                        {readinessAction.next === "create" && (
-                          <CinemaButton
-                            onClick={create}
-                            disabled={isCreating}
-                            icon={isCreating ? Loader2 : ArrowRight}
-                            className={`w-full ${isCreating ? "[&_svg]:animate-spin" : ""}`}
-                            data-testid="create-room-btn"
-                          >
-                            {isCreating ? "Creating..." : "Create party"}
-                          </CinemaButton>
-                        )}
-                      </div>
-                    )}
-                    {provider.state && (
-                      <p className="mt-2 text-white/35 text-[10px] font-mono-mp">
-                        {provider.state}
-                      </p>
-                    )}
-                  </div>
-
-                  <p className="mt-4 text-white/40 text-xs leading-relaxed">
-                    Sync opens the selected provider in its dedicated browser profile. Each viewer
-                    signs in directly on the provider's own page; Movie Party never receives
-                    provider credentials.
-                  </p>
-                </div>
-              </motion.div>
+              <ProviderContentChooser
+                key={providerId}
+                capabilities={providerCapabilities}
+                providerId={providerId}
+                onProviderChange={setProviderId}
+                onOpenProvider={onOpenProvider}
+                onCreateParty={onCreateParty}
+                isCreating={isCreating}
+              />
             )}
 
             {selected === "link" && (
@@ -704,11 +492,11 @@ export function CreatePartyView({
                         className={isCreating ? "[&_svg]:animate-spin" : ""}
                         data-testid="create-room-btn"
                       >
-                      {isCreating
-                        ? "Creating"
-                        : selected === "link"
-                          ? "Open link room"
-                          : "Create cinema room"}
+                        {isCreating
+                          ? "Creating"
+                          : selected === "link"
+                            ? "Open link room"
+                            : "Create cinema room"}
                       </CinemaButton>
                     </div>
                   </div>
@@ -720,13 +508,11 @@ export function CreatePartyView({
                   </span>
                   <CinemaButton
                     onClick={prepare}
-                    disabled={!hasSelection || !canPrepareProvider}
+                    disabled={!hasSelection}
                     icon={ArrowRight}
                     data-testid="prepare-cinema-btn"
                   >
-                    {selected === "link"
-                      ? "Prepare link"
-                      : "Prepare Cinema"}
+                    {selected === "link" ? "Prepare link" : "Prepare Cinema"}
                   </CinemaButton>
                 </div>
               )}

@@ -1,3 +1,4 @@
+mod provider_chooser;
 use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
@@ -530,6 +531,7 @@ struct AppRuntimeState {
     call_signals: Vec<CallSignalSnapshot>,
     call_signal_ledger: CallSignalLedger,
     provider: ProviderSnapshot,
+    provider_chooser: crate::providers::content::ChooserSnapshot,
     chat: Vec<ChatSnapshot>,
     reactions: Vec<ReactionSnapshot>,
     ghost_mode: bool,
@@ -852,6 +854,7 @@ impl AppRuntime {
                     },
                     call_signals: Vec::new(),
                     call_signal_ledger: CallSignalLedger::default(),
+                    provider_chooser: crate::providers::content::ChooserSnapshot::default(),
                     provider: ProviderSnapshot {
                         mode: "LOCAL_PERFECT".to_string(),
                         provider_id: None,
@@ -1967,7 +1970,9 @@ impl AppRuntime {
         let state = self.lock();
         match state.provider.readiness {
             crate::providers::sync::ProviderReadiness::PlaybackReady => Ok(()),
-            crate::providers::sync::ProviderReadiness::Ready => Ok(()),
+            crate::providers::sync::ProviderReadiness::Ready => {
+                Err("MP-PROVIDER-004 select content and wait for the video to be ready".into())
+            }
             crate::providers::sync::ProviderReadiness::LoginRequired => {
                 Err("MP-PROVIDER-004 sign in to the provider before creating the room".to_string())
             }
@@ -5814,7 +5819,9 @@ impl AppRuntime {
                         Ok(mut page) => {
                             let command =
                                 command_for_action(provider, page.next_command_id(), action);
-                            page.execute(&command)
+                            page.execute(&command).and_then(|result| {
+                                crate::providers::sync::verify_action_result(&result)
+                            })
                         }
                         Err(error) => Err(error),
                     };
@@ -7652,6 +7659,7 @@ fn bump_session_generation(state: &mut AppRuntimeState) {
 /// provider browser is replaced or closed inside a still-live room, which must
 /// not invalidate the room's own commit tasks.
 fn bump_chrome_generation(state: &mut AppRuntimeState) {
+    state.provider_chooser = crate::providers::content::ChooserSnapshot::default();
     state.chrome_generation = state.chrome_generation.wrapping_add(1);
 }
 
@@ -8639,10 +8647,10 @@ mod tests {
             .update_provider_readiness(crate::providers::sync::ProviderReadiness::LoginRequired);
         assert!(runtime.validate_provider_ready_for_room().is_err());
 
-        // Set to Ready — should pass
+        // Set to Ready — browser only, must not create a party
         let _snap =
             runtime.update_provider_readiness(crate::providers::sync::ProviderReadiness::Ready);
-        assert!(runtime.validate_provider_ready_for_room().is_ok());
+        assert!(runtime.validate_provider_ready_for_room().is_err());
 
         // Set to PlaybackReady — should pass
         let _snap = runtime

@@ -74,7 +74,7 @@ export function providerReadinessMessage(
     case "LOGIN_REQUIRED":
       return `Sign in to ${displayName} on its own page in the opened browser window. Movie Party never receives your password.`;
     case "READY":
-      return `Authenticated and ready. Enter a movie or show title to continue.`;
+      return `Browser ready. Choose a movie, show or video and confirm its title.`;
     case "NAVIGATING":
       return `Navigating to the title in ${displayName}. Pick the result in the browser window, then check playback.`;
     case "PLAYBACK_READY":

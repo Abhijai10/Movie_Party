@@ -1,4 +1,5 @@
 pub mod chrome;
+pub mod content;
 pub mod generic;
 pub mod hotstar;
 pub mod netflix;

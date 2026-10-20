@@ -558,8 +558,9 @@ export async function launchProvider(
   providerId: string,
   url: string,
   mode: ProviderMode,
+  selectionKey?: string,
 ): Promise<AppSnapshot> {
-  return invokeSnapshot("launch_provider", { providerId, url, mode });
+  return invokeSnapshot("launch_provider", { providerId, url, mode, selectionKey });
 }
 
 export async function openProviderBrowser(providerId: string): Promise<AppSnapshot> {

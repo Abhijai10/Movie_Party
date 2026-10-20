@@ -48,94 +48,13 @@ impl YoutubeAdapter {
 }
 
 pub fn parse_youtube_content_id(url: &str) -> Option<YoutubeContentId> {
-    let trimmed = url.trim();
-    let host = host_from_url(trimmed)?;
-
-    if !is_supported_youtube_host(host) {
-        return None;
-    }
-
-    if let Some(id) = parse_youtu_be(trimmed) {
-        return Some(YoutubeContentId(id));
-    }
-
-    if let Some(id) = parse_path_id(trimmed, "/shorts/") {
-        return Some(YoutubeContentId(id));
-    }
-
-    if let Some(id) = parse_path_id(trimmed, "/embed/") {
-        return Some(YoutubeContentId(id));
-    }
-
-    parse_query_value(trimmed, "v").map(YoutubeContentId)
+    crate::providers::content::parse_content("youtube", url)
+        .ok()
+        .map(|identity| YoutubeContentId(identity.content_id))
 }
 
 pub fn is_youtube_url(url: &str) -> bool {
     parse_youtube_content_id(url).is_some()
-}
-
-fn parse_youtu_be(url: &str) -> Option<String> {
-    let marker = "youtu.be/";
-    let start = url.find(marker)? + marker.len();
-    read_video_id(&url[start..])
-}
-
-fn parse_path_id(url: &str, marker: &str) -> Option<String> {
-    let start = url.find(marker)? + marker.len();
-    read_video_id(&url[start..])
-}
-
-fn parse_query_value(url: &str, key: &str) -> Option<String> {
-    let query_start = url.find('?')? + 1;
-    let query = &url[query_start..];
-
-    for pair in query.split('&') {
-        if let Some((pair_key, value)) = pair.split_once('=') {
-            if pair_key == key {
-                return read_video_id(value);
-            }
-        }
-    }
-
-    None
-}
-
-fn read_video_id(input: &str) -> Option<String> {
-    let candidate: String = input
-        .chars()
-        .take_while(|character| {
-            character.is_ascii_alphanumeric() || *character == '-' || *character == '_'
-        })
-        .collect();
-
-    if candidate.len() == 11 {
-        Some(candidate)
-    } else {
-        None
-    }
-}
-
-fn host_from_url(url: &str) -> Option<&str> {
-    let without_scheme = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .unwrap_or(url);
-    let end = without_scheme
-        .find(['/', '?', '#'])
-        .unwrap_or(without_scheme.len());
-    let host = &without_scheme[..end];
-
-    if host.is_empty() {
-        None
-    } else {
-        Some(host)
-    }
-}
-
-fn is_supported_youtube_host(host: &str) -> bool {
-    let lower = host.to_ascii_lowercase();
-
-    lower == "youtu.be" || lower == "youtube.com" || lower.ends_with(".youtube.com")
 }
 
 fn runtime_command(id: u64, expression: &str) -> CdpCommand {

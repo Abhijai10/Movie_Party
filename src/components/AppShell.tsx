@@ -1,3 +1,4 @@
+import { validateProviderContent } from "../providers/contentChooser";
 import {
   BackendCommandError,
   backToLobby,
@@ -618,6 +619,8 @@ export function AppShell() {
         // The managed browser is already open and signed in; it becomes the
         // room's media, so it must survive room creation. Tearing it down here
         // is what made "Create party" fail with MP-PROVIDER-002.
+        await validateProviderContent(request.providerId, request.selectionKey);
+        if (!createFlow.current.isCurrent(token)) return false;
         const partySnapshot = await createLocalParty(null, true);
         if (!createFlow.current.isCurrent(token)) return false;
         if (partySnapshot.screen !== "LOBBY") {
@@ -626,7 +629,7 @@ export function AppShell() {
           return false;
         }
 
-        const providerSnapshot = await launchProvider(request.providerId, source, request.mode);
+        const providerSnapshot = await launchProvider(request.providerId, source, request.mode, request.selectionKey);
         if (!createFlow.current.isCurrent(token)) return false;
         if (providerSnapshot.error) {
           applySnapshot(partySnapshot);

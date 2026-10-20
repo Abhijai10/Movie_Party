@@ -85,14 +85,14 @@ impl GenericProviderAdapter {
     pub fn play(&self, id: u64) -> CdpCommand {
         runtime_command(
             id,
-            "(() => { const media = document.querySelector('video,audio'); if (!media) return false; void media.play(); return true; })()",
+            "(async () => { const media = document.querySelector('video,audio'); if (!media) return false; try { await media.play(); return !media.paused && !media.error; } catch { return false; } })()",
         )
     }
 
     pub fn pause(&self, id: u64) -> CdpCommand {
         runtime_command(
             id,
-            "(() => { const media = document.querySelector('video,audio'); if (!media) return false; media.pause(); return true; })()",
+            "(() => { const media = document.querySelector('video,audio'); if (!media) return false; media.pause(); return media.paused; })()",
         )
     }
 
@@ -105,7 +105,7 @@ impl GenericProviderAdapter {
         runtime_command(
             id,
             &format!(
-                "(() => {{ const media = document.querySelector('video,audio'); if (!media) return false; media.currentTime = {target}; return true; }})()"
+                "(() => {{ const media = document.querySelector('video,audio'); if (!media) return false; media.currentTime = {target}; return Math.abs(media.currentTime - {target}) < 0.25; }})()"
             ),
         )
     }
@@ -119,13 +119,14 @@ impl GenericProviderAdapter {
         runtime_command(
             id,
             &format!(
-                "(() => {{ const media = document.querySelector('video,audio'); if (!media) return false; media.playbackRate = {target}; return true; }})()"
+                "(() => {{ const media = document.querySelector('video,audio'); if (!media) return false; media.playbackRate = {target}; return Math.abs(media.playbackRate - {target}) < 0.01; }})()"
             ),
         )
     }
 }
 
 fn runtime_command(id: u64, expression: &str) -> CdpCommand {
+    let expression = expression.replace("const media = document.querySelector('video,audio');", "const candidates = [...document.querySelectorAll('video,audio')].filter(m => m.tagName === 'AUDIO' || (m.getBoundingClientRect().width > 0 && m.getBoundingClientRect().height > 0)); const media = candidates.length === 1 ? candidates[0] : null;");
     CdpCommand {
         id,
         method: "Runtime.evaluate",

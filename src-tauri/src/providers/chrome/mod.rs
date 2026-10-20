@@ -1,3 +1,4 @@
+mod content;
 mod process;
 pub mod profile;
 
@@ -131,6 +132,7 @@ pub struct CdpTarget {
 /// thing allowed to signal or reap it. See `process.rs` for why that matters.
 #[derive(Debug)]
 pub struct ManagedChromeSession {
+    selected_target: std::sync::Mutex<Option<(String, String)>>,
     process: ChromeProcessOwner,
     pub plan: ChromeLaunchPlan,
     lease: profile::ProfileLease,
@@ -298,6 +300,7 @@ pub fn launch_managed_chrome_with_timeout(
         return Err(error);
     }
     Ok(ManagedChromeSession {
+        selected_target: std::sync::Mutex::new(None),
         process,
         plan,
         lease,
@@ -311,12 +314,7 @@ impl ManagedChromeSession {
     }
 
     pub fn page_target(&self) -> Result<CdpTarget, ManagedChromeError> {
-        self.targets()?
-            .into_iter()
-            .find(|target| {
-                target.target_type == "page" && !target.web_socket_debugger_url.is_empty()
-            })
-            .ok_or(ManagedChromeError::MalformedCdpResponse)
+        self.content_page_target()
     }
 
     pub fn connect_page(&self) -> Result<CdpPageSession, ManagedChromeError> {
@@ -338,7 +336,14 @@ impl ManagedChromeSession {
             || (self.lease.record.state == profile::LaunchState::Running
                 && !self.process.is_alive());
         if self.process.is_alive() {
-            if let Ok(mut page) = self.connect_page() {
+            // Browser.close is independent of content tab choice, including
+            // when the selected tab has closed or several windows are open.
+            let browser = http_get(self.plan.cdp_port, "/json/version")
+                .ok()
+                .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+                .and_then(|v| v["webSocketDebuggerUrl"].as_str().map(str::to_owned))
+                .and_then(|url| CdpPageSession::connect(&url).ok());
+            if let Some(mut page) = browser {
                 let id = page.next_command_id();
                 let _ = page.execute(&close_browser_command(id));
             }
@@ -443,7 +448,34 @@ impl Drop for ManagedChromeSession {
     }
 }
 
+fn verify_navigation_result(result: &serde_json::Value) -> Result<(), ManagedChromeError> {
+    if result.get("errorText").is_some()
+        || result["isDownload"].as_bool() == Some(true)
+        || result["frameId"].as_str().is_none_or(str::is_empty)
+    {
+        return Err(ManagedChromeError::CdpCommand(
+            "Navigation was rejected or did not open a page.".into(),
+        ));
+    }
+    Ok(())
+}
+
 impl CdpPageSession {
+    pub fn bring_to_front(&mut self) -> Result<(), ManagedChromeError> {
+        let id = self.next_command_id();
+        self.execute(&CdpCommand {
+            id,
+            method: "Page.bringToFront",
+            params: json!({}),
+        })?;
+        let visible = self.evaluate("document.visibilityState === 'visible'")?;
+        if visible["result"]["value"].as_bool() != Some(true) {
+            return Err(ManagedChromeError::CdpCommand(
+                "The provider tab could not be activated. Open it in Chrome and refresh.".into(),
+            ));
+        }
+        Ok(())
+    }
     fn connect(web_socket_url: &str) -> Result<Self, ManagedChromeError> {
         let (host, port, path) = parse_ws_url(web_socket_url)?;
         if host != CDP_BIND_HOST && host != "localhost" {
@@ -475,7 +507,9 @@ impl CdpPageSession {
 
     pub fn navigate(&mut self, url: &str) -> Result<serde_json::Value, ManagedChromeError> {
         let id = self.next_command_id();
-        self.execute(&navigate_command(id, url))
+        let result = self.execute(&navigate_command(id, url))?;
+        verify_navigation_result(&result)?;
+        Ok(result)
     }
 
     pub fn evaluate(&mut self, expression: &str) -> Result<serde_json::Value, ManagedChromeError> {
@@ -507,6 +541,11 @@ impl CdpPageSession {
             if value["id"].as_u64() == Some(command.id) {
                 if let Some(error) = value.get("error") {
                     return Err(ManagedChromeError::CdpCommand(error.to_string()));
+                }
+                if value["result"].get("exceptionDetails").is_some() {
+                    return Err(ManagedChromeError::CdpCommand(
+                        "The browser rejected the page operation.".into(),
+                    ));
                 }
                 return Ok(value["result"].clone());
             }
@@ -906,6 +945,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("mp-session-{}", uuid::Uuid::now_v7()));
         let lease = profile::ProfileLease::acquire(&root.join("youtube")).expect("profile lease");
         ManagedChromeSession {
+            selected_target: std::sync::Mutex::new(None),
             lease,
             _activity: SessionActivity::new(),
             process: ChromeProcessOwner::adopt(child),
@@ -1359,6 +1399,19 @@ mod tests {
     }
 
     #[test]
+    fn navigation_acknowledgements_require_a_real_page() {
+        for rejected in [
+            json!({}),
+            json!({"frameId":""}),
+            json!({"frameId":"a","errorText":"blocked"}),
+            json!({"frameId":"a","isDownload":true}),
+        ] {
+            assert!(verify_navigation_result(&rejected).is_err());
+        }
+        assert!(verify_navigation_result(&json!({"frameId":"a","isDownload":false})).is_ok());
+    }
+
+    #[test]
     #[ignore = "launches real Chrome and opens a localhost CDP session"]
     fn real_chrome_launches_and_evaluates_cdp() {
         require_visible_chrome_consent();
@@ -1380,7 +1433,87 @@ mod tests {
         let title = page.evaluate("document.title").expect("title evaluation");
         assert_eq!(title["result"]["value"].as_str(), Some("Movie Party CDP"));
 
+        let observation = page
+            .evaluate(content::OBSERVE_PAGE)
+            .expect("public metadata");
+        let observed = &observation["result"]["value"];
+        assert_eq!(observed["title"], "Movie Party CDP");
+        assert_eq!(
+            observed["ready"], false,
+            "an empty video is not loaded content"
+        );
+        assert!(observed["documentId"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty()));
+
         session.close().expect("close");
+    }
+
+    #[test]
+    #[ignore = "opens visible disposable Chrome tabs/windows; no provider authentication"]
+    fn real_chrome_follows_active_tabs_and_detects_closed_targets() {
+        require_visible_chrome_consent();
+        let executable = find_chrome(&default_chrome_candidates()).expect("Chrome installed");
+        let root = TempProfile::new("movie-party-tabs");
+        let session = launch_managed_chrome(
+            build_launch_plan(executable, root.path(), "youtube", "about:blank").unwrap(),
+        )
+        .unwrap();
+        let first = session.page_target().unwrap().id;
+        let mut page = session.connect_target(&first).unwrap();
+        let id = page.next_command_id();
+        let created = page
+            .execute(&CdpCommand {
+                id,
+                method: "Target.createTarget",
+                params: json!({"url":"about:blank"}),
+            })
+            .unwrap();
+        let second = created["targetId"].as_str().unwrap();
+        let mut second_page = session.connect_target(second).unwrap();
+        second_page.bring_to_front().unwrap();
+        assert_eq!(session.page_target().unwrap().id, second);
+        assert_ne!(first, second);
+        let id = page.next_command_id();
+        let window = page
+            .execute(&CdpCommand {
+                id,
+                method: "Target.createTarget",
+                params: json!({"url":"about:blank", "newWindow":true}),
+            })
+            .unwrap();
+        let window_id = window["targetId"].as_str().unwrap();
+        session
+            .connect_target(window_id)
+            .unwrap()
+            .bring_to_front()
+            .unwrap();
+        // OS focus may stay with the test runner. If no focused window is
+        // observable, fail closed instead of selecting the first CDP target.
+        match session.page_target() {
+            Ok(target) => assert_eq!(target.id, window_id),
+            Err(error) => assert!(error.to_string().contains("Several browser windows")),
+        }
+        let id = page.next_command_id();
+        let closed = page
+            .execute(&CdpCommand {
+                id,
+                method: "Target.closeTarget",
+                params: json!({"targetId":window_id}),
+            })
+            .unwrap();
+        assert_eq!(closed["success"].as_bool(), Some(true));
+        // Target.closeTarget acknowledges the request before destruction is
+        // necessarily visible in /json/list. Verify the observed outcome.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session.connect_target(window_id).is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "closed target remained available"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        session.close().unwrap();
     }
 
     #[test]

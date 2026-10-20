@@ -94,6 +94,35 @@ pub enum ProviderRuntimeError {
     Unknown,
 }
 
+pub fn verify_action_result(
+    value: &serde_json::Value,
+) -> Result<serde_json::Value, super::chrome::ManagedChromeError> {
+    if value["result"]["value"].as_bool() == Some(true) && value.get("exceptionDetails").is_none() {
+        Ok(value.clone())
+    } else {
+        Err(super::chrome::ManagedChromeError::CdpCommand(
+            "The provider player rejected the action.".into(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod semantic_action_tests {
+    #[test]
+    fn transport_success_is_not_player_success() {
+        for value in [
+            serde_json::json!({"result":{"value":false}}),
+            serde_json::json!({"result":{"value":null}}),
+            serde_json::json!({"result":{"value":"true"}}),
+            serde_json::json!({}),
+            serde_json::json!({"result":{"value":true},"exceptionDetails":{"text":"rejected"}}),
+        ] {
+            assert!(super::verify_action_result(&value).is_err());
+        }
+        assert!(super::verify_action_result(&serde_json::json!({"result":{"value":true}})).is_ok());
+    }
+}
+
 pub fn provider_id_from_str(provider_id: &str) -> Option<ProviderId> {
     match provider_id {
         youtube::PROVIDER_ID => Some(ProviderId::YouTube),
