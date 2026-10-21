@@ -2,6 +2,7 @@ import { useState } from "react";
 import { retryRoomProvider, type AppSnapshot } from "../backend/appRuntime";
 import { CinemaButton } from "../components/mp/CinemaButton";
 import { providerContentLabel, providerContentCanRetry } from "./roomProviderState";
+import { ProviderGestureControl } from "./ProviderGestureControl";
 
 export function ProviderRoomStatus({
   snapshot,
@@ -21,6 +22,17 @@ export function ProviderRoomStatus({
         {providerContentLabel(content.peerState)}
       </p>
       <p>{snapshot.provider.state.replace(/^[A-Z_]+ · /, "")}</p>
+      {content.playbackPhase === "VERIFYING" && (
+        <p role="status">Checking both players before confirming playback…</p>
+      )}
+      {content.playbackPhase === "FAILED" && (
+        <p>Playback was not confirmed. Check the selected video in Chrome, then retry Ready.</p>
+      )}
+      <p>
+        Seek precision and synchronization depend on the provider. Provider playback is not yet
+        verified across devices.
+      </p>
+      {content.gestureRequired && <ProviderGestureControl />}
       <p>
         Use your own provider account in managed Chrome. Both players must match before playback.
       </p>

@@ -179,6 +179,7 @@ pub fn run() {
             browse_provider_content,
             validate_provider_content,
             retry_room_provider,
+            focus_provider_playback,
             reset_provider_session,
             create_schedule,
             create_and_broadcast_schedule,
@@ -897,6 +898,16 @@ fn navigate_provider_title(
 
     runtime.navigate_provider_to(&provider_id, &url)?;
     Ok(runtime.update_provider_readiness(crate::providers::sync::ProviderReadiness::Navigating))
+}
+
+#[tauri::command]
+async fn focus_provider_playback(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<app_runtime::AppSnapshot, String> {
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || runtime.focus_provider_playback())
+        .await
+        .map_err(|_| "Could not focus managed Chrome".to_string())?
 }
 
 #[tauri::command]

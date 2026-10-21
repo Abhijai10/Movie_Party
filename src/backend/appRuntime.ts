@@ -154,6 +154,8 @@ export type AppSnapshot = {
     createdHostTimeUs: number;
   }>;
   providerContent?: {
+    gestureRequired?: boolean;
+    playbackPhase?: "VERIFYING" | "APPLIED" | "FAILED" | null;
     selection: { version: number; provider: string; content_id: string; canonical_url: string; title: string; state_epoch: string; host_sequence: number; content_revision: number } | null;
     localState: "UNSELECTED" | "OPENING" | "CONTENT_CONFIRMED" | "PLAYBACK_READY" | "ERROR" | "AUTH_REQUIRED";
     peerState: "UNSELECTED" | "OPENING" | "CONTENT_CONFIRMED" | "PLAYBACK_READY" | "ERROR" | "AUTH_REQUIRED";
@@ -1035,3 +1037,5 @@ export async function listenToSnapshots(
 }
 
 export async function retryRoomProvider(): Promise<AppSnapshot> { return invoke<AppSnapshot>("retry_room_provider"); }
+
+export async function focusProviderPlayback(): Promise<AppSnapshot> { return invoke<AppSnapshot>("focus_provider_playback"); }

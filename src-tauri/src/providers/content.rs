@@ -218,6 +218,8 @@ pub fn parse_content(provider: &str, input: &str) -> Result<ContentIdentity, Str
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContentTab {
+    #[serde(default)]
+    pub player: Option<super::playback::Observation>,
     pub selection_key: String,
     pub target_id: String,
     pub title: String,
@@ -340,6 +342,7 @@ mod tests {
     use super::*;
     fn tab(id: &str) -> ContentTab {
         ContentTab {
+            player: None,
             selection_key: String::new(),
             target_id: id.into(),
             title: "A real title".into(),

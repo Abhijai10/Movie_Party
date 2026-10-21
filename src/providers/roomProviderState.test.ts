@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { retryRoomProvider } from "../backend/appRuntime";
+import { retryRoomProvider, focusProviderPlayback } from "../backend/appRuntime";
 import { providerContentCanRetry, providerContentLabel } from "./roomProviderState";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 afterEach(() => vi.resetAllMocks());
@@ -27,5 +27,14 @@ describe("authoritative provider loading UI", () => {
   it("does not hide a retry rejection", async () => {
     vi.mocked(invoke).mockRejectedValue(new Error("no selected room"));
     await expect(retryRoomProvider()).rejects.toThrow("no selected room");
+  });
+  it("focuses only managed playback without faking a browser user gesture", async () => {
+    vi.mocked(invoke).mockResolvedValue({});
+    await focusProviderPlayback();
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("focus_provider_playback");
+  });
+  it("preserves a focus rejection so the recovery UI can show it", async () => {
+    vi.mocked(invoke).mockRejectedValue(new Error("Chrome is busy"));
+    await expect(focusProviderPlayback()).rejects.toThrow("Chrome is busy");
   });
 });

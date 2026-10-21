@@ -1,4 +1,4 @@
-mod content;
+pub(crate) mod content;
 mod process;
 pub mod profile;
 
@@ -1470,6 +1470,38 @@ mod tests {
             player_content_id: observed["playerContentId"].as_str().map(str::to_owned),
         };
         assert!(evidence.valid_for("youtube", "abcdefghijk"));
+        // Real HTML video state after commands, using only a disposable local
+        // page. Muting is test setup, not a production autoplay workaround.
+        use crate::providers::playback::{action_expression, Action, Observation};
+        page.evaluate("document.querySelector('video').muted=true")
+            .unwrap();
+        for action in [Action::Seek, Action::Play, Action::Pause] {
+            let result = page.evaluate(&action_expression(action, 0)).unwrap();
+            assert_eq!(result["result"]["value"], "APPLIED");
+            let observed = page.evaluate(content::OBSERVE_PAGE).unwrap();
+            let player: Observation =
+                serde_json::from_value(observed["result"]["value"]["player"].clone()).unwrap();
+            assert!(
+                player.verifies(action, 0),
+                "command accepted but observed state disagreed: {player:?}"
+            );
+        }
+        page.evaluate("document.querySelector('video').play=()=>Promise.reject(new DOMException('fixture','NotAllowedError'))").unwrap();
+        let blocked = page.evaluate(&action_expression(Action::Play, 0)).unwrap();
+        assert_eq!(blocked["result"]["value"], "GESTURE_REQUIRED");
+        page.evaluate("delete document.querySelector('video').play")
+            .unwrap();
+        let invalid_seek = page
+            .evaluate(&action_expression(
+                Action::Seek,
+                evidence.duration_ms + 10000,
+            ))
+            .unwrap();
+        assert_eq!(invalid_seek["result"]["value"], "APPLIED");
+        let observed = page.evaluate(content::OBSERVE_PAGE).unwrap();
+        let player: Observation =
+            serde_json::from_value(observed["result"]["value"]["player"].clone()).unwrap();
+        assert!(!player.verifies(Action::Seek, evidence.duration_ms + 10000));
         page.evaluate(
             "document.querySelector('[data-video-id]').setAttribute('data-video-id','dQw4w9WgXcQ')",
         )

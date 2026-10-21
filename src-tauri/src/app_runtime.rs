@@ -1,4 +1,5 @@
 mod provider_chooser;
+mod provider_playback;
 mod provider_room;
 use std::{
     collections::{HashMap, VecDeque},
@@ -538,6 +539,10 @@ struct AppRuntimeState {
     provider_chooser: crate::providers::content::ChooserSnapshot,
     provider_room: Arc<Mutex<crate::providers::selection::ProviderRoomAuthority>>,
     guest_provider: crate::providers::selection::GuestSelection,
+    provider_verifying: Option<String>,
+    provider_prepare_started: Option<Instant>,
+    provider_gesture_required: bool,
+    provider_decision_sequence: u64,
     provider_selection_task: Option<tokio::task::JoinHandle<()>>,
     provider_open_attempt: Option<(String, u64)>,
     provider_open_started: Option<Instant>,
@@ -869,6 +874,10 @@ impl AppRuntime {
                         crate::providers::selection::ProviderRoomAuthority::default(),
                     )),
                     guest_provider: crate::providers::selection::GuestSelection::default(),
+                    provider_verifying: None,
+                    provider_prepare_started: None,
+                    provider_gesture_required: false,
+                    provider_decision_sequence: 0,
                     provider_selection_task: None,
                     provider_open_attempt: None,
                     provider_open_started: None,
@@ -2909,6 +2918,10 @@ impl AppRuntime {
                 task.abort();
             }
             state.guest_provider = crate::providers::selection::GuestSelection::default();
+            state.provider_verifying = None;
+            state.provider_prepare_started = None;
+            state.provider_gesture_required = false;
+            state.provider_decision_sequence = 0;
             state.provider_open_attempt = None;
             if let Some(task) = state.provider_watch_task.take() {
                 task.abort();
@@ -3275,6 +3288,10 @@ impl AppRuntime {
                 task.abort();
             }
             state.guest_provider = crate::providers::selection::GuestSelection::default();
+            state.provider_verifying = None;
+            state.provider_prepare_started = None;
+            state.provider_gesture_required = false;
+            state.provider_decision_sequence = 0;
             state.provider_open_attempt = None;
             if let Some(task) = state.provider_watch_task.take() {
                 task.abort();
@@ -3695,7 +3712,10 @@ impl AppRuntime {
             state.sync.strict_sync_paused = false;
             state.pending_operation_id = None;
             state.pending_operation_kind = None;
-            state.last_committed_operation_id = Some(op_id);
+            state.last_committed_operation_id = Some(op_id.clone());
+            if Self::selected_provider(&state).is_some() {
+                state.provider_verifying = Some(op_id);
+            }
             state.commit_scheduled_for = None;
             let room_state = state
                 .sync_coordinator
@@ -3772,7 +3792,10 @@ impl AppRuntime {
             state.sync.strict_sync_paused = strict_sync_paused;
             state.pending_operation_id = None;
             state.pending_operation_kind = None;
-            state.last_committed_operation_id = Some(op_id);
+            state.last_committed_operation_id = Some(op_id.clone());
+            if Self::selected_provider(&state).is_some() {
+                state.provider_verifying = Some(op_id);
+            }
             state.commit_scheduled_for = None;
             let room_state = state
                 .sync_coordinator
@@ -3847,7 +3870,10 @@ impl AppRuntime {
                 state.sync.strict_sync_paused = !resume_after_seek;
                 state.pending_operation_id = None;
                 state.pending_operation_kind = None;
-                state.last_committed_operation_id = Some(op_id);
+                state.last_committed_operation_id = Some(op_id.clone());
+                if Self::selected_provider(&state).is_some() {
+                    state.provider_verifying = Some(op_id);
+                }
                 state.commit_scheduled_for = None;
                 let room_state = state
                     .sync_coordinator
@@ -3866,7 +3892,7 @@ impl AppRuntime {
             }
             // §31: when the seek resumes, the host follows with the play
             // protocol so both sides restart at the seek destination together.
-            if resume_after_seek {
+            if resume_after_seek && Self::selected_provider(&runtime.lock()).is_none() {
                 let _ = runtime.host_play();
             }
         });
@@ -4302,6 +4328,7 @@ impl AppRuntime {
             if permitted {
                 let runtime = Self::from_inner(inner);
                 let descriptor = crate::providers::selection::ProviderRoomDescriptor {
+                    playback: None,
                     version: selection.version,
                     state_epoch: selection.state_epoch.clone(),
                     selection: Some(selection.clone()),
@@ -4388,6 +4415,9 @@ impl AppRuntime {
                         return;
                     }
                     state.pending_operation_id = Some(operation_id.clone());
+                    if Self::selected_provider(&state).is_some() {
+                        state.provider_prepare_started = Some(Instant::now());
+                    }
                     state.pending_operation_kind = Some("PLAY".to_string());
                     state.pending_operation_target_ms = target_position_ms;
                     // The play-readiness gate mirrors the coordinator's
@@ -4419,7 +4449,10 @@ impl AppRuntime {
                     execute_at_host_mono_us,
                     presentation_epoch: _,
                 } => {
-                    if state.last_committed_operation_id.as_deref() == Some(&operation_id) {
+                    if state.last_committed_operation_id.as_deref() == Some(&operation_id)
+                        || (Self::selected_provider(&state).is_some()
+                            && state.commit_scheduled_for.is_some())
+                    {
                         return;
                     }
                     // A commit for a superseded operation (a newer op is
@@ -4461,7 +4494,10 @@ impl AppRuntime {
                         state.sync.strict_sync_paused = false;
                         state.pending_operation_id = None;
                         state.pending_operation_kind = None;
-                        state.last_committed_operation_id = Some(operation_id);
+                        state.last_committed_operation_id = Some(operation_id.clone());
+                        if Self::selected_provider(&state).is_some() {
+                            state.provider_verifying = Some(operation_id);
+                        }
                         state.commit_scheduled_for = None;
                         let room_state = state
                             .sync_coordinator
@@ -4490,6 +4526,9 @@ impl AppRuntime {
                         return;
                     }
                     state.pending_operation_id = Some(operation_id.clone());
+                    if Self::selected_provider(&state).is_some() {
+                        state.provider_prepare_started = Some(Instant::now());
+                    }
                     state.pending_operation_kind = Some("PAUSE".to_string());
                     state.pending_operation_target_ms = target_position_ms;
                     let client = state.client.clone();
@@ -4504,7 +4543,10 @@ impl AppRuntime {
                     target_position_ms,
                     execute_at_host_mono_us,
                 } => {
-                    if state.last_committed_operation_id.as_deref() == Some(&operation_id) {
+                    if state.last_committed_operation_id.as_deref() == Some(&operation_id)
+                        || (Self::selected_provider(&state).is_some()
+                            && state.commit_scheduled_for.is_some())
+                    {
                         return;
                     }
                     if state.pending_operation_id.is_some()
@@ -4539,7 +4581,10 @@ impl AppRuntime {
                         state.sync.strict_sync_paused = strict_sync_paused;
                         state.pending_operation_id = None;
                         state.pending_operation_kind = None;
-                        state.last_committed_operation_id = Some(operation_id);
+                        state.last_committed_operation_id = Some(operation_id.clone());
+                        if Self::selected_provider(&state).is_some() {
+                            state.provider_verifying = Some(operation_id);
+                        }
                         state.commit_scheduled_for = None;
                         let room_state = state
                             .sync_coordinator
@@ -4568,6 +4613,9 @@ impl AppRuntime {
                         return;
                     }
                     state.pending_operation_id = Some(operation_id.clone());
+                    if Self::selected_provider(&state).is_some() {
+                        state.provider_prepare_started = Some(Instant::now());
+                    }
                     state.pending_operation_kind = Some("SEEK".to_string());
                     state.pending_operation_target_ms = target_position_ms;
                     let ready = state.local_participant.media_ready;
@@ -4587,7 +4635,10 @@ impl AppRuntime {
                     execute_at_host_mono_us,
                     resume_after_seek,
                 } => {
-                    if state.last_committed_operation_id.as_deref() == Some(&operation_id) {
+                    if state.last_committed_operation_id.as_deref() == Some(&operation_id)
+                        || (Self::selected_provider(&state).is_some()
+                            && state.commit_scheduled_for.is_some())
+                    {
                         return;
                     }
                     if state.pending_operation_id.is_some()
@@ -4617,7 +4668,10 @@ impl AppRuntime {
                         state.sync.strict_sync_paused = !resume_after_seek;
                         state.pending_operation_id = None;
                         state.pending_operation_kind = None;
-                        state.last_committed_operation_id = Some(operation_id);
+                        state.last_committed_operation_id = Some(operation_id.clone());
+                        if Self::selected_provider(&state).is_some() {
+                            state.provider_verifying = Some(operation_id);
+                        }
                         state.commit_scheduled_for = None;
                         let room_state = state
                             .sync_coordinator
@@ -4641,6 +4695,9 @@ impl AppRuntime {
                     position_ms,
                     buffer_ahead_ms,
                 } => {
+                    if Self::selected_provider(&state).is_some() {
+                        Self::invalidate_provider_content(&mut state);
+                    }
                     let buffering_role = if sender == &state.local_participant.id {
                         if Self::is_host_role(&state) {
                             PeerRole::Host
@@ -5056,6 +5113,7 @@ impl AppRuntime {
     /// Called from the coordinator callback (the fn pointer stored on
     /// `LocalSyncCoordinator::on_coordinator_state_changed`).
     fn send_host_event(state: &mut AppRuntimeState, event: QuicServerEvent) {
+        Self::begin_provider_operation(state, &event);
         let event = if event.is_playback() {
             let room = state
                 .provider_room
@@ -5106,6 +5164,12 @@ impl AppRuntime {
     pub fn host_play(&self) -> AppSnapshot {
         let snapshot = {
             let mut state = self.lock();
+            if state.provider_gesture_required {
+                state.error = Some(
+                    "Click to enable playback in managed Chrome before retrying Ready.".into(),
+                );
+                return snapshot_from_state(&state);
+            }
             let provider_peer_ready = Self::provider_peer_selection_ready(&state);
             if !provider_peer_ready {
                 state.error = Some(
@@ -5166,7 +5230,7 @@ impl AppRuntime {
             }
             // A protocol cycle is already in flight; ignore the repeat tap
             // rather than starting a second overlapping operation.
-            if state.pending_operation_id.is_some() {
+            if state.pending_operation_id.is_some() || state.provider_verifying.is_some() {
                 return snapshot_from_state(&state);
             }
             // the local media file may have been moved or
@@ -5228,6 +5292,9 @@ impl AppRuntime {
                 }
             };
             state.pending_operation_id = Some(scheduled.operation_id.to_string());
+            if Self::selected_provider(&state).is_some() {
+                state.provider_prepare_started = Some(Instant::now());
+            }
             state.pending_operation_kind = Some("PLAY".to_string());
             state.pending_operation_target_ms = scheduled.target_position_ms;
             state.pending_operation_execute_at_us = scheduled.execute_at_host_mono_us;
@@ -5260,6 +5327,12 @@ impl AppRuntime {
     pub fn request_play_countdown(&self) -> AppSnapshot {
         let snapshot = {
             let mut state = self.lock();
+            if state.provider_gesture_required {
+                state.error = Some(
+                    "Click to enable playback in managed Chrome before retrying Ready.".into(),
+                );
+                return snapshot_from_state(&state);
+            }
             let provider_peer_ready = Self::provider_peer_selection_ready(&state);
             if !provider_peer_ready {
                 state.error = Some(
@@ -5274,7 +5347,7 @@ impl AppRuntime {
                 sync_room_snapshot(&mut state);
                 return snapshot_from_state(&state);
             }
-            if state.pending_operation_id.is_some() {
+            if state.pending_operation_id.is_some() || state.provider_verifying.is_some() {
                 return snapshot_from_state(&state);
             }
             // Same readiness gates as host_play (provider + player health)
@@ -5321,6 +5394,9 @@ impl AppRuntime {
                 }
             };
             state.pending_operation_id = Some(scheduled.operation_id.to_string());
+            if Self::selected_provider(&state).is_some() {
+                state.provider_prepare_started = Some(Instant::now());
+            }
             state.pending_operation_kind = Some("PLAY".to_string());
             state.pending_operation_target_ms = scheduled.target_position_ms;
             state.pending_operation_execute_at_us = scheduled.execute_at_host_mono_us;
@@ -5349,7 +5425,7 @@ impl AppRuntime {
     pub fn host_pause(&self) -> AppSnapshot {
         let snapshot = {
             let mut state = self.lock();
-            if state.pending_operation_id.is_some() {
+            if state.pending_operation_id.is_some() || state.provider_verifying.is_some() {
                 return snapshot_from_state(&state);
             }
             if state.room_state == RoomState::Paused {
@@ -5364,6 +5440,9 @@ impl AppRuntime {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .begin_pause();
             state.pending_operation_id = Some(operation_id.clone());
+            if Self::selected_provider(&state).is_some() {
+                state.provider_prepare_started = Some(Instant::now());
+            }
             state.pending_operation_kind = Some("PAUSE".to_string());
             state.pending_operation_target_ms = target_position;
             state.pending_operation_execute_at_us = execute_at;
@@ -5394,6 +5473,12 @@ impl AppRuntime {
     pub fn host_seek(&self, target_position_ms: u64, resume_after_seek: bool) -> AppSnapshot {
         let snapshot = {
             let mut state = self.lock();
+            if state.provider_gesture_required {
+                state.error = Some(
+                    "Click to enable playback in managed Chrome before retrying Ready.".into(),
+                );
+                return snapshot_from_state(&state);
+            }
             let provider_peer_ready = Self::provider_peer_selection_ready(&state);
             if !provider_peer_ready {
                 state.error = Some(
@@ -5403,7 +5488,7 @@ impl AppRuntime {
                 return snapshot_from_state(&state);
             }
 
-            if state.pending_operation_id.is_some() {
+            if state.pending_operation_id.is_some() || state.provider_verifying.is_some() {
                 return snapshot_from_state(&state);
             }
             let execute_at = monotonic_us() + clock::play_lead_us(state.peer_rtt_p95_us);
@@ -5414,6 +5499,9 @@ impl AppRuntime {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .begin_seek(target_position_ms);
             state.pending_operation_id = Some(operation_id.clone());
+            if Self::selected_provider(&state).is_some() {
+                state.provider_prepare_started = Some(Instant::now());
+            }
             state.pending_operation_kind = Some("SEEK".to_string());
             state.pending_operation_target_ms = target_position_ms;
             state.pending_operation_execute_at_us = execute_at;
@@ -5744,6 +5832,9 @@ impl AppRuntime {
     /// when the media/player/provider prerequisite is genuinely usable. This
     /// never fabricates readiness from metadata or a user click alone.
     fn local_media_genuinely_ready(state: &AppRuntimeState) -> bool {
+        if state.provider_gesture_required {
+            return false;
+        }
         if state.guest_provider.selection().is_some() {
             return state.guest_provider.state
                 == crate::providers::selection::ContentLoadingState::PlaybackReady
@@ -5800,7 +5891,8 @@ impl AppRuntime {
                     let active = state.room_state == RoomState::Playing
                         && !state.sync.strict_sync_paused
                         && Self::provider_browser_is_media(&state)
-                        && state.chrome_session.is_some();
+                        && state.chrome_session.is_some()
+                        && Self::selected_provider(&state).is_none();
                     let provider = state
                         .provider
                         .provider_id
@@ -5963,6 +6055,10 @@ impl AppRuntime {
     }
 
     fn dispatch_provider_commit(&self, commit_kind: &str, target_ms: u64) {
+        if Self::selected_provider(&self.lock()).is_some() {
+            self.dispatch_selected_provider(commit_kind, target_ms);
+            return;
+        }
         use crate::providers::sync::{command_for_action, provider_sync_action_for_commit};
 
         let (provider_id, action) = {
@@ -6779,6 +6875,10 @@ impl AppRuntime {
             task.abort();
         }
         state.guest_provider = crate::providers::selection::GuestSelection::default();
+        state.provider_verifying = None;
+        state.provider_prepare_started = None;
+        state.provider_gesture_required = false;
+        state.provider_decision_sequence = 0;
         state.provider_room = Arc::new(Mutex::new(
             crate::providers::selection::ProviderRoomAuthority::default(),
         ));
@@ -8095,6 +8195,7 @@ fn project_host_mono_to_wall_ms(
 }
 
 fn sync_room_snapshot(state: &mut AppRuntimeState) {
+    AppRuntime::guard_provider_playback(state);
     state.sync.room_state = format!("{:?}", state.room_state).to_ascii_uppercase();
 }
 

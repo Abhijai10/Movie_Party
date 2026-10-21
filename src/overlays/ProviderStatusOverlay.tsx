@@ -1,10 +1,19 @@
 import type { AppSnapshot } from "../backend/appRuntime";
+import { ProviderGestureControl } from "../providers/ProviderGestureControl";
 
 type ProviderStatusOverlayProps = {
   snapshot: AppSnapshot;
 };
 
 export function ProviderStatusOverlay({ snapshot }: ProviderStatusOverlayProps) {
+  if (snapshot.providerContent?.gestureRequired) {
+    return (
+      <section className="presentation-overlay" aria-label="Enable provider playback">
+        <h2>Enable playback in Chrome</h2>
+        <ProviderGestureControl />
+      </section>
+    );
+  }
   const presentation = snapshot.player.presentation;
   const shouldShowPresentationNotice =
     presentation.mode !== "EMBEDDED_NATIVE" && snapshot.media != null;
@@ -34,9 +43,7 @@ export function ProviderStatusOverlay({ snapshot }: ProviderStatusOverlayProps) 
           : "Player controlled outside the app"}
       </h2>
       <p>
-        {isAttaching
-          ? "Connecting the movie window — this takes a moment."
-          : presentation.message}
+        {isAttaching ? "Connecting the movie window — this takes a moment." : presentation.message}
       </p>
       {isAttaching ? null : <small>{presentation.bridge}</small>}
     </section>

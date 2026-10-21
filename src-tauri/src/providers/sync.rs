@@ -135,10 +135,10 @@ pub fn provider_id_from_str(provider_id: &str) -> Option<ProviderId> {
 
 pub fn provider_capabilities() -> Vec<ProviderCapability> {
     [
-        ("youtube", "YouTube", "SUPPORTED", "DIRECT_URL"),
-        ("netflix", "Netflix", "SUPPORTED", "PROVIDER_SEARCH"),
-        ("prime", "Prime Video", "SUPPORTED", "PROVIDER_SEARCH"),
-        ("jiohotstar", "JioHotstar", "SUPPORTED", "PROVIDER_SEARCH"),
+        ("youtube", "YouTube", "PARTIAL", "DIRECT_URL"),
+        ("netflix", "Netflix", "PARTIAL", "PROVIDER_SEARCH"),
+        ("prime", "Prime Video", "PARTIAL", "PROVIDER_SEARCH"),
+        ("jiohotstar", "JioHotstar", "PARTIAL", "PROVIDER_SEARCH"),
     ]
     .into_iter()
     .map(|(id, display_name, support_level, title_resolution)| ProviderCapability {
@@ -722,7 +722,7 @@ mod tests {
             .all(|capability| capability.verification == "EXTERNAL_VERIFICATION_PENDING"));
         assert!(capabilities
             .iter()
-            .all(|capability| capability.support_level == "SUPPORTED"));
+            .all(|capability| capability.support_level == "PARTIAL"));
         assert_eq!(
             capabilities
                 .iter()

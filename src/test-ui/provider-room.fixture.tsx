@@ -3,6 +3,7 @@ import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import type { AppSnapshot } from "../backend/appRuntime";
+import { ProviderStatusOverlay } from "../overlays/ProviderStatusOverlay";
 import { LobbyView } from "../views/LobbyView";
 import { createCallTileSessionState } from "../overlays/callTileState";
 import "../styles.css";
@@ -68,7 +69,7 @@ const initial: AppSnapshot = {
   },
   providerContent: {
     selection: {
-      version: 1,
+      version: 2,
       provider: "youtube",
       content_id: "abcdefghijk",
       canonical_url: "https://www.youtube.com/watch?v=abcdefghijk",
@@ -123,9 +124,14 @@ mockIPC((command) => {
       providerContent: { ...initial.providerContent, localState: "OPENING" },
     };
   }
+  if (command === "focus_provider_playback") {
+    if (fail) throw new Error("Isolated fixture: Chrome is busy");
+    return initial;
+  }
   throw new Error(`Unexpected fixture IPC: ${command}`);
 });
 function Fixture() {
+  const [cinemaRecovery, setCinemaRecovery] = useState(false);
   const [snapshot, setSnapshot] = useState(initial);
   const [call, setCall] = useState({ ...createCallTileSessionState(), isHidden: true });
   return (
@@ -156,17 +162,50 @@ function Fixture() {
         >
           Reset authentication state
         </button>
+        <button
+          onClick={() => {
+            const content = initial.providerContent;
+            if (!content) return;
+            setSnapshot({
+              ...initial,
+              providerContent: {
+                ...content,
+                gestureRequired: true,
+                playbackPhase: "FAILED",
+                localState: "ERROR",
+              },
+              provider: {
+                ...initial.provider,
+                readiness: "ERROR",
+                state: "Playback requires a click in managed Chrome",
+              },
+            });
+          }}
+        >
+          Show playback restriction
+        </button>
+        <button
+          onClick={() => {
+            setCinemaRecovery(!cinemaRecovery);
+          }}
+        >
+          Toggle cinema recovery
+        </button>
       </aside>
-      <LobbyView
-        snapshot={snapshot}
-        onBack={() => {}}
-        onReady={() => {}}
-        onCinema={() => {}}
-        onToggleSharedControls={() => {}}
-        onSnapshot={setSnapshot}
-        callTileSession={call}
-        onCallTileSessionChange={setCall}
-      />
+      {cinemaRecovery ? (
+        <ProviderStatusOverlay snapshot={snapshot} />
+      ) : (
+        <LobbyView
+          snapshot={snapshot}
+          onBack={() => {}}
+          onReady={() => {}}
+          onCinema={() => {}}
+          onToggleSharedControls={() => {}}
+          onSnapshot={setSnapshot}
+          callTileSession={call}
+          onCallTileSessionChange={setCall}
+        />
+      )}
     </>
   );
 }

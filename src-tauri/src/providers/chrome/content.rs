@@ -96,7 +96,11 @@ impl ManagedChromeSession {
                         .and_then(|v| v.as_str())
                         .map(str::to_owned),
                 });
+            let player = value.get("player").and_then(|p| {
+                serde_json::from_value::<crate::providers::playback::Observation>(p.clone()).ok()
+            });
             let mut tab = ContentTab {
+                player,
                 target_id: target.id,
                 title,
                 identity,
@@ -220,16 +224,18 @@ impl ManagedChromeSession {
 
 // Read only public page metadata and media readiness. No storage, cookies,
 // credentials, network interception, authentication or provider internals.
-pub(super) const OBSERVE_PAGE: &str = r#"(() => {
+pub(crate) const OBSERVE_PAGE: &str = r#"(() => {
  const videos = [...document.querySelectorAll('video')].filter(v => {
    const r=v.getBoundingClientRect(); return r.width>0 && r.height>0;
  });
  const v=videos.length===1 ? videos[0] : null;
+ const buffered=v ? [...Array(v.buffered.length).keys()].map(i=>[v.buffered.start(i),v.buffered.end(i)]).find(([start,end])=>start<=v.currentTime && end>=v.currentTime) : null;
  const playerContentId=v?.closest('ytd-watch-flexy[video-id], [data-video-id], [data-videoid], [data-content-id]');
  const contentId=playerContentId?.getAttribute('video-id') || playerContentId?.getAttribute('data-video-id') || playerContentId?.getAttribute('data-videoid') || playerContentId?.getAttribute('data-content-id') || (v && document.querySelector('meta[itemprop=videoId]')?.content) || null;
  return {url:location.href,
+ player:v && Number.isFinite(v.duration) && Number.isFinite(v.currentTime) ? {position_ms:Math.round(Math.max(0,v.currentTime)*1000), duration_ms:Math.round(Math.max(0,v.duration)*1000), buffer_ms:Math.round(Math.max(0,(buffered?.[1]||v.currentTime)-v.currentTime)*1000),ready_state:v.readyState,paused:v.paused,ended:v.ended,seeking:v.seeking}:null,
  durationMs:v && Number.isFinite(v.duration) && v.duration>0 ? Math.round(v.duration*1000) : null, playerContentId:contentId,
  title:document.querySelector('meta[property="og:title"]')?.content || document.title || '',
  documentId:String(performance.timeOrigin),focused:document.hasFocus(),visible:document.visibilityState==='visible',
- ready:Boolean(v && v.readyState>=2 && !v.error && Number.isFinite(v.currentTime))};
+ ready:Boolean(v && v.readyState>=3 && !v.seeking && !v.ended && buffered && (buffered[1]-v.currentTime>=3 || buffered[1]>=v.duration-0.1) && !v.error && Number.isFinite(v.currentTime))};
 })()"#;

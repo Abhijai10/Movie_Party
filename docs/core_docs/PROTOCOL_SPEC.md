@@ -1578,6 +1578,73 @@ No provider cookies, credentials, login tokens, browser storage or encryption
 keys appear in this protocol. Both peers independently use their own managed
 browser and authorized provider account. Provider Shared remains disabled.
 
+## Provider playback consensus extension, version 2 (Batch 4)
+
+Current Provider Sync requires `provider_selection_version: 2` in Hello and
+version 2 in the selection/descriptor. Version 1 provider peers receive the
+existing explicit incompatibility rejection. Local Perfect still uses envelope
+1.0 and accepts legacy peers. Registry IDs 224–227 and existing enum meanings
+are retained; no additional IDs or top-level message tags are introduced.
+The following fields are optional in serialization, but their behavior is
+protected by the provider capability version rather than silently offered to
+version 1 clients.
+
+`ProviderRoomDescriptor.playback` holds a host-owned `Operation`: selection
+`context`, UUID `operation_id`, monotonic room operation `sequence`, `action`
+(`PLAY`, `PAUSE`, `SEEK`), `target_ms`, seek `resume` policy, `phase`
+(`VERIFYING`, `APPLIED`, `FAILED`) and optional `host`/`guest` reports.
+`SelectionAck.playback` carries only the guest's `Report`: exact context,
+operation ID/action, observed position and closed-enum outcome (`APPLIED`,
+`GESTURE_REQUIRED`, `REJECTED`, `TIMED_OUT`, `BUFFERING`, `ENDED`). It never
+contains arbitrary browser errors, URLs, titles, account state or credentials.
+
+The host reserves an operation when broadcasting the existing canonical
+commit. Each side executes at the existing host-clock deadline. Selected
+provider rooms remain unconfirmed while commands are executing. CDP Boolean
+success alone cannot move the room to PLAYING: actual public player identity,
+position, seek completion, paused/playing state, buffer and ready state are
+observed again. Play additionally requires observed position advancement.
+Commands target the unique visible video on the pinned managed page; ambiguous
+or missing media fails closed. The operation accepts position error up to
+1.5 seconds; this tolerance is an acceptance bound, not a synchronization
+precision guarantee. A play dispatch more than 500 ms late is rejected instead
+of claiming a synchronized start after a delayed browser borrow.
+
+Both reports must belong to the current selection and same operation, and
+must report APPLIED before a two-person room confirms PLAYING. The existing
+explicit guest-abandon policy can authorize solo playback. Reports from older
+operations/contexts cannot complete a new operation. Identical reports are
+idempotent, terminal decisions cannot rewind, and duplicate commits cannot
+schedule a second provider command. A late join or reconnect cannot inherit
+PLAYING merely by reading an old successful decision: its own current player
+readiness and matching locally observed result are required.
+
+Authenticated selection polling and acknowledgement retry remain every two
+seconds. Preparation without commit, or verification without both successful
+reports, fails after fifteen seconds (plus polling/scheduling delay). A failed
+command, buffering, identity/authentication loss or disconnected peer keeps
+strict synchronization paused; pause attempts also run when host state pulls
+fail. Failure to confirm an actual pause instructs the user to pause Chrome
+manually. Recovery never silently resumes: new readiness and a fresh canonical
+play cycle are required. A verified seek pauses both players first; an explicitly
+requested resume starts the ordinary play protocol only after seek verification.
+
+Host-observed EOF ends the room; guest-only EOF retracts readiness and pauses
+for host confirmation. Ended rooms do not automatically restart. A newly
+selected revision clears old EOF/readiness, pending starts and operations.
+
+NotAllowedError produces GESTURE_REQUIRED. The in-app action focuses the owned
+Chrome tab; the user must click the actual video play button. Movie Party never
+sets CDP `userGesture`, disables autoplay restrictions, or performs login.
+Observed manual playback clears the restriction and returns to preparation.
+Provider capabilities are labelled PARTIAL with external verification pending.
+Provider APIs/DOM behavior, ads, browser policy and DRM may prevent precise
+seeks or synchronization; no universal or frame-accurate guarantee is made.
+
+Local-only diagnostic events have a closed schema: event name, action enum,
+outcome enum and numeric revision. Provider URLs, account data, raw page errors
+and browser storage are excluded rather than logged and subsequently scrubbed.
+
 ---
 
 # 69. PROTOCOL V1 DEFINITION OF DONE

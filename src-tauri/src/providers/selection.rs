@@ -2,7 +2,7 @@
 //! This wire model deliberately contains no account/session/browser secrets.
 use super::content::{parse_content, ContentIdentity};
 use serde::{Deserialize, Serialize};
-pub const SELECTION_VERSION: u16 = 1;
+pub const SELECTION_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -105,6 +105,8 @@ pub enum ContentLoadingState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelectionAck {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback: Option<super::playback::Report>,
     pub state_epoch: String,
     pub host_sequence: u64,
     pub content_revision: u64,
@@ -120,6 +122,7 @@ impl SelectionAck {
         observed: Option<ContentEvidence>,
     ) -> Self {
         Self {
+            playback: None,
             state_epoch: selection.state_epoch.clone(),
             host_sequence: selection.host_sequence,
             content_revision: selection.content_revision,
@@ -150,6 +153,8 @@ impl SelectionAck {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderRoomDescriptor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback: Option<super::playback::Operation>,
     pub version: u16,
     pub state_epoch: String,
     pub selection: Option<ProviderSelection>,
@@ -162,12 +167,49 @@ impl ProviderRoomDescriptor {
         if let Some(s) = &self.selection {
             s.validate(room, &self.state_epoch)?;
         }
+        if let Some(op) = &self.playback {
+            let selection = self
+                .selection
+                .as_ref()
+                .ok_or("Missing provider selection")?;
+            if op.context != selection.context()
+                || op.sequence == 0
+                || uuid::Uuid::parse_str(&op.operation_id).is_err()
+                || op.target_ms > selection.evidence.duration_ms
+            {
+                return Err("PROVIDER_OPERATION_CONTEXT_MISMATCH".into());
+            }
+            for report in [op.host.as_ref(), op.guest.as_ref()].into_iter().flatten() {
+                if report.context != op.context
+                    || report.operation_id != op.operation_id
+                    || report.action != op.action
+                    || (report.outcome == super::playback::Outcome::Applied
+                        && report.position_ms.abs_diff(op.target_ms) > 1500)
+                {
+                    return Err("PROVIDER_OPERATION_RESULT_MISMATCH".into());
+                }
+            }
+            if op.phase == super::playback::Phase::Applied
+                && (op
+                    .host
+                    .as_ref()
+                    .is_none_or(|r| r.outcome != super::playback::Outcome::Applied)
+                    || op
+                        .guest
+                        .as_ref()
+                        .is_some_and(|r| r.outcome != super::playback::Outcome::Applied))
+            {
+                return Err("PROVIDER_OPERATION_UNVERIFIED".into());
+            }
+        }
         Ok(())
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ProviderRoomAuthority {
+    pub playback_started: Option<std::time::Instant>,
+    pub playback_sequence: u64,
     pub descriptor: ProviderRoomDescriptor,
     pub guest_ack: Option<SelectionAck>,
     pub acknowledged_at: Option<std::time::Instant>,
@@ -177,7 +219,10 @@ pub struct ProviderRoomAuthority {
 impl Default for ProviderRoomAuthority {
     fn default() -> Self {
         Self {
+            playback_started: None,
+            playback_sequence: 0,
             descriptor: ProviderRoomDescriptor {
+                playback: None,
                 version: SELECTION_VERSION,
                 state_epoch: uuid::Uuid::now_v7().to_string(),
                 selection: None,
@@ -231,6 +276,8 @@ impl ProviderRoomAuthority {
         };
         selection.validate(room, &self.descriptor.state_epoch)?;
         self.descriptor.selection = Some(selection.clone());
+        self.descriptor.playback = None;
+        self.playback_started = None;
         self.guest_ack = None;
         self.acknowledged_at = None;
         Ok(selection)
@@ -249,6 +296,22 @@ impl ProviderRoomAuthority {
                 || (ack.acknowledgement_sequence == old.acknowledgement_sequence && &ack != old)
             {
                 return Err("PROVIDER_ACK_STALE".into());
+            }
+        }
+        if let Some(report) = &ack.playback {
+            if (report.outcome != super::playback::Outcome::Applied
+                || ack.state == ContentLoadingState::PlaybackReady)
+                && self
+                    .descriptor
+                    .playback
+                    .as_ref()
+                    .is_some_and(|op| op.accepts(report))
+            {
+                self.descriptor
+                    .playback
+                    .as_mut()
+                    .unwrap()
+                    .record(report.clone(), false, false);
             }
         }
         self.guest_ack = Some(ack);
@@ -275,6 +338,8 @@ impl ProviderRoomAuthority {
 
 #[derive(Debug, Clone, Default)]
 pub struct GuestSelection {
+    pub playback_report: Option<super::playback::Report>,
+    pub playback_decision_sequence: u64,
     pub descriptor: Option<ProviderRoomDescriptor>,
     pub state: ContentLoadingState,
     pub acknowledgement_sequence: u64,
@@ -319,6 +384,7 @@ impl GuestSelection {
             ContentLoadingState::Unselected
         };
         self.observed = None;
+        self.playback_report = None;
         self.descriptor = Some(descriptor);
         Ok(true)
     }
@@ -348,12 +414,14 @@ impl GuestSelection {
         Ok(ack)
     }
     pub fn current_ack(&self) -> Option<SelectionAck> {
-        Some(SelectionAck::for_selection(
+        let mut ack = SelectionAck::for_selection(
             self.selection()?,
             self.acknowledgement_sequence,
             self.state,
             self.observed.clone(),
-        ))
+        );
+        ack.playback = self.playback_report.clone();
+        Some(ack)
     }
 }
 
@@ -475,8 +543,8 @@ mod tests {
             let mut descriptor = host.descriptor.clone();
             let selection = descriptor.selection.as_mut().unwrap();
             match kind {
-                0 => descriptor.version = 2,
-                1 => selection.version = 2,
+                0 => descriptor.version = SELECTION_VERSION + 1,
+                1 => selection.version = SELECTION_VERSION + 1,
                 2 => selection.room_id = "other".into(),
                 3 => selection.canonical_url = "javascript:alert(1)".into(),
                 4 => selection.content_id = "dQw4w9WgXcQ".into(),

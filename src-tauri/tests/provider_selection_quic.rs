@@ -1,5 +1,6 @@
 //! Real authenticated loopback QUIC with simulated public-player observations.
 //! No browser, credentials or provider network are involved in this harness.
+use movie_party_lib::providers::playback::{Action, Operation, Outcome, Phase, Report};
 use movie_party_lib::{
     identity::DeviceIdentity,
     network::quic::{
@@ -30,6 +31,130 @@ fn publish(state: &Arc<Mutex<ProviderRoomAuthority>>, room: &str, id: &str) {
             evidence(id),
         )
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn observed_playback_reports_cross_authenticated_quic_and_cannot_reuse_old_results() {
+    let credentials = RoomCredentials::generate();
+    let identity = DeviceIdentity::new_ephemeral();
+    let state = Arc::new(Mutex::new(ProviderRoomAuthority::default()));
+    publish(&state, &credentials.room_id, "abcdefghijk");
+    let server = QuicServer::bind(
+        loopback_bind_addr(),
+        credentials.clone(),
+        "Host".into(),
+        DeviceIdentity::new_ephemeral().device_id,
+    )
+    .unwrap()
+    .with_provider_room(state.clone());
+    let address = server.local_addr().unwrap();
+    let fingerprint = server.certificate_fingerprint();
+    let task = tokio::spawn(server.run(None));
+    let (client, auth) = QuicClient::connect(
+        address,
+        fingerprint,
+        credentials.clone(),
+        identity,
+        "Guest".into(),
+    )
+    .await
+    .unwrap();
+    let mut guest = GuestSelection::default();
+    guest
+        .apply(auth.provider_room.unwrap(), &credentials.room_id)
+        .unwrap();
+    let selection = guest.selection().unwrap().clone();
+    for action in [Action::Play, Action::Pause, Action::Seek] {
+        let op = Operation {
+            context: selection.context(),
+            operation_id: uuid::Uuid::now_v7().to_string(),
+            sequence: action as u64 + 1,
+            action,
+            target_ms: 1000,
+            resume: false,
+            phase: Phase::Verifying,
+            host: None,
+            guest: None,
+        };
+        let report = Report {
+            context: op.context.clone(),
+            operation_id: op.operation_id.clone(),
+            action,
+            outcome: Outcome::Applied,
+            position_ms: 1000,
+        };
+        state.lock().unwrap().descriptor.playback = Some(op.clone());
+        state
+            .lock()
+            .unwrap()
+            .descriptor
+            .playback
+            .as_mut()
+            .unwrap()
+            .record(report.clone(), true, false);
+        let mut wrong = report.clone();
+        wrong.operation_id = uuid::Uuid::now_v7().to_string();
+        let mut ack = guest
+            .observe(
+                ContentLoadingState::PlaybackReady,
+                Some(selection.evidence.clone()),
+            )
+            .unwrap();
+        ack.playback = Some(wrong);
+        assert!(client.acknowledge_provider(ack).await.unwrap());
+        assert_eq!(
+            client
+                .provider_selection()
+                .await
+                .unwrap()
+                .playback
+                .unwrap()
+                .phase,
+            Phase::Verifying
+        );
+        let mut ack = guest
+            .observe(
+                ContentLoadingState::PlaybackReady,
+                Some(selection.evidence.clone()),
+            )
+            .unwrap();
+        ack.playback = Some(report.clone());
+        assert!(client.acknowledge_provider(ack.clone()).await.unwrap());
+        assert!(client.acknowledge_provider(ack).await.unwrap());
+        assert_eq!(
+            client
+                .provider_selection()
+                .await
+                .unwrap()
+                .playback
+                .unwrap()
+                .phase,
+            Phase::Applied
+        );
+        let mut op = op;
+        op.operation_id = uuid::Uuid::now_v7().to_string();
+        op.phase = Phase::Verifying;
+        op.host = None;
+        op.guest = None;
+        state.lock().unwrap().descriptor.playback = Some(op.clone());
+        let mut failure = report;
+        failure.operation_id = op.operation_id;
+        failure.outcome = Outcome::Rejected;
+        let mut ack = guest.observe(ContentLoadingState::Error, None).unwrap();
+        ack.playback = Some(failure);
+        assert!(client.acknowledge_provider(ack).await.unwrap());
+        assert_eq!(
+            client
+                .provider_selection()
+                .await
+                .unwrap()
+                .playback
+                .unwrap()
+                .phase,
+            Phase::Failed
+        );
+    }
+    task.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -12,6 +12,8 @@ pub type RoomBrowserLauncher = dyn Fn(&str, &str) -> Result<crate::providers::ch
 #[serde(rename_all = "camelCase")]
 pub struct ProviderContentSnapshot {
     pub selection: Option<ProviderSelection>,
+    pub gesture_required: bool,
+    pub playback_phase: Option<crate::providers::playback::Phase>,
     pub local_state: ContentLoadingState,
     pub peer_state: ContentLoadingState,
 }
@@ -79,6 +81,10 @@ impl AppRuntime {
         let mut retired_player = None;
         if changed {
             if let Some(selection) = state.guest_provider.selection().cloned() {
+                state.provider_gesture_required = false;
+                if state.room_state == RoomState::Ended {
+                    state.room_state = RoomState::ReadyCheck;
+                }
                 state.provider.mode = "PROVIDER_SYNC".into();
                 state.provider.provider_id = Some(selection.provider);
                 state.provider.url = Some(selection.canonical_url);
@@ -118,7 +124,21 @@ impl AppRuntime {
         Ok(changed)
     }
 
-    fn invalidate_provider_content(state: &mut AppRuntimeState) {
+    pub(super) fn invalidate_provider_content(state: &mut AppRuntimeState) {
+        state.provider_verifying = None;
+        state.provider_prepare_started = None;
+        if let Some(op) = state
+            .provider_room
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .descriptor
+            .playback
+            .as_mut()
+        {
+            if op.phase == crate::providers::playback::Phase::Verifying {
+                op.phase = crate::providers::playback::Phase::Failed;
+            }
+        }
         // Cancel scheduled operations without invalidating this live browser.
         state.session_generation = state.session_generation.wrapping_add(1);
         state.pending_operation_id = None;
@@ -130,6 +150,12 @@ impl AppRuntime {
             peer.media_ready = false;
         }
         state.sync.strict_sync_paused = true;
+        if matches!(
+            state.room_state,
+            RoomState::Playing | RoomState::Seeking | RoomState::Pausing
+        ) {
+            state.room_state = RoomState::ReadyCheck;
+        }
         let mut coord = state
             .sync_coordinator
             .lock()
@@ -173,6 +199,10 @@ impl AppRuntime {
             (selection, changed)
         };
         if changed {
+            if state.room_state == RoomState::Ended {
+                state.room_state = RoomState::ReadyCheck;
+            }
+            state.provider_gesture_required = false;
             Self::invalidate_provider_content(&mut state);
             state
                 .sync_coordinator
@@ -207,6 +237,8 @@ impl AppRuntime {
             authority.descriptor.selection.as_ref()?;
             Some(ProviderContentSnapshot {
                 selection: authority.descriptor.selection.clone(),
+                gesture_required: state.provider_gesture_required,
+                playback_phase: authority.descriptor.playback.as_ref().map(|op| op.phase),
                 local_state: if state.provider.readiness
                     == crate::providers::sync::ProviderReadiness::PlaybackReady
                 {
@@ -230,6 +262,12 @@ impl AppRuntime {
             state.guest_provider.selection()?;
             Some(ProviderContentSnapshot {
                 selection: state.guest_provider.selection().cloned(),
+                gesture_required: state.provider_gesture_required,
+                playback_phase: state
+                    .guest_provider
+                    .descriptor
+                    .as_ref()
+                    .and_then(|d| d.playback.as_ref().map(|op| op.phase)),
                 local_state: state.guest_provider.state,
                 peer_state: if !state.network.connected {
                     ContentLoadingState::Error
@@ -282,14 +320,22 @@ impl AppRuntime {
                     )
                     .await
                     {
-                        Ok(Ok(descriptor)) => match runtime.receive_provider_descriptor(descriptor)
-                        {
-                            Ok(_) => true,
-                            Err(error) => {
-                                runtime.provider_selection_error(error);
-                                false
+                        Ok(Ok(descriptor)) => {
+                            let operation = descriptor.playback.clone();
+                            let accepted = runtime.receive_provider_descriptor(descriptor);
+                            if accepted.is_ok() {
+                                if let Some(op) = operation {
+                                    runtime.apply_provider_decision(op);
+                                }
                             }
-                        },
+                            match accepted {
+                                Ok(_) => true,
+                                Err(error) => {
+                                    runtime.provider_selection_error(error);
+                                    false
+                                }
+                            }
+                        }
                         _ => {
                             runtime.provider_selection_error("Provider selection timed out. Retrying the authenticated host; playback remains paused.".into());
                             false
@@ -311,9 +357,12 @@ impl AppRuntime {
                     }
                 } else if AppRuntime::is_host_role(&runtime.lock()) {
                     runtime.observe_room_provider(&room_id).await;
+                    runtime.settle_provider_playback();
                     let mut state = runtime.lock();
                     let peer_ready = Self::provider_peer_selection_ready(&state);
-                    let pause_peer_loss = !peer_ready && state.room_state == RoomState::Playing;
+                    let pause_peer_loss = !peer_ready
+                        && (state.room_state == RoomState::Playing
+                            || state.provider_verifying.is_some());
                     if !peer_ready {
                         if let Some(peer) = &mut state.peer_participant {
                             peer.media_ready = false;
@@ -321,9 +370,15 @@ impl AppRuntime {
                     }
                     drop(state);
                     if pause_peer_loss {
-                        runtime.host_pause();
+                        let position = {
+                            let mut state = runtime.lock();
+                            Self::invalidate_provider_content(&mut state);
+                            state.sync.position_ms
+                        };
+                        runtime.report_buffer_low(position, 0);
                     }
                 }
+                runtime.pause_provider_for_recovery().await;
                 runtime.inner.emit(runtime.snapshot());
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
@@ -591,7 +646,10 @@ impl AppRuntime {
             .map(|t| t.target_id.clone())
             .collect();
         let host = Self::is_host_role(&self.lock());
-        if host {
+        let healthy = self.observe_provider_health(&tabs);
+        if !healthy {
+            // Keep the owned browser so the strict pause below can still run.
+        } else if host {
             let selected_target = self
                 .lock()
                 .provider_chooser
@@ -676,7 +734,7 @@ impl AppRuntime {
         self.restore_room_browser(session.take(), generation);
     }
 
-    fn restore_room_browser(
+    pub(super) fn restore_room_browser(
         &self,
         session: Option<crate::providers::chrome::ManagedChromeSession>,
         generation: u64,
@@ -798,6 +856,15 @@ mod tests {
     };
     fn tab(id: &str) -> ContentTab {
         let mut tab = ContentTab {
+            player: Some(crate::providers::playback::Observation {
+                position_ms: 0,
+                duration_ms: 90000,
+                buffer_ms: 10000,
+                ready_state: 4,
+                paused: true,
+                ended: false,
+                seeking: false,
+            }),
             target_id: "selected".into(),
             title: format!("Observed fixture {id}"),
             identity: Some(

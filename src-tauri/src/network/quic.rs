@@ -4967,7 +4967,7 @@ mod provider_handshake_tests {
             .as_object_mut()
             .unwrap()
             .remove("provider_selection_version");
-        let legacy: HelloPayload = serde_json::from_value(legacy_json).unwrap();
+        let legacy: HelloPayload = serde_json::from_value(legacy_json.clone()).unwrap();
         assert_eq!(legacy.provider_selection_version, None);
         let decide = |hello: HelloPayload, authorization: &HostAuthorization| {
             let hash = credentials.join_secret_hash();
@@ -5014,7 +5014,7 @@ mod provider_handshake_tests {
             matches!(decide(legacy, &authorization), ServerResponse::AuthReject { code } if code == "PROVIDER_SELECTION_VERSION_UNSUPPORTED")
         );
         let mut future = hello.clone();
-        future.provider_selection_version = Some(2);
+        future.provider_selection_version = Some(SELECTION_VERSION + 1);
         assert!(
             matches!(decide(future, &authorization), ServerResponse::AuthReject { code } if code == "PROVIDER_SELECTION_VERSION_UNSUPPORTED")
         );
@@ -5022,6 +5022,11 @@ mod provider_handshake_tests {
             decide(hello, &authorization),
             ServerResponse::AuthAccept(_)
         ));
+        let mut batch3_peer = legacy_json;
+        batch3_peer["provider_selection_version"] = serde_json::json!(1);
+        assert!(
+            matches!(decide(serde_json::from_value(batch3_peer).unwrap(),&authorization),ServerResponse::AuthReject{code} if code=="PROVIDER_SELECTION_VERSION_UNSUPPORTED")
+        );
         let old_accept = serde_json::json!({"session_id":"legacy","room_role":"guest","host_display_name":"Host","host_device_id":authorization.host_device_id});
         assert!(serde_json::from_value::<AuthAccept>(old_accept)
             .unwrap()

@@ -7,4 +7,5 @@ pub mod prime;
 pub mod sync;
 pub mod youtube;
 
+pub mod playback;
 pub mod selection;
