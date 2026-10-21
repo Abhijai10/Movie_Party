@@ -92,9 +92,7 @@ impl AppRuntime {
         target: &str,
         key: &str,
     ) -> Result<ChooserSnapshot, String> {
-        if self.lock().credentials.is_some() {
-            return Err("Leave the current party before changing its content.".into());
-        }
+        let in_room = self.lock().credentials.is_some();
         self.refresh_provider_content(provider)?;
         self.with_chooser_session(provider, |session, generation| {
             // A second observation closes the preview/confirm race.
@@ -130,7 +128,13 @@ impl AppRuntime {
             } else {
                 crate::providers::sync::ProviderReadiness::Ready
             };
-            Ok(state.provider_chooser.clone())
+            let chosen = state.provider_chooser.selected.clone();
+            let snapshot = state.provider_chooser.clone();
+            drop(state);
+            if in_room {
+                self.publish_provider_tab(chosen.ok_or("Choose content before publishing")?)?;
+            }
+            Ok(snapshot)
         })
     }
 
@@ -186,7 +190,14 @@ impl AppRuntime {
         key: &str,
     ) -> Result<(), String> {
         let chooser = self.refresh_provider_content(provider)?;
-        if !chooser.content_ready || chooser.confirmed_key.as_deref() != Some(key) {
+        let verified = chooser.selected.as_ref().is_some_and(|tab| {
+            tab.identity.as_ref().is_some_and(|identity| {
+                tab.evidence.as_ref().is_some_and(|evidence| {
+                    evidence.valid_for(&identity.provider_id, &identity.content_id)
+                })
+            })
+        });
+        if !verified || !chooser.content_ready || chooser.confirmed_key.as_deref() != Some(key) {
             return Err("Preview and confirm the selected content, then wait for its video to be ready in Chrome.".into());
         }
         Ok(())

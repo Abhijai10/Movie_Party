@@ -1,3 +1,7 @@
+use crate::providers::selection::{
+    ProviderRoomAuthority, ProviderRoomDescriptor, ProviderSelection, SelectionAck,
+    SELECTION_VERSION,
+};
 use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -120,6 +124,8 @@ pub struct HelloPayload {
     pub protocol_major: u16,
     pub protocol_minor: u16,
     pub public_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_selection_version: Option<u16>,
 }
 
 impl HelloPayload {
@@ -133,6 +139,7 @@ impl HelloPayload {
             protocol_major: crate::PROTOCOL_MAJOR,
             protocol_minor: crate::PROTOCOL_MINOR,
             public_key: identity.public_key_base64(),
+            provider_selection_version: Some(SELECTION_VERSION),
         }
     }
 }
@@ -151,11 +158,22 @@ pub struct AuthAccept {
     pub room_role: String,
     pub host_display_name: String,
     pub host_device_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_room: Option<ProviderRoomDescriptor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
 pub enum ClientRequest {
+    ProviderSelectionGet {
+        seq: u64,
+        sender: String,
+    },
+    ProviderSelectionAck {
+        seq: u64,
+        sender: String,
+        acknowledgement: SelectionAck,
+    },
     HelloAuth {
         hello: Box<HelloPayload>,
         auth: Box<AuthRequest>,
@@ -249,7 +267,10 @@ pub enum ClientRequest {
         data: String,
     },
     /// M3: Guest requests the media manifest for Local Perfect transfer.
-    ManifestRequest { seq: u64, sender: String },
+    ManifestRequest {
+        seq: u64,
+        sender: String,
+    },
     /// M3: Guest requests a specific chunk by index.
     ChunkRequest {
         seq: u64,
@@ -270,6 +291,12 @@ pub enum ClientRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
 pub enum ServerResponse {
+    ProviderSelectionSnapshot {
+        descriptor: ProviderRoomDescriptor,
+    },
+    ProviderSelectionAckResult {
+        accepted: bool,
+    },
     AuthAccept(AuthAccept),
     AuthReject {
         code: String,
@@ -359,6 +386,13 @@ pub enum ServerResponse {
 /// (§57), and no code compares whole ServerEvents for identity — ordering
 /// is the envelope seq, not the payload.
 pub enum ServerEvent {
+    ProviderPlayback {
+        context: crate::providers::selection::SelectionContext,
+        event: Box<ServerEvent>,
+    },
+    ProviderSelection {
+        selection: ProviderSelection,
+    },
     PlayPrepare {
         operation_id: String,
         target_position_ms: u64,
@@ -520,6 +554,22 @@ pub enum QuicError {
     EnvelopeRoom { detail: String },
 }
 
+impl ServerEvent {
+    pub fn is_playback(&self) -> bool {
+        matches!(
+            self,
+            Self::CoordinatorStateUpdate { .. }
+                | Self::RoomStateUpdate { .. }
+                | Self::PlayPrepare { .. }
+                | Self::PlayCommit { .. }
+                | Self::PausePrepare { .. }
+                | Self::PauseCommit { .. }
+                | Self::SeekPrepare { .. }
+                | Self::SeekCommit { .. }
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum QuicHostEvent {
     PeerAuthenticated {
@@ -577,6 +627,7 @@ pub enum QuicHostEvent {
 }
 
 pub struct QuicServer {
+    provider_room: Arc<Mutex<ProviderRoomAuthority>>,
     endpoint: Endpoint,
     certificate: CertificateDer<'static>,
     credentials: RoomCredentials,
@@ -622,6 +673,9 @@ impl QuicServer {
             shared_controls: None,
             invite_expires_at_ms: None,
             peers: AuthenticatedPeers::default(),
+            provider_room: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::providers::selection::ProviderRoomAuthority::default(),
+            )),
         })
     }
 
@@ -655,6 +709,11 @@ impl QuicServer {
 
     /// Share the host's Shared-Controls flag so request routing can grant or
     /// deny guest control requests at the transport boundary.
+    pub fn with_provider_room(mut self, state: Arc<Mutex<ProviderRoomAuthority>>) -> Self {
+        self.provider_room = state;
+        self
+    }
+
     pub fn with_shared_controls(mut self, flag: std::sync::Arc<AtomicBool>) -> Self {
         self.shared_controls = Some(flag);
         self
@@ -785,6 +844,7 @@ impl QuicServer {
                 host_device_id: self.host_device_id.clone(),
                 invite_expires_at_ms: self.invite_expires_at_ms,
                 peers: self.peers.clone(),
+                provider_room: self.provider_room.clone(),
             };
             let event_callback = self.event_callback.clone();
             let local_media = self.local_media.clone();
@@ -942,6 +1002,7 @@ impl Drop for AuthenticatedPeerGuard {
 /// drift apart as separate arguments threaded through the request handlers.
 #[derive(Debug, Clone)]
 struct HostAuthorization {
+    provider_room: Arc<Mutex<ProviderRoomAuthority>>,
     /// The host's own device id. A guest may never claim it: host-authored
     /// events are recognised by sender, so impersonating the host would let a
     /// guest speak with the host's authority (MP-15).
@@ -961,6 +1022,9 @@ impl HostAuthorization {
             host_device_id: host_device_id.to_owned(),
             invite_expires_at_ms: None,
             peers: AuthenticatedPeers::default(),
+            provider_room: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::providers::selection::ProviderRoomAuthority::default(),
+            )),
         }
     }
 }
@@ -1010,6 +1074,35 @@ impl QuicClient {
         match response {
             ServerResponse::AuthAccept(accept) => Ok((client, accept)),
             ServerResponse::AuthReject { code } => Err(QuicError::Auth(code)),
+            _ => Err(QuicError::UnexpectedResponse),
+        }
+    }
+
+    pub async fn provider_selection(&self) -> Result<ProviderRoomDescriptor, QuicError> {
+        match self
+            .send_control(ClientRequest::ProviderSelectionGet {
+                seq: self.next_seq(),
+                sender: self.identity.device_id.clone(),
+            })
+            .await?
+        {
+            ServerResponse::ProviderSelectionSnapshot { descriptor } => Ok(descriptor),
+            _ => Err(QuicError::UnexpectedResponse),
+        }
+    }
+    pub async fn acknowledge_provider(
+        &self,
+        acknowledgement: SelectionAck,
+    ) -> Result<bool, QuicError> {
+        match self
+            .send_control(ClientRequest::ProviderSelectionAck {
+                seq: self.next_seq(),
+                sender: self.identity.device_id.clone(),
+                acknowledgement,
+            })
+            .await?
+        {
+            ServerResponse::ProviderSelectionAckResult { accepted } => Ok(accepted),
             _ => Err(QuicError::UnexpectedResponse),
         }
     }
@@ -1643,10 +1736,19 @@ async fn handle_connection(
     if let Some(ref tx) = event_tx {
         let connection_for_events = connection.clone();
         let tx_for_events = tx.clone();
+        let session_for_events = session.clone();
         tokio::spawn(async move {
             let mut rx = tx_for_events.subscribe();
+            let session = session_for_events;
             loop {
                 let Ok(envelope) = rx.recv().await else { break };
+                if matches!(
+                    envelope.event,
+                    ServerEvent::ProviderSelection { .. } | ServerEvent::ProviderPlayback { .. }
+                ) && lock_session(&session).authenticated_device_id.is_none()
+                {
+                    continue;
+                }
                 let Ok((mut send, _)) = connection_for_events.open_bi().await else {
                     break;
                 };
@@ -1789,6 +1891,7 @@ async fn handle_request(
         ClientRequest::HelloAuth { hello, auth } => {
             let authenticated_device_id = hello.device_id.clone();
             let guest_display_name = hello.display_name.clone();
+            let peer_version = hello.provider_selection_version;
             match validate_handshake(
                 &credentials,
                 &replay_guard,
@@ -1797,7 +1900,7 @@ async fn handle_request(
                 host_display_name,
                 &authorization,
             ) {
-                ServerResponse::AuthAccept(accept) => {
+                ServerResponse::AuthAccept(mut accept) => {
                     let mut session = lock_session(&session);
                     // MP-18: `validate_handshake` can only pre-check the slot —
                     // two connections may both find it free. The claim is what
@@ -1809,6 +1912,17 @@ async fn handle_request(
                             session.authenticated_device_id = Some(authenticated_device_id.clone());
                             session.authenticated_display_name = Some(guest_display_name.clone());
                             drop(session);
+                            {
+                                let mut room = authorization
+                                    .provider_room
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                room.peer_version = peer_version;
+                                room.peer_connected = true;
+                                room.guest_ack = None;
+                                accept.provider_room = (peer_version == Some(SELECTION_VERSION))
+                                    .then(|| room.descriptor.clone());
+                            }
 
                             if let Some(ref cb) = event_callback {
                                 cb(QuicHostEvent::PeerAuthenticated {
@@ -1826,6 +1940,50 @@ async fn handle_request(
                 rejection => rejection,
             }
         }
+        ClientRequest::ProviderSelectionGet { seq, sender } => {
+            match validate_provider_sequence(&session, &sender, seq) {
+                Ok(()) => ServerResponse::ProviderSelectionSnapshot {
+                    descriptor: authorization
+                        .provider_room
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .descriptor
+                        .clone(),
+                },
+                Err(code) => ServerResponse::AuthReject { code },
+            }
+        }
+        ClientRequest::ProviderSelectionAck {
+            seq,
+            sender,
+            acknowledgement,
+        } => match validate_provider_sequence(&session, &sender, seq) {
+            Ok(()) => {
+                let accepted = authorization
+                    .provider_room
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .acknowledge(acknowledgement)
+                    .is_ok();
+                if accepted
+                    && !authorization
+                        .provider_room
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .guest_ready()
+                {
+                    if let Some(coord) = &coordinator {
+                        let mut c = coord.lock().unwrap_or_else(|e| e.into_inner());
+                        c.guest_ready(crate::sync::consensus::ParticipantReadiness::not_ready(
+                            "provider content",
+                        ));
+                        c.update_readiness_consensus(5_000);
+                    }
+                }
+                ServerResponse::ProviderSelectionAckResult { accepted }
+            }
+            Err(code) => ServerResponse::AuthReject { code },
+        },
         ClientRequest::Heartbeat { seq, sender, .. } => {
             match validate_authenticated_sequence(&session, &sender, seq) {
                 Ok(()) => ServerResponse::HeartbeatAck {
@@ -1894,6 +2052,13 @@ async fn handle_request(
             buffer_ahead_ms,
         } => match validate_authenticated_sequence(&session, &sender, seq) {
             Ok(()) => {
+                let ready = ready && {
+                    let room = authorization
+                        .provider_room
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    room.descriptor.selection.is_none() || room.guest_ready()
+                };
                 // Readiness consensus ONLY: pressing Ready must never by-pass
                 // the distributed play protocol (PLAY_PREPARE → PLAY_READY →
                 // PLAY_COMMIT). The coordinator records guest readiness and —
@@ -1939,6 +2104,13 @@ async fn handle_request(
             buffer_ahead_ms,
         } => match validate_authenticated_sequence(&session, &sender, seq) {
             Ok(()) => {
+                let ready = ready && {
+                    let room = authorization
+                        .provider_room
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    room.descriptor.selection.is_none() || room.guest_ready()
+                };
                 if let Some(ref cb) = event_callback {
                     cb(QuicHostEvent::GuestPlayReady {
                         broadcaster_device_id: sender,
@@ -1984,6 +2156,13 @@ async fn handle_request(
             buffer_ahead_ms,
         } => match validate_authenticated_sequence(&session, &sender, seq) {
             Ok(()) => {
+                let ready = ready && {
+                    let room = authorization
+                        .provider_room
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    room.descriptor.selection.is_none() || room.guest_ready()
+                };
                 if let Some(ref cb) = event_callback {
                     cb(QuicHostEvent::GuestSeekReady {
                         broadcaster_device_id: sender,
@@ -2329,6 +2508,29 @@ async fn handle_request(
     Ok(())
 }
 
+fn validate_provider_sequence(
+    session: &Arc<Mutex<ConnectionSession>>,
+    sender: &str,
+    seq: u64,
+) -> Result<(), String> {
+    validate_authenticated_sequence(session, sender, seq)?;
+    let state = lock_session(session);
+    let current = state.authenticated_peer.as_ref().is_some_and(|guard| {
+        guard
+            .peers
+            .slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            == Some(&(guard.device_id.clone(), guard.generation))
+    });
+    if current {
+        Ok(())
+    } else {
+        Err("PROVIDER_CONNECTION_REPLACED".into())
+    }
+}
+
 fn validate_authenticated_sequence(
     session: &Arc<Mutex<ConnectionSession>>,
     sender: &str,
@@ -2455,6 +2657,20 @@ fn validate_handshake(
         };
     }
 
+    if authorization
+        .provider_room
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .descriptor
+        .selection
+        .is_some()
+        && hello.provider_selection_version != Some(SELECTION_VERSION)
+    {
+        return ServerResponse::AuthReject {
+            code: "PROVIDER_SELECTION_VERSION_UNSUPPORTED".into(),
+        };
+    }
+
     if !replay_guard.accept_once(&hello.device_id, &auth.invite_nonce) {
         return ServerResponse::AuthReject {
             code: "REPLAYED_AUTH".to_string(),
@@ -2476,6 +2692,7 @@ fn validate_handshake(
         room_role: "guest".to_string(),
         host_display_name,
         host_device_id: authorization.host_device_id.clone(),
+        provider_room: None,
     })
 }
 
@@ -4216,6 +4433,9 @@ mod tests {
                 host_device_id: TEST_DEVICE_ID.to_string(),
                 invite_expires_at_ms: expires_at_ms,
                 peers: super::AuthenticatedPeers::default(),
+                provider_room: std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::providers::selection::ProviderRoomAuthority::default(),
+                )),
             };
             super::validate_handshake(
                 &credentials,
@@ -4728,5 +4948,84 @@ mod tests {
 
         client.wait_idle().await;
         server_task.abort();
+    }
+}
+
+#[cfg(test)]
+mod provider_handshake_tests {
+    use super::*;
+    #[test]
+    fn optional_negotiation_preserves_legacy_local_handshake_and_rejects_incompatible_provider_peer(
+    ) {
+        let credentials = RoomCredentials::generate();
+        let identity = DeviceIdentity::new_ephemeral();
+        let authorization =
+            HostAuthorization::for_tests(&DeviceIdentity::new_ephemeral().device_id);
+        let hello = HelloPayload::local("Guest", &identity);
+        let mut legacy_json = serde_json::to_value(&hello).unwrap();
+        legacy_json
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_selection_version");
+        let legacy: HelloPayload = serde_json::from_value(legacy_json).unwrap();
+        assert_eq!(legacy.provider_selection_version, None);
+        let decide = |hello: HelloPayload, authorization: &HostAuthorization| {
+            let hash = credentials.join_secret_hash();
+            let nonce = "test-provider-negotiation";
+            let auth = AuthRequest {
+                room_id: credentials.room_id.clone(),
+                join_secret_hash: hash.clone(),
+                invite_nonce: nonce.into(),
+                device_signature: identity.sign_auth_request(&credentials.room_id, &hash, nonce),
+            };
+            validate_handshake(
+                &credentials,
+                &AuthReplayGuard::default(),
+                hello,
+                auth,
+                "Host".into(),
+                authorization,
+            )
+        };
+        assert!(matches!(
+            decide(legacy.clone(), &authorization),
+            ServerResponse::AuthAccept(_)
+        ));
+        let selected = crate::providers::content::parse_content(
+            "youtube",
+            "https://www.youtube.com/watch?v=abcdefghijk",
+        )
+        .unwrap();
+        authorization
+            .provider_room
+            .lock()
+            .unwrap()
+            .publish(
+                &credentials.room_id,
+                &selected,
+                crate::providers::selection::ContentEvidence {
+                    title: "Public fixture title".into(),
+                    duration_ms: 90_000,
+                    player_content_id: Some("abcdefghijk".into()),
+                },
+            )
+            .unwrap();
+        assert!(
+            matches!(decide(legacy, &authorization), ServerResponse::AuthReject { code } if code == "PROVIDER_SELECTION_VERSION_UNSUPPORTED")
+        );
+        let mut future = hello.clone();
+        future.provider_selection_version = Some(2);
+        assert!(
+            matches!(decide(future, &authorization), ServerResponse::AuthReject { code } if code == "PROVIDER_SELECTION_VERSION_UNSUPPORTED")
+        );
+        assert!(matches!(
+            decide(hello, &authorization),
+            ServerResponse::AuthAccept(_)
+        ));
+        let old_accept = serde_json::json!({"session_id":"legacy","room_role":"guest","host_display_name":"Host","host_device_id":authorization.host_device_id});
+        assert!(serde_json::from_value::<AuthAccept>(old_accept)
+            .unwrap()
+            .provider_room
+            .is_none());
     }
 }

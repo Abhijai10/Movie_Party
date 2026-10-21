@@ -79,6 +79,17 @@ pub fn run() {
             // scheduler worker.
             let runtime = app.state::<app_runtime::AppRuntime>();
             runtime.init_db();
+            let provider_app = app.handle().clone();
+            runtime.set_room_browser_launcher(std::sync::Arc::new(move |provider, url| {
+                let operations = provider_app.state::<ChromeOperations>();
+                let _operation = operations.0.lock().unwrap_or_else(|e| e.into_inner());
+                use crate::providers::chrome::{find_chrome, default_chrome_candidates, build_launch_plan, launch_managed_chrome};
+                let root = prepare_managed_profile(&provider_app, provider)?;
+                let executable = find_chrome(&default_chrome_candidates()).map_err(|e| e.to_string())?;
+                let plan = build_launch_plan(executable, &root, provider, url).map_err(|e| e.to_string())?;
+                launch_managed_chrome(plan).map_err(|e| e.to_string())
+            }));
+
             runtime.check_overdue_schedules();
             runtime.setup_real_preload_executor();
             runtime.spawn_scheduler_worker();
@@ -167,6 +178,7 @@ pub fn run() {
             confirm_provider_content,
             browse_provider_content,
             validate_provider_content,
+            retry_room_provider,
             reset_provider_session,
             create_schedule,
             create_and_broadcast_schedule,
@@ -885,6 +897,13 @@ fn navigate_provider_title(
 
     runtime.navigate_provider_to(&provider_id, &url)?;
     Ok(runtime.update_provider_readiness(crate::providers::sync::ProviderReadiness::Navigating))
+}
+
+#[tauri::command]
+fn retry_room_provider(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<app_runtime::AppSnapshot, String> {
+    runtime.retry_room_provider()
 }
 
 #[tauri::command]

@@ -85,6 +85,17 @@ impl ManagedChromeSession {
                 .as_ref()
                 .filter(|i| i.provider_id == "youtube")
                 .map(|i| format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", i.content_id));
+            let evidence = value
+                .get("durationMs")
+                .and_then(|v| v.as_u64())
+                .map(|duration_ms| crate::providers::selection::ContentEvidence {
+                    title: title.clone(),
+                    duration_ms,
+                    player_content_id: value
+                        .get("playerContentId")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned),
+                });
             let mut tab = ContentTab {
                 target_id: target.id,
                 title,
@@ -108,6 +119,7 @@ impl ManagedChromeSession {
                         .get("ready")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false),
+                evidence,
                 issue,
                 selection_key: String::new(),
             };
@@ -213,7 +225,10 @@ pub(super) const OBSERVE_PAGE: &str = r#"(() => {
    const r=v.getBoundingClientRect(); return r.width>0 && r.height>0;
  });
  const v=videos.length===1 ? videos[0] : null;
+ const playerContentId=v?.closest('ytd-watch-flexy[video-id], [data-video-id], [data-videoid], [data-content-id]');
+ const contentId=playerContentId?.getAttribute('video-id') || playerContentId?.getAttribute('data-video-id') || playerContentId?.getAttribute('data-videoid') || playerContentId?.getAttribute('data-content-id') || (v && document.querySelector('meta[itemprop=videoId]')?.content) || null;
  return {url:location.href,
+ durationMs:v && Number.isFinite(v.duration) && v.duration>0 ? Math.round(v.duration*1000) : null, playerContentId:contentId,
  title:document.querySelector('meta[property="og:title"]')?.content || document.title || '',
  documentId:String(performance.timeOrigin),focused:document.hasFocus(),visible:document.visibilityState==='visible',
  ready:Boolean(v && v.readyState>=2 && !v.error && Number.isFinite(v.currentTime))};

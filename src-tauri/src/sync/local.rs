@@ -37,6 +37,7 @@ pub struct ScheduledPlayback {
 
 #[derive(Clone, Debug)]
 pub struct LocalSyncCoordinator {
+    pub provider_context: Option<crate::providers::selection::SelectionContext>,
     pub room_state: RoomState,
     pub host_position_ms: u64,
     pub guest_position_ms: u64,
@@ -70,6 +71,7 @@ pub struct LocalSyncCoordinator {
 impl LocalSyncCoordinator {
     pub fn new() -> Self {
         Self {
+            provider_context: None,
             room_state: RoomState::Lobby,
             host_position_ms: 0,
             guest_position_ms: 0,

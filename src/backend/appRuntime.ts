@@ -153,6 +153,11 @@ export type AppSnapshot = {
     data: string;
     createdHostTimeUs: number;
   }>;
+  providerContent?: {
+    selection: { version: number; provider: string; content_id: string; canonical_url: string; title: string; state_epoch: string; host_sequence: number; content_revision: number } | null;
+    localState: "UNSELECTED" | "OPENING" | "CONTENT_CONFIRMED" | "PLAYBACK_READY" | "ERROR" | "AUTH_REQUIRED";
+    peerState: "UNSELECTED" | "OPENING" | "CONTENT_CONFIRMED" | "PLAYBACK_READY" | "ERROR" | "AUTH_REQUIRED";
+  } | null;
   provider: {
     mode: string;
     providerId: string | null;
@@ -1028,3 +1033,5 @@ export async function listenToSnapshots(
     onSnapshot(e.payload);
   });
 }
+
+export async function retryRoomProvider(): Promise<AppSnapshot> { return invoke<AppSnapshot>("retry_room_provider"); }

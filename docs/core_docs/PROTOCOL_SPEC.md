@@ -379,6 +379,10 @@ Actual chunk bytes use dedicated QUIC streams.
 221 PROVIDER_ERROR
 222 PROVIDER_MODE_REQUEST
 223 PROVIDER_MODE_RESULT
+224 PROVIDER_SELECTION
+225 PROVIDER_SELECTION_GET
+226 PROVIDER_SELECTION_ACK
+227 PROVIDER_PLAYBACK
 ```
 
 ## Errors
@@ -1515,6 +1519,64 @@ increment protocol major.
 If adding optional fields:
 
 increment minor if appropriate.
+
+## Provider selection extension, version 1 (Batch 3)
+
+The existing JSON envelope remains version 1.0. This extension is negotiated
+independently: authenticated `HelloPayload` advertises optional
+`provider_selection_version: 1`; `AuthAccept` carries optional `provider_room`
+only for peers advertising that version. A provider room rejects absent or
+unsupported capabilities with `PROVIDER_SELECTION_VERSION_UNSUPPORTED` after
+room authentication. Local Perfect accepts legacy Hello/AuthAccept shapes;
+old peers never receive provider-only events. A Local Perfect room with an
+incompatible connected peer cannot convert to Provider Sync. No existing ID
+or message meaning is reassigned. Registry IDs remain descriptive; the wire
+uses Serde string tags as specified in ADR-0001.
+
+`ProviderRoomDescriptor` contains `version`, UUID `state_epoch`, and nullable
+`selection`. The host alone publishes `ProviderSelection`: `version`,
+`room_id`, `state_epoch`, positive `host_sequence`, positive `content_revision`,
+canonical `provider`, `content_id`, validated `canonical_url`, bounded `title`,
+and public player `evidence` (title, finite positive duration, optional public
+player content ID). Changes increase both counters; duplicate unchanged
+selections do not. Guests validate room, immutable epoch, supported version,
+canonical identity/URL, counters and evidence before applying. An older
+selection, same-sequence conflict, revision rewind, epoch replacement or
+selection clearing cannot overwrite accepted content. Joining and reconnecting
+use AuthAccept, then authenticated `ProviderSelectionGet` repairs lost events.
+
+`ProviderSelection` server events are accepted only from the pinned host.
+There is no guest selection-write request. `ProviderSelectionAck` is an
+authenticated guest request containing exact epoch/host sequence/content
+revision, monotonic `acknowledgement_sequence`, state and observed evidence.
+States are `UNSELECTED`, `OPENING`, `CONTENT_CONFIRMED`, `PLAYBACK_READY`,
+`ERROR`, `AUTH_REQUIRED`. Confirmation and readiness require matching actual
+player evidence, not merely an equal URL or open homepage. YouTube requires
+the public player content ID; subscription fallback compares the observed
+title and duration within 1.5 seconds, plus public ID where exposed. This
+fallback is not cryptographic asset verification. Missing or mismatched
+evidence fails closed; live/infinite-duration playback cannot become ready.
+
+The guest checks selection and resends its current acknowledgement every two
+seconds, with five-second request timeouts. Identical acknowledgement payloads
+may be repeated on fresh authenticated transport sequences. Host readiness
+expires twelve seconds after the last valid receipt; generic ReadyState,
+PlayReady and SeekReady cannot bypass it. A replacement authenticated
+connection clears readiness and retires the old connection's provider RPC
+authority. Unverified loading reports error after 45 seconds; authentication
+remains manual and explicit retry reopens only the authoritative selection.
+
+`ProviderPlayback` wraps playback prepare/commit and coordinator/room state
+events with `SelectionContext` (epoch, host sequence, content revision).
+Provider guests reject plain or mismatched-context playback events; Local
+Perfect continues using its existing messages. Selection changes and loss of
+verified readiness cancel pending operations and pause strict synchronization.
+Host-only controls remain the default; existing explicitly shared controls
+and explicit guest-abandon/solo policy are retained.
+
+No provider cookies, credentials, login tokens, browser storage or encryption
+keys appear in this protocol. Both peers independently use their own managed
+browser and authorized provider account. Provider Shared remains disabled.
 
 ---
 

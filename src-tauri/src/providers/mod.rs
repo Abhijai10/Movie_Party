@@ -6,3 +6,5 @@ pub mod netflix;
 pub mod prime;
 pub mod sync;
 pub mod youtube;
+
+pub mod selection;

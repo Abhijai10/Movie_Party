@@ -227,6 +227,8 @@ pub struct ContentTab {
     pub focused: bool,
     pub visible: bool,
     pub playback_ready: bool,
+    #[serde(default)]
+    pub evidence: Option<super::selection::ContentEvidence>,
     pub issue: Option<String>,
 }
 impl ContentTab {
@@ -347,6 +349,7 @@ mod tests {
             focused: false,
             visible: false,
             playback_ready: true,
+            evidence: None,
             issue: None,
         }
     }

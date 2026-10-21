@@ -1,4 +1,5 @@
 mod provider_chooser;
+mod provider_room;
 use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
@@ -100,6 +101,7 @@ pub struct AppSnapshot {
     pub call: CallSnapshot,
     pub call_signals: Vec<CallSignalSnapshot>,
     pub provider: ProviderSnapshot,
+    pub provider_content: Option<provider_room::ProviderContentSnapshot>,
     pub chat: Vec<ChatSnapshot>,
     pub reactions: Vec<ReactionSnapshot>,
     pub ghost_mode: bool,
@@ -177,6 +179,7 @@ impl Default for AppSnapshot {
                 camera_notice: None,
             },
             call_signals: vec![],
+            provider_content: None,
             provider: ProviderSnapshot {
                 mode: "LOCAL_PERFECT".to_string(),
                 provider_id: None,
@@ -455,6 +458,7 @@ struct RuntimeInner {
     preload_executor: Mutex<Arc<dyn crate::scheduling::preload::PreloadExecutor>>,
     /// Count of preload executions (tests + diagnostics).
     preload_executions: std::sync::atomic::AtomicU64,
+    room_browser_launcher: RwLock<Option<Arc<provider_room::RoomBrowserLauncher>>>,
     started_at: Instant,
 }
 
@@ -532,6 +536,11 @@ struct AppRuntimeState {
     call_signal_ledger: CallSignalLedger,
     provider: ProviderSnapshot,
     provider_chooser: crate::providers::content::ChooserSnapshot,
+    provider_room: Arc<Mutex<crate::providers::selection::ProviderRoomAuthority>>,
+    guest_provider: crate::providers::selection::GuestSelection,
+    provider_selection_task: Option<tokio::task::JoinHandle<()>>,
+    provider_open_attempt: Option<(String, u64)>,
+    provider_open_started: Option<Instant>,
     chat: Vec<ChatSnapshot>,
     reactions: Vec<ReactionSnapshot>,
     ghost_mode: bool,
@@ -801,6 +810,7 @@ impl AppRuntime {
 
         Self {
             inner: Arc::new(RuntimeInner {
+                room_browser_launcher: RwLock::new(None),
                 state: Mutex::new(AppRuntimeState {
                     screen: "HOME".to_string(),
                     credentials: None,
@@ -855,6 +865,13 @@ impl AppRuntime {
                     call_signals: Vec::new(),
                     call_signal_ledger: CallSignalLedger::default(),
                     provider_chooser: crate::providers::content::ChooserSnapshot::default(),
+                    provider_room: Arc::new(Mutex::new(
+                        crate::providers::selection::ProviderRoomAuthority::default(),
+                    )),
+                    guest_provider: crate::providers::selection::GuestSelection::default(),
+                    provider_selection_task: None,
+                    provider_open_attempt: None,
+                    provider_open_started: None,
                     provider: ProviderSnapshot {
                         mode: "LOCAL_PERFECT".to_string(),
                         provider_id: None,
@@ -2888,6 +2905,11 @@ impl AppRuntime {
             if let Some(task) = state.buffer_status_task.take() {
                 task.abort();
             }
+            if let Some(task) = state.provider_selection_task.take() {
+                task.abort();
+            }
+            state.guest_provider = crate::providers::selection::GuestSelection::default();
+            state.provider_open_attempt = None;
             if let Some(task) = state.provider_watch_task.take() {
                 task.abort();
             }
@@ -2932,6 +2954,20 @@ impl AppRuntime {
 
         let identity = self.inner.identity();
         let credentials = RoomCredentials::generate();
+        let provider_room = Arc::new(Mutex::new(
+            crate::providers::selection::ProviderRoomAuthority::default(),
+        ));
+        if keep_provider_session {
+            let tab = self.lock().provider_chooser.selected.clone();
+            if let Some(tab) = tab {
+                if let (Some(identity), Some(evidence)) = (tab.identity, tab.evidence) {
+                    provider_room
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .publish(&credentials.room_id, &identity, evidence)?;
+                }
+            }
+        }
 
         // remember the local path for the file-moved gate.
         self.lock().local_media_path = media_path
@@ -2989,7 +3025,8 @@ impl AppRuntime {
             )
         }
         .map_err(|e| e.to_string())?
-        .with_invite_expiry(invite_expires_at_ms);
+        .with_invite_expiry(invite_expires_at_ms)
+        .with_provider_room(provider_room.clone());
 
         let bound_addr = server.local_addr().map_err(|e| e.to_string())?;
         let cert_der = server.certificate().as_ref().to_vec();
@@ -3023,6 +3060,13 @@ impl AppRuntime {
             let state = self.lock();
             let my_id = state.local_participant.id.clone();
             let mut coord = LocalSyncCoordinator::new();
+            coord.provider_context = provider_room
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .descriptor
+                .selection
+                .as_ref()
+                .map(|s| s.context());
             coord.coordinator_local_id = my_id;
             coord.coordinator_room_id = credentials.room_id.clone();
             coord.coordinator_tx = event_tx_arc.as_ref().clone();
@@ -3037,12 +3081,22 @@ impl AppRuntime {
                         seq: coord_arg.coordinator_event_seq,
                         sender: sender.to_string(),
                         sent_mono_us: monotonic_us(),
-                        event: QuicServerEvent::CoordinatorStateUpdate {
-                            host_ready: coord_arg.host_ready.player_ready,
-                            guest_ready: coord_arg.guest_ready.player_ready,
-                            coordinator_play_state: format!("{:?}", coord_arg.room_state)
-                                .to_ascii_uppercase(),
-                            buffer_ahead_ms: coord_arg.host_ready.buffer_ahead_ms,
+                        event: {
+                            let event = QuicServerEvent::CoordinatorStateUpdate {
+                                host_ready: coord_arg.host_ready.player_ready,
+                                guest_ready: coord_arg.guest_ready.player_ready,
+                                coordinator_play_state: format!("{:?}", coord_arg.room_state)
+                                    .to_ascii_uppercase(),
+                                buffer_ahead_ms: coord_arg.host_ready.buffer_ahead_ms,
+                            };
+                            if let Some(context) = &coord_arg.provider_context {
+                                QuicServerEvent::ProviderPlayback {
+                                    context: context.clone(),
+                                    event: Box::new(event),
+                                }
+                            } else {
+                                event
+                            }
                         },
                     });
                 },
@@ -3059,6 +3113,7 @@ impl AppRuntime {
 
         {
             let mut state = self.lock();
+            state.provider_room = provider_room;
             state.shared_controls_flag = shared_controls_flag;
             state.sync_coordinator = coordinator.clone();
             state.credentials = Some(credentials);
@@ -3154,6 +3209,7 @@ impl AppRuntime {
             self.lock().host_event_task = Some(task);
         }
 
+        self.spawn_provider_selection_worker();
         let snapshot = self.snapshot();
         self.emit_ok(snapshot.clone());
         Ok(snapshot)
@@ -3215,6 +3271,11 @@ impl AppRuntime {
             if let Some(task) = state.buffer_status_task.take() {
                 task.abort();
             }
+            if let Some(task) = state.provider_selection_task.take() {
+                task.abort();
+            }
+            state.guest_provider = crate::providers::selection::GuestSelection::default();
+            state.provider_open_attempt = None;
             if let Some(task) = state.provider_watch_task.take() {
                 task.abort();
             }
@@ -3299,6 +3360,10 @@ impl AppRuntime {
             return Err("MP-NET-001 authenticated host identity mismatch".to_string());
         }
 
+        if let Some(descriptor) = &auth_accept.provider_room {
+            descriptor.validate(&credentials.room_id)?;
+        }
+        let provider_descriptor = auth_accept.provider_room.clone();
         {
             let mut state = self.lock();
             state.credentials = Some(credentials);
@@ -3324,6 +3389,10 @@ impl AppRuntime {
             sync_room_snapshot(&mut state);
         }
 
+        if let Some(descriptor) = provider_descriptor {
+            self.receive_provider_descriptor(descriptor)?;
+        }
+        self.spawn_provider_selection_worker();
         // coordinator_local_id set once in create_local_party for Host; Guest uses AppRuntimeState only.
 
         self.spawn_guest_peer_event_listener();
@@ -3344,7 +3413,9 @@ impl AppRuntime {
             tokio::spawn(async move {
                 // Small delay to let the connection stabilize
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                let _ = runtime.guest_fetch_media().await;
+                if runtime.lock().guest_provider.selection().is_none() {
+                    let _ = runtime.guest_fetch_media().await;
+                }
             });
         }
 
@@ -3440,6 +3511,15 @@ impl AppRuntime {
                 self.inner.emit(snapshot);
             }
             QuicHostEvent::PeerDisconnected { device_id } => {
+                {
+                    let state = self.lock();
+                    let mut room = state
+                        .provider_room
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    room.peer_connected = false;
+                    room.guest_ack = None;
+                }
                 let is_ours = {
                     let state = self.lock();
                     state
@@ -4041,6 +4121,12 @@ impl AppRuntime {
                 "MP-NET-001 authenticated host identity mismatch".to_string(),
             ));
         }
+        if let Some(descriptor) = auth_accept.provider_room.clone() {
+            self.receive_provider_descriptor(descriptor)
+                .map_err(ReconnectFailure::Terminal)?;
+        } else if self.lock().guest_provider.selection().is_some() {
+            return Err(ReconnectFailure::Terminal("Provider selection negotiation was lost. Rejoin with compatible Movie Party versions.".into()));
+        }
         let canonical_room_state = client
             .heartbeat_room_state()
             .await
@@ -4061,6 +4147,7 @@ impl AppRuntime {
             state.error = None;
             sync_room_snapshot(&mut state);
         }
+        self.spawn_provider_selection_worker();
         self.spawn_guest_peer_event_listener();
         self.spawn_clock_calibration();
         self.spawn_guest_heartbeat();
@@ -4155,6 +4242,76 @@ impl AppRuntime {
         envelope: &EventEnvelope,
         event: QuicServerEvent,
     ) {
+        let event = match event {
+            QuicServerEvent::ProviderPlayback { context, event } => {
+                let state = inner.lock();
+                let valid = if Self::is_host_role(&state) {
+                    envelope.sender == state.local_participant.id
+                        && state
+                            .provider_room
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .descriptor
+                            .selection
+                            .as_ref()
+                            .is_some_and(|s| s.context() == context)
+                } else {
+                    state
+                        .invite
+                        .as_ref()
+                        .is_some_and(|i| i.host_device_id == envelope.sender)
+                        && state
+                            .guest_provider
+                            .selection()
+                            .is_some_and(|s| s.context() == context)
+                } && state
+                    .credentials
+                    .as_ref()
+                    .is_some_and(|c| c.room_id == envelope.room_id)
+                    && event.is_playback()
+                    && envelope.v_major == crate::protocol::ENVELOPE_V_MAJOR
+                    && envelope.v_minor == crate::protocol::ENVELOPE_V_MINOR;
+                if !valid {
+                    return;
+                }
+                *event
+            }
+            event => {
+                if event.is_playback() && inner.lock().guest_provider.selection().is_some() {
+                    return;
+                }
+                event
+            }
+        };
+        if let QuicServerEvent::ProviderSelection { selection } = &event {
+            let permitted = {
+                let state = inner.lock();
+                !Self::is_host_role(&state)
+                    && state
+                        .invite
+                        .as_ref()
+                        .is_some_and(|i| i.host_device_id == envelope.sender)
+                    && state
+                        .credentials
+                        .as_ref()
+                        .is_some_and(|c| c.room_id == envelope.room_id)
+                    && envelope.v_major == crate::protocol::ENVELOPE_V_MAJOR
+                    && envelope.v_minor == crate::protocol::ENVELOPE_V_MINOR
+                    && state.guest_provider.descriptor.is_some()
+            };
+            if permitted {
+                let runtime = Self::from_inner(inner);
+                let descriptor = crate::providers::selection::ProviderRoomDescriptor {
+                    version: selection.version,
+                    state_epoch: selection.state_epoch.clone(),
+                    selection: Some(selection.clone()),
+                };
+                if let Err(error) = runtime.receive_provider_descriptor(descriptor) {
+                    runtime.provider_selection_error(error);
+                }
+            }
+            return;
+        }
         let seq = envelope.seq;
         let sender = &envelope.sender;
 
@@ -4216,6 +4373,10 @@ impl AppRuntime {
             }
 
             match event {
+                QuicServerEvent::ProviderPlayback { .. }
+                | QuicServerEvent::ProviderSelection { .. } => {
+                    unreachable!("selection handled before common stream watermark")
+                }
                 QuicServerEvent::PlayPrepare {
                     operation_id,
                     target_position_ms,
@@ -4895,6 +5056,22 @@ impl AppRuntime {
     /// Called from the coordinator callback (the fn pointer stored on
     /// `LocalSyncCoordinator::on_coordinator_state_changed`).
     fn send_host_event(state: &mut AppRuntimeState, event: QuicServerEvent) {
+        let event = if event.is_playback() {
+            let room = state
+                .provider_room
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(selection) = &room.descriptor.selection {
+                QuicServerEvent::ProviderPlayback {
+                    context: selection.context(),
+                    event: Box::new(event),
+                }
+            } else {
+                event
+            }
+        } else {
+            event
+        };
         if let Some(tx) = state.host_event_tx.as_ref() {
             let seq = {
                 let mut coordinator = state
@@ -4929,6 +5106,15 @@ impl AppRuntime {
     pub fn host_play(&self) -> AppSnapshot {
         let snapshot = {
             let mut state = self.lock();
+            let provider_peer_ready = Self::provider_peer_selection_ready(&state);
+            if !provider_peer_ready {
+                state.error = Some(
+                    "Wait for the guest to verify the selected provider content before playback."
+                        .into(),
+                );
+                return snapshot_from_state(&state);
+            }
+
             // AUD-16: an ended room must not be restarted by a play request.
             //
             // `apply_end_of_media` leaves the room `Ended`; nothing below this
@@ -5074,6 +5260,15 @@ impl AppRuntime {
     pub fn request_play_countdown(&self) -> AppSnapshot {
         let snapshot = {
             let mut state = self.lock();
+            let provider_peer_ready = Self::provider_peer_selection_ready(&state);
+            if !provider_peer_ready {
+                state.error = Some(
+                    "Wait for the guest to verify the selected provider content before playback."
+                        .into(),
+                );
+                return snapshot_from_state(&state);
+            }
+
             if !Self::is_host_role(&state) {
                 state.error = Some("MP-CTRL-002 only the host can start the countdown".to_string());
                 sync_room_snapshot(&mut state);
@@ -5199,6 +5394,15 @@ impl AppRuntime {
     pub fn host_seek(&self, target_position_ms: u64, resume_after_seek: bool) -> AppSnapshot {
         let snapshot = {
             let mut state = self.lock();
+            let provider_peer_ready = Self::provider_peer_selection_ready(&state);
+            if !provider_peer_ready {
+                state.error = Some(
+                    "Wait for the guest to verify the selected provider content before playback."
+                        .into(),
+                );
+                return snapshot_from_state(&state);
+            }
+
             if state.pending_operation_id.is_some() {
                 return snapshot_from_state(&state);
             }
@@ -5540,6 +5744,12 @@ impl AppRuntime {
     /// when the media/player/provider prerequisite is genuinely usable. This
     /// never fabricates readiness from metadata or a user click alone.
     fn local_media_genuinely_ready(state: &AppRuntimeState) -> bool {
+        if state.guest_provider.selection().is_some() {
+            return state.guest_provider.state
+                == crate::providers::selection::ContentLoadingState::PlaybackReady
+                && state.provider.readiness
+                    == crate::providers::sync::ProviderReadiness::PlaybackReady;
+        }
         if state.provider.url.is_some() {
             // Provider / generic-link room: usable media requires the provider
             // page to be authenticated and playback-ready (Ready means the
@@ -5548,7 +5758,6 @@ impl AppRuntime {
             matches!(
                 state.provider.readiness,
                 crate::providers::sync::ProviderReadiness::PlaybackReady
-                    | crate::providers::sync::ProviderReadiness::Ready
             )
         } else {
             // Local Perfect: a real player is present, opened without error,
@@ -6566,6 +6775,14 @@ impl AppRuntime {
         if let Some(task) = state.buffer_status_task.take() {
             task.abort();
         }
+        if let Some(task) = state.provider_selection_task.take() {
+            task.abort();
+        }
+        state.guest_provider = crate::providers::selection::GuestSelection::default();
+        state.provider_room = Arc::new(Mutex::new(
+            crate::providers::selection::ProviderRoomAuthority::default(),
+        ));
+        state.provider_open_attempt = None;
         if let Some(task) = state.provider_watch_task.take() {
             task.abort();
         }
@@ -7825,6 +8042,7 @@ fn snapshot_from_state(state: &AppRuntimeState) -> AppSnapshot {
         },
         network: state.network.clone(),
         call: state.call.clone(),
+        provider_content: AppRuntime::provider_content_snapshot(state),
         provider: state.provider.clone(),
         call_signals: state.call_signals.clone(),
         chat: state.chat.clone(),

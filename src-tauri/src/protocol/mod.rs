@@ -165,6 +165,10 @@ pub enum MessageType {
     ProviderError = 221,
     ProviderModeRequest = 222,
     ProviderModeResult = 223,
+    ProviderSelection = 224,
+    ProviderSelectionGet = 225,
+    ProviderSelectionAck = 226,
+    ProviderPlayback = 227,
 
     // Errors
     Error = 250,
@@ -237,6 +241,10 @@ impl MessageType {
             221 => Some(Self::ProviderError),
             222 => Some(Self::ProviderModeRequest),
             223 => Some(Self::ProviderModeResult),
+            224 => Some(Self::ProviderSelection),
+            225 => Some(Self::ProviderSelectionGet),
+            226 => Some(Self::ProviderSelectionAck),
+            227 => Some(Self::ProviderPlayback),
             250 => Some(Self::Error),
             _ => None,
         }
@@ -398,6 +406,10 @@ mod tests {
             MessageType::ProviderError,
             MessageType::ProviderModeRequest,
             MessageType::ProviderModeResult,
+            MessageType::ProviderSelection,
+            MessageType::ProviderSelectionGet,
+            MessageType::ProviderSelectionAck,
+            MessageType::ProviderPlayback,
             MessageType::Error,
         ]
     }
@@ -441,7 +453,7 @@ mod tests {
                 *variant as u16
             );
         }
-        assert_eq!(all.len(), 61);
+        assert_eq!(all.len(), 65);
     }
 
     #[test]
@@ -479,7 +491,7 @@ mod tests {
             199,
             205,
             219,
-            224,
+            228,
             249,
             251,
             u16::MAX,

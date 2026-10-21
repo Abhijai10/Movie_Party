@@ -1,3 +1,4 @@
+import { ProviderRoomStatus } from "../providers/ProviderRoomStatus";
 import { motion } from "framer-motion";
 import { ArrowLeft, ArrowRight, Film, MessageCircle, Users, Video } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type SyntheticEvent } from "react";
@@ -56,7 +57,7 @@ export function LobbyView({
   const encodedDraftLength = useMemo(() => new TextEncoder().encode(draft).length, [draft]);
   const isDraftTooLong = encodedDraftLength > 2_000;
 
-  const title = snapshot.media?.filename ?? snapshot.provider.url ?? "A Private Cinema";
+  const title = snapshot.media?.filename ?? snapshot.providerContent?.selection?.title ?? snapshot.provider.url ?? "A Private Cinema";
   const source =
     snapshot.media != null
       ? "Local file"
@@ -161,7 +162,7 @@ export function LobbyView({
         </div>
       </header>
 
-      <main className="relative z-10 max-w-[1300px] mx-auto px-12 mt-6 h-[calc(100vh-120px)] grid grid-cols-12 gap-10">
+      <main className={`relative z-10 max-w-[1300px] mx-auto px-12 mt-6 h-[calc(100vh-120px)] grid grid-cols-12 gap-10 ${snapshot.providerContent ? "provider-room-lobby" : ""}`}>
         <motion.section
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -252,20 +253,22 @@ export function LobbyView({
             <div className="mt-4 space-y-3">
               <ParticipantCard
                 name={host?.displayName}
-                role="Host · You"
+                role={isHost ? "Host · You" : "Host"}
                 ready={host?.mediaReady}
-                isYou
+                isYou={isHost}
                 testId="participant-host"
               />
               <ParticipantCard
                 name={guest?.displayName}
-                role="Guest"
+                role={isHost ? "Guest" : "Guest · You"}
+                isYou={!isHost}
                 ready={guest?.mediaReady}
                 testId="participant-guest"
               />
             </div>
           </div>
 
+          <ProviderRoomStatus snapshot={snapshot} onSnapshot={onSnapshot} />
           <InviteCard inviteCode={inviteCode} />
 
           {isHost ? (

@@ -1446,6 +1446,42 @@ mod tests {
             .as_str()
             .is_some_and(|v| !v.is_empty()));
 
+        // Test-only public DOM identity around a real bundled video. A URL
+        // alone is unchanged while the active player's declared ID changes.
+        let media = STANDARD.encode(include_bytes!(
+            "../../../tests/fixtures/movie_party_test_320x240.mp4"
+        ));
+        let html = format!("<title>Public video fixture</title><section data-video-id='abcdefghijk'><video preload='auto' style='width:320px;height:240px' src='data:video/mp4;base64,{media}'></video></section>");
+        page.navigate(&format!("data:text/html;base64,{}", STANDARD.encode(html)))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let observed = loop {
+            let value = page.evaluate(content::OBSERVE_PAGE).unwrap();
+            let observed = value["result"]["value"].clone();
+            if observed["ready"].as_bool() == Some(true) {
+                break observed;
+            }
+            assert!(Instant::now() < deadline, "real fixture video did not load");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let evidence = crate::providers::selection::ContentEvidence {
+            title: observed["title"].as_str().unwrap().into(),
+            duration_ms: observed["durationMs"].as_u64().unwrap(),
+            player_content_id: observed["playerContentId"].as_str().map(str::to_owned),
+        };
+        assert!(evidence.valid_for("youtube", "abcdefghijk"));
+        page.evaluate(
+            "document.querySelector('[data-video-id]').setAttribute('data-video-id','dQw4w9WgXcQ')",
+        )
+        .unwrap();
+        let changed = page.evaluate(content::OBSERVE_PAGE).unwrap();
+        assert_eq!(changed["result"]["value"]["playerContentId"], "dQw4w9WgXcQ");
+        let changed_evidence = crate::providers::selection::ContentEvidence {
+            player_content_id: Some("dQw4w9WgXcQ".into()),
+            ..evidence.clone()
+        };
+        assert!(!evidence.matches(&changed_evidence, "youtube", "abcdefghijk"));
+
         session.close().expect("close");
     }
 
