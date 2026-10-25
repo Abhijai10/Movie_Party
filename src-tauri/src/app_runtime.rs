@@ -1,3 +1,4 @@
+pub mod companion;
 mod provider_chooser;
 mod provider_playback;
 mod provider_room;
@@ -544,6 +545,7 @@ struct AppRuntimeState {
     provider_room: Arc<Mutex<crate::providers::selection::ProviderRoomAuthority>>,
     guest_provider: crate::providers::selection::GuestSelection,
     youtube: youtube::YoutubeState,
+    companion: companion::CompanionState,
     provider_verifying: Option<String>,
     provider_prepare_started: Option<Instant>,
     provider_gesture_required: bool,
@@ -880,6 +882,7 @@ impl AppRuntime {
                     )),
                     guest_provider: crate::providers::selection::GuestSelection::default(),
                     youtube: youtube::YoutubeState::default(),
+                    companion: companion::CompanionState::default(),
                     provider_verifying: None,
                     provider_prepare_started: None,
                     provider_gesture_required: false,

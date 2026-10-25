@@ -2,6 +2,7 @@ pub mod app_runtime;
 pub mod call;
 pub mod capture;
 pub mod chat;
+pub mod companion;
 pub mod encode;
 pub mod identity;
 pub mod media;
@@ -180,6 +181,8 @@ pub fn run() {
             validate_provider_content,
             retry_room_provider,
             youtube_driver, youtube_attach, youtube_detach, youtube_event,
+            companion_status, companion_start, companion_stop, companion_new_code,
+            companion_unlink, companion_install_host, companion_remove_host,
             focus_provider_playback,
             reset_provider_session,
             create_schedule,
@@ -933,6 +936,76 @@ fn youtube_detach(
 ) -> Result<(), String> {
     runtime.youtube_detach(&lease)
 }
+/// The opt-in existing-browser companion. Starting it writes the loopback
+/// endpoint the native host reads, and nothing at all is installed here.
+#[tauri::command]
+fn companion_start(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<app_runtime::companion::CompanionStatus, String> {
+    let port = runtime.companion_start()?;
+    let directory = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|_| "Could not locate Movie Party's data directory".to_string())?;
+    std::fs::create_dir_all(&directory)
+        .map_err(|_| "Could not create Movie Party's data directory".to_string())?;
+    let body = serde_json::json!({
+        "port": port,
+        "protocol": crate::companion::PROTOCOL_VERSION,
+    })
+    .to_string();
+    std::fs::write(directory.join("companion-endpoint.json"), body)
+        .map_err(|_| "Could not publish the companion endpoint".to_string())?;
+    Ok(runtime.companion_status())
+}
+
+#[tauri::command]
+fn companion_status(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> app_runtime::companion::CompanionStatus {
+    runtime.companion_status()
+}
+
+#[tauri::command]
+fn companion_stop(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<app_runtime::companion::CompanionStatus, String> {
+    runtime.companion_stop();
+    if let Ok(directory) = app.path().app_local_data_dir() {
+        // Leaving a stale endpoint behind would let a bridge keep dialling a port
+        // that now belongs to something else.
+        let _ = std::fs::remove_file(directory.join("companion-endpoint.json"));
+    }
+    Ok(runtime.companion_status())
+}
+
+#[tauri::command]
+fn companion_new_code(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<app_runtime::companion::CompanionStatus, String> {
+    runtime.companion_new_code()?;
+    Ok(runtime.companion_status())
+}
+
+#[tauri::command]
+fn companion_unlink(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> app_runtime::companion::CompanionStatus {
+    runtime.companion_unlink()
+}
+
+#[tauri::command]
+fn companion_install_host(extension_id: String) -> Result<String, String> {
+    app_runtime::AppRuntime::companion_install_host(&extension_id)
+}
+
+#[tauri::command]
+fn companion_remove_host() -> Result<(), String> {
+    app_runtime::AppRuntime::companion_remove_host()
+}
+
 #[tauri::command]
 fn youtube_event(
     runtime: tauri::State<'_, app_runtime::AppRuntime>,
