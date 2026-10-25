@@ -52,22 +52,22 @@ what you actually saw. A blank row is an honest answer; a guessed one is not.
 
 | # | Check | Expected | Result |
 |---|---|---|---|
-| S1 | `provider_search_url` opens the provider's own search page | Real results page; Movie Party shows no invented catalogue | |
-| S2 | Login gate detected on a signed-out profile | `LoginRequired`, prompt to sign in in Chrome, never a blank player | |
-| S3 | After you sign in yourself, the tab becomes selectable | Title and content identity extracted from the provider page | |
-| S4 | `media_identity` returns the real title, not the site name | No `Netflix`/`Prime Video`/`Hotstar` placeholder titles | |
-| S5 | Does the page expose `data-video-id` / `data-content-id`? | Record the literal value — this decides whether `player_content_id` can ever match `content_id` ([selection.rs:49](../src-tauri/src/providers/selection.rs#L49)) | |
-| S6 | Show a **movie** end to end | Play, pause, seek apply and are observed back | |
-| S7 | Show an **episode** of a series | Host and guest land on the same instalment, not the show page | |
-| S8 | DRM: is a real `<video>` element present while protected playback runs? | If no visible `<video>` exists, generic HTML5 control **cannot** work — record it as a structural limit, not a bug to hide | |
-| S9 | Programmatic `play()` / `pause()` / `currentTime` on the protected element | The provider's own player obeys; if it refuses, say so | |
-| S10 | Multi-device: both peers report matching evidence before consensus | Ready never reached on one peer alone | |
-| S11 | Title unavailable on the guest's account or region | Guest sees a meaningful error naming the recovery (choose another title / retry), host is not silently blocked | |
-| S12 | Guest closes the tab mid-party | Selection invalidated with a prompt, never a false `PlaybackReady` | |
-| S13 | Guest's session expires mid-party | `AuthRequired`, sign-in guidance, no black-frame claim of playback | |
-| S14 | Site redesign breaks a selector | Detected as an issue on the tab, not a silent "no tabs" | |
-| S15 | Managed Chrome relaunched with the persistent profile | Still signed in; ownership lease recovers | |
-| S16 | Window closed from the taskbar, not in-app | Process tree reaped, app reports recovery instead of a stuck state | |
+| S1 | `provider_search_url` opens the provider's own search page | Real results page; Movie Party shows no invented catalogue | **BLOCKED** — no signed-in Netflix/Prime Video/JioHotstar account on this machine; needs the user's own authorized session |
+| S2 | Login gate detected on a signed-out profile | `LoginRequired`, prompt to sign in in Chrome, never a blank player | **BLOCKED** — no signed-in Netflix/Prime Video/JioHotstar account on this machine; needs the user's own authorized session |
+| S3 | After you sign in yourself, the tab becomes selectable | Title and content identity extracted from the provider page | **BLOCKED** — no signed-in Netflix/Prime Video/JioHotstar account on this machine; needs the user's own authorized session |
+| S4 | `media_identity` returns the real title, not the site name | No `Netflix`/`Prime Video`/`Hotstar` placeholder titles | **BLOCKED** — no signed-in Netflix/Prime Video/JioHotstar account on this machine; needs the user's own authorized session |
+| S5 | Does the page expose `data-video-id` / `data-content-id`? | Record the literal value — this decides whether `player_content_id` can ever match `content_id` ([selection.rs:49](../src-tauri/src/providers/selection.rs#L49)) | **BLOCKED** — no signed-in Netflix/Prime Video/JioHotstar account on this machine; needs the user's own authorized session |
+| S6 | Show a **movie** end to end | Play, pause, seek apply and are observed back | **BLOCKED** — no signed-in Netflix/Prime Video/JioHotstar account on this machine; needs the user's own authorized session |
+| S7 | Show an **episode** of a series | Host and guest land on the same instalment, not the show page | **BLOCKED** — no signed-in Netflix/Prime Video/JioHotstar account on this machine; needs the user's own authorized session |
+| S8 | DRM: is a real `<video>` element present while protected playback runs? | If no visible `<video>` exists, generic HTML5 control **cannot** work — record it as a structural limit, not a bug to hide | **BLOCKED** — no signed-in Netflix/Prime Video/JioHotstar account on this machine; needs the user's own authorized session |
+| S9 | Programmatic `play()` / `pause()` / `currentTime` on the protected element | The provider's own player obeys; if it refuses, say so | **BLOCKED** — no signed-in Netflix/Prime Video/JioHotstar account on this machine; needs the user's own authorized session |
+| S10 | Multi-device: both peers report matching evidence before consensus | Ready never reached on one peer alone | **BLOCKED** — no signed-in Netflix/Prime Video/JioHotstar account on this machine; needs the user's own authorized session |
+| S11 | Title unavailable on the guest's account or region | Guest sees a meaningful error naming the recovery (choose another title / retry), host is not silently blocked | **BLOCKED** — no signed-in Netflix/Prime Video/JioHotstar account on this machine; needs the user's own authorized session |
+| S12 | Guest closes the tab mid-party | Selection invalidated with a prompt, never a false `PlaybackReady` | **BLOCKED** — no signed-in Netflix/Prime Video/JioHotstar account on this machine; needs the user's own authorized session |
+| S13 | Guest's session expires mid-party | `AuthRequired`, sign-in guidance, no black-frame claim of playback | **BLOCKED** — no signed-in Netflix/Prime Video/JioHotstar account on this machine; needs the user's own authorized session |
+| S14 | Site redesign breaks a selector | Detected as an issue on the tab, not a silent "no tabs" | **BLOCKED** — no signed-in Netflix/Prime Video/JioHotstar account on this machine; needs the user's own authorized session |
+| S15 | Managed Chrome relaunched with the persistent profile | Still signed in; ownership lease recovers | **BLOCKED** — no signed-in Netflix/Prime Video/JioHotstar account on this machine; needs the user's own authorized session |
+| S16 | Window closed from the taskbar, not in-app | Process tree reaped, app reports recovery instead of a stuck state | **BLOCKED** — no signed-in Netflix/Prime Video/JioHotstar account on this machine; needs the user's own authorized session |
 
 ### 2. YouTube Provider Sync (managed Chrome path)
 
@@ -75,7 +75,7 @@ Same rows as above, plus:
 
 | # | Check | Expected | Result |
 |---|---|---|---|
-| Y1 | `real_youtube_provider_sync_uses_chrome_cdp` | Already `LIVE-VERIFIED` on macOS: player detected, real `currentTime`, pause true, seek moved the playhead. Re-record on Windows | |
+| Y1 | `real_youtube_provider_sync_uses_chrome_cdp` | Already `LIVE-VERIFIED` on macOS: player detected, real `currentTime`, pause true, seek moved the playhead. Re-record on Windows | **PASS (macOS, 2026-10-26)** — re-ran with `MOVIE_PARTY_ALLOW_VISIBLE_CHROME=1`: player detected on a fresh managed profile, pause accepted, seek moved the playhead to 1.0 s. The first run of the day failed with "no HTML5 player was detected"; the wait was a single fixed 8 s sleep, so the verdict depended on YouTube's mount time — the assertion is unchanged, the wait is now a 30 s poll |
 | Y2 | Embedding-restricted video | Falls back to managed Chrome, never a blank in-app frame | |
 
 ### 3. YouTube in-app IFrame player
@@ -88,6 +88,15 @@ Same rows as above, plus:
 | P4 | Handoff in-app ↔ managed Chrome | Only one audible player at a time | |
 | P5 | Two devices, both in-app driver | Positions agree; disagreement pauses instead of drifting | |
 | P6 | WebView2 (Windows) differences vs WKWebView | Requirement 16 — currently unmet | |
+
+## Run log
+
+| Date | What ran | Result |
+|---|---|---|
+| 2026-10-26 | `real_youtube_provider_sync_uses_chrome_cdp` (visible Chrome, managed profile) | PASS — see Y1. An adaptive player wait replaced the fixed 8 s sleep after a false failure. |
+| 2026-10-26 | `MOVIE_PARTY_ALLOW_VISIBLE_CHROME=1 cargo test --lib providers::chrome -- --include-ignored` | 39 passed / 1 failed on the first attempt (the fixed-sleep false negative above), 40/40 on re-run. Covers real CDP launch, tab following, profile persistence, and launch-timeout tree reaping. |
+| 2026-10-26 | Netflix / Prime Video / JioHotstar rows | Not run — no authorized provider session exists on this machine. Every S row is blocked, not passed. |
+| 2026-10-26 | In-app IFrame player (P1–P4) | Not re-run today; see `YOUTUBE_PLAYER_BATCH5_REPORT.md` for the automated coverage and the live runs recorded there. P5 still needs two devices; P6 still needs Windows. |
 
 ## What must never be recorded as a pass
 

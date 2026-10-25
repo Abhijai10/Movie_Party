@@ -1700,11 +1700,22 @@ mod tests {
         let session = launch_managed_chrome(plan).expect("launch Chrome");
         let mut page = session.connect_page().expect("page websocket");
         page.navigate(url).expect("navigate YouTube");
-        std::thread::sleep(Duration::from_secs(8));
 
         let adapter = YoutubeAdapter::default();
-        let detected = page.execute(&adapter.detect_player(100)).expect("detect");
-        let detected = detected["result"]["value"].as_bool().unwrap_or(false);
+        // Poll for the player instead of sleeping once. A fixed 8-second wait
+        // made the verdict depend on how fast YouTube mounted its player on the
+        // day, and the test failed while the product worked. The assertion below
+        // is unchanged: a real HTML5 player must still be found or the run is a
+        // failure, never a silent pass.
+        let mut detected = false;
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_secs(1));
+            let probe = page.execute(&adapter.detect_player(100)).expect("detect");
+            if probe["result"]["value"].as_bool().unwrap_or(false) {
+                detected = true;
+                break;
+            }
+        }
         if !detected {
             session.close().expect("close");
             // AUD-07: this used to `return` here, and libtest reports an early
