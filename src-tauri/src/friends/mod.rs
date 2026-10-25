@@ -130,6 +130,10 @@ pub struct FriendInvite {
     pub from_device_id: String,
     pub from_public_key: String,
     pub from_display_name: String,
+    /// Where to reach the inviter. Signed, because an attacker-chosen address
+    /// here would turn an accepted friendship into an outbound connection to
+    /// whatever host the invite names.
+    pub from_peer_key: String,
     pub nonce: String,
     pub issued_at_ms: i64,
     pub expires_at_ms: i64,
@@ -138,11 +142,12 @@ pub struct FriendInvite {
 
 fn canonical_invite_message(invite: &FriendInvite) -> String {
     format!(
-        "{INVITE_DOMAIN}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{INVITE_DOMAIN}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         invite.v,
         invite.from_device_id,
         invite.from_public_key,
         invite.from_display_name,
+        invite.from_peer_key,
         invite.nonce,
         invite.issued_at_ms,
         invite.expires_at_ms
@@ -156,8 +161,17 @@ fn display_name_is_valid(name: &str) -> bool {
     !name.trim().is_empty() && name.chars().count() <= 48 && !name.chars().any(char::is_control)
 }
 
+fn peer_key_is_valid(peer_key: &str) -> bool {
+    let trimmed = peer_key.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 253
+        && !trimmed.chars().any(char::is_control)
+        && !trimmed.contains(['@', '/', '\\', ':', ' '])
+}
+
 fn shape_is_valid(invite: &FriendInvite) -> bool {
     uuid::Uuid::parse_str(&invite.from_device_id).is_ok()
+        && peer_key_is_valid(&invite.from_peer_key)
         && is_base64url_256bit(&invite.from_public_key)
         && is_base64url_128bit(&invite.nonce)
         && invite.issued_at_ms > 0
@@ -167,11 +181,15 @@ fn shape_is_valid(invite: &FriendInvite) -> bool {
 pub fn create_invite(
     identity: &DeviceIdentity,
     display_name: &str,
+    peer_key: &str,
     now_ms: i64,
     ttl_ms: i64,
 ) -> Result<FriendInvite, FriendError> {
     if !display_name_is_valid(display_name) || now_ms <= 0 || ttl_ms <= 0 {
         return Err(FriendError::InvalidDisplayName);
+    }
+    if !peer_key_is_valid(peer_key) {
+        return Err(FriendError::InvalidShape);
     }
     // A fresh random nonce per invite is what makes an old link useless once the
     // request is answered, revoked, or allowed to lapse.
@@ -182,6 +200,7 @@ pub fn create_invite(
         from_device_id: identity.device_id.clone(),
         from_public_key: identity.public_key_base64(),
         from_display_name: display_name.trim().to_string(),
+        from_peer_key: peer_key.trim().to_string(),
         nonce: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw),
         issued_at_ms: now_ms,
         expires_at_ms: now_ms.saturating_add(ttl_ms),
@@ -355,6 +374,7 @@ mod tests {
     use super::*;
 
     const NOW: i64 = 1_700_000_000_000;
+    const RIYA_PEER: &str = "riya-mac.tailc930b7.ts.net.";
 
     fn identity(seed: u8) -> DeviceIdentity {
         DeviceIdentity::from_seed_for_tests(
@@ -367,7 +387,7 @@ mod tests {
     }
 
     fn fresh_invite() -> FriendInvite {
-        create_invite(&identity(7), "Riya", NOW, FRIEND_INVITE_TTL_MS).expect("invite")
+        create_invite(&identity(7), "Riya", RIYA_PEER, NOW, FRIEND_INVITE_TTL_MS).expect("invite")
     }
 
     fn ledger() -> InviteLedger {
@@ -458,7 +478,7 @@ mod tests {
     fn tampering_with_any_signed_field_breaks_the_signature() {
         let base = fresh_invite();
         let other = "0f0f0f0f-1111-7111-8111-000000000000";
-        for field in 0..6 {
+        for field in 0..7 {
             let mut forged = base.clone();
             match field {
                 0 => forged.from_display_name = "Mallory".into(),
@@ -469,6 +489,9 @@ mod tests {
                 2 => forged.expires_at_ms += 60_000,
                 3 => forged.issued_at_ms -= 60_000,
                 4 => forged.from_device_id = identity(9).device_id.clone(),
+                // The address is signed too: an invite that quietly pointed the
+                // acceptor at a different host would be a redirect, not an invite.
+                5 => forged.from_peer_key = "relay.attacker.example".into(),
                 _ => forged.from_public_key = identity(9).public_key_base64(),
             }
             assert_eq!(
@@ -570,7 +593,7 @@ mod tests {
         );
         for bad_name in ["", "   ", &"a".repeat(49), "line\nbreak", "tab\there"] {
             let mut invite =
-                create_invite(&identity(7), "Riya", NOW, FRIEND_INVITE_TTL_MS).unwrap();
+                create_invite(&identity(7), "Riya", RIYA_PEER, NOW, FRIEND_INVITE_TTL_MS).unwrap();
             invite.from_display_name = bad_name.into();
             let error = verify_invite(&invite, other, NOW, &ledger()).unwrap_err();
             assert!(
@@ -593,7 +616,7 @@ mod tests {
             FriendError::WrongRecipient
         );
         assert!(
-            create_invite(&identity(7), "", NOW, FRIEND_INVITE_TTL_MS).is_err(),
+            create_invite(&identity(7), "", RIYA_PEER, NOW, FRIEND_INVITE_TTL_MS).is_err(),
             "an empty name was accepted"
         );
     }
@@ -664,7 +687,7 @@ mod tests {
         // Reusing the same key for both purposes must not let one be lifted into
         // the other.
         let device = identity(7);
-        let invite = create_invite(&device, "Riya", NOW, FRIEND_INVITE_TTL_MS).unwrap();
+        let invite = create_invite(&device, "Riya", RIYA_PEER, NOW, FRIEND_INVITE_TTL_MS).unwrap();
         assert!(
             crate::identity::verify_auth_request_signature(
                 &invite.from_public_key,

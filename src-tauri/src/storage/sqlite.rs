@@ -1502,6 +1502,7 @@ mod tests {
                 [4u8; 32],
             ),
             "Riya",
+            "riya-mac.tailc930b7.ts.net.",
             1_000,
             60_000,
         )
@@ -1544,6 +1545,7 @@ mod tests {
                 [5u8; 32],
             ),
             "Dev",
+            "dev-mac.tailc930b7.ts.net.",
             1_000,
             60_000,
         )
@@ -1565,6 +1567,7 @@ mod tests {
                 [6u8; 32],
             ),
             "Ann",
+            "ann-mac.tailc930b7.ts.net.",
             1_000,
             60_000,
         )
