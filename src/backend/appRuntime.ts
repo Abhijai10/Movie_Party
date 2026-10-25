@@ -1066,3 +1066,45 @@ export async function retryRoomProvider(): Promise<AppSnapshot> {
 export async function focusProviderPlayback(): Promise<AppSnapshot> {
   return invoke<AppSnapshot>("focus_provider_playback");
 }
+
+/** The opt-in existing-browser companion, as Movie Party actually sees it. */
+export type CompanionStatus = {
+  listening: boolean;
+  port: number;
+  pairingCode: string | null;
+  paired: boolean;
+  browser: string | null;
+  protocol: number;
+  granted: string[];
+  refused: { capability: string; reason: string }[];
+  error: string | null;
+  guidance: string | null;
+};
+
+export async function getCompanionStatus(): Promise<CompanionStatus> {
+  return invoke<CompanionStatus>("companion_status");
+}
+
+export async function startCompanion(): Promise<CompanionStatus> {
+  return invoke<CompanionStatus>("companion_start");
+}
+
+export async function stopCompanion(): Promise<CompanionStatus> {
+  return invoke<CompanionStatus>("companion_stop");
+}
+
+export async function newCompanionCode(): Promise<CompanionStatus> {
+  return invoke<CompanionStatus>("companion_new_code");
+}
+
+export async function unlinkCompanion(): Promise<CompanionStatus> {
+  return invoke<CompanionStatus>("companion_unlink");
+}
+
+export async function installCompanionHost(extensionId: string): Promise<string> {
+  return invoke<string>("companion_install_host", { extensionId });
+}
+
+export async function removeCompanionHost(): Promise<void> {
+  await invoke("companion_remove_host");
+}

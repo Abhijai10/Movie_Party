@@ -5489,3 +5489,18 @@ input[type=range].mp-range::-webkit-slider-thumb {
 .youtube-ready .text-xl { max-width: 250px; font-size: 16px; }
 .youtube-ready .mt-12 p { max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .youtube-ready-screen .camera-card { left: 32px !important; right: auto !important; top: auto !important; bottom: 16px !important; height: 150px !important; }
+
+/* Settings › Companion: the opt-in existing-browser path, styled in the system voice. */
+.companion-settings { display: grid; gap: 12px; margin-top: 24px; padding-top: 20px; border-top: 1px solid #40364f; }
+.companion-settings p { font-size: 14px; line-height: 1.6; color: #c6bed5; margin: 0; }
+.companion-settings strong { color: #f4f1fa; }
+.companion-settings [role="alert"] { color: #fecaca; background: #2c1b2b; border-radius: 10px; padding: 12px 14px; }
+.companion-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.companion-code { font-size: 20px; letter-spacing: 0.22em; color: #f4f1fa; }
+.companion-install { display: grid; gap: 10px; padding: 16px; background: #1d1728; border-radius: 12px; }
+.companion-install label { font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase; color: #c6bed5; }
+.companion-install input { min-height: 44px; padding: 10px 12px; color: #f4f1fa; background: #171322; border: 1px solid #5c526b; border-radius: 10px; font: inherit; }
+.companion-install input:focus-visible, .companion-settings :is(button, summary):focus-visible { outline: 2px solid #c4a4ff; outline-offset: 3px; }
+.companion-settings ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.companion-settings li { font-size: 13px; color: #bdb3ce; border-bottom: 1px solid #2c2438; padding-bottom: 6px; }
+.companion-note { font-size: 12px; }

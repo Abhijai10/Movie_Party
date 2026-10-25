@@ -3,6 +3,7 @@ import { ProviderSessionReset } from "./ProviderSessionReset";
 import { motion } from "framer-motion";
 import { ArrowLeft, Download, RotateCcw } from "lucide-react";
 import { CinemaButton } from "../components/mp/CinemaButton";
+import { CompanionSettings } from "./CompanionSettings";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
 import {
@@ -705,6 +706,7 @@ export function SettingsView({ snapshot, onBack, onSnapshot }: SettingsViewProps
                   </article>
                 );
               })}
+              <CompanionSettings />
             </div>
           ) : null}
 
