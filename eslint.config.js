@@ -15,7 +15,23 @@ export default tseslint.config(
     ],
   },
   ...tseslint.configs.strictTypeChecked,
-  { ...tseslint.configs.disableTypeChecked, files: ["src/youtube/bridge.js"] },
+  {
+    ...tseslint.configs.disableTypeChecked,
+    files: ["src/youtube/bridge.js", "extension/**/*.js"],
+    languageOptions: {
+      globals: {
+        chrome: "readonly",
+        console: "readonly",
+        crypto: "readonly",
+        document: "readonly",
+        atob: "readonly",
+        btoa: "readonly",
+        TextEncoder: "readonly",
+        URL: "readonly",
+        window: "readonly",
+      },
+    },
+  },
   {
     files: ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"],
     languageOptions: {

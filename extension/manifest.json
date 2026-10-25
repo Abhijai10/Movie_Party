@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Movie Party Companion",
+  "version": "0.9.9",
+  "description": "Let Movie Party use a provider tab you already have open and already signed in to. Opt-in only.",
+  "permissions": ["activeTab", "scripting", "storage", "nativeMessaging"],
+  "host_permissions": [
+    "https://youtube.com/*",
+    "https://www.youtube.com/*",
+    "https://m.youtube.com/*",
+    "https://youtu.be/*",
+    "https://netflix.com/*",
+    "https://www.netflix.com/*",
+    "https://primevideo.com/*",
+    "https://www.primevideo.com/*",
+    "https://amazon.com/*",
+    "https://www.amazon.com/*",
+    "https://hotstar.com/*",
+    "https://www.hotstar.com/*",
+    "https://jiocinema.com/*",
+    "https://www.jiocinema.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Movie Party Companion",
+    "default_popup": "popup.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self'"
+  }
+}

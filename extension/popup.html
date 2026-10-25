@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Movie Party Companion</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        width: 320px;
+        padding: 16px;
+        background: #171322;
+        color: #f4f1fa;
+        font:
+          13px/1.6 ui-sans-serif,
+          system-ui,
+          sans-serif;
+      }
+      h1 {
+        margin: 0 0 4px;
+        font-size: 16px;
+        letter-spacing: 0.02em;
+      }
+      p {
+        margin: 8px 0;
+        color: #c6bed5;
+      }
+      label {
+        display: block;
+        margin-top: 12px;
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      input,
+      button {
+        width: 100%;
+        min-height: 40px;
+        margin-top: 6px;
+        padding: 8px 12px;
+        border-radius: 10px;
+        border: 1px solid #5c526b;
+        background: #211a2e;
+        color: #f4f1fa;
+        font: inherit;
+      }
+      button {
+        cursor: pointer;
+        background: #5a369e;
+        border-color: #7c55d6;
+        letter-spacing: 0.06em;
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+      button.secondary {
+        background: transparent;
+        border-color: #5c526b;
+      }
+      :focus-visible {
+        outline: 2px solid #c4a4ff;
+        outline-offset: 2px;
+      }
+      ul {
+        list-style: none;
+        margin: 10px 0 0;
+        padding: 0;
+        display: grid;
+        gap: 6px;
+      }
+      li {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        border-bottom: 1px solid #2c2438;
+        padding-bottom: 6px;
+      }
+      li span:last-child {
+        color: #9de3b5;
+      }
+      li.off span:last-child {
+        color: #e8b4a8;
+      }
+      [role="status"],
+      [role="alert"] {
+        margin-top: 12px;
+        padding: 10px;
+        border-radius: 10px;
+        background: #241d31;
+      }
+      [role="alert"] {
+        background: #2c1b2b;
+        color: #fecaca;
+      }
+      .hint {
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Movie Party Companion</h1>
+    <p class="hint">
+      Lets Movie Party use a provider tab you already have open, instead of a separate managed
+      browser. Nothing is read until you choose a tab, and Movie Party must be running.
+    </p>
+
+    <div id="needs-pairing" hidden>
+      <label for="code">Pairing code from Movie Party</label>
+      <input id="code" autocomplete="off" spellcheck="false" maxlength="24" />
+      <button id="pair">Pair with Movie Party</button>
+      <p class="hint">
+        The code appears in Movie Party under Settings › Companion and expires after five tries.
+      </p>
+    </div>
+
+    <div id="ready" hidden>
+      <p role="status" id="ready-note">Paired. Choose the provider tab to use.</p>
+      <button id="use-tab">Use this tab</button>
+      <button id="disconnect" class="secondary">Unlink this browser</button>
+    </div>
+
+    <div id="active" hidden>
+      <p role="status" id="active-note"></p>
+      <ul id="capabilities" aria-label="What the companion may do"></ul>
+      <button id="again" class="secondary">Choose a different tab</button>
+    </div>
+
+    <div id="error" hidden>
+      <p role="alert" id="error-note"></p>
+      <button id="retry" class="secondary">Try again</button>
+    </div>
+
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>
