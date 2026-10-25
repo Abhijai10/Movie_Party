@@ -3,7 +3,7 @@ use crate::providers::selection::{
     SELECTION_VERSION,
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -44,10 +44,15 @@ const MAX_CONTROL_FRAME_BYTES: usize = MAX_CONTROL_MESSAGE_BYTES;
 /// (§5), so they only need a DoS-bounding frame cap.
 const MAX_RAW_STREAM_BYTES: usize = 2 * 1024 * 1024;
 const MAX_AUTH_NONCES: usize = 4_096;
-/// MP-15: bound on remembered `device_id -> public key` bindings. Mirrors the
-/// nonce set's policy (clear at capacity) so neither map can grow without
-/// limit. A one-guest room holds one or two entries in practice.
+/// MP-15: bound on remembered `device_id -> public key` bindings. Neither map
+/// may grow without limit, but neither is ever cleared wholesale: a cleared
+/// replay window or binding pin is an authorization failure, not a memory fix.
+/// A one-guest room holds one or two entries in practice.
 const MAX_BOUND_IDENTITIES: usize = 4_096;
+/// Longest lifetime any invite can still be presented within. Room invites last
+/// 24 hours and friend invites 7 days, so spent nonces older than that cannot
+/// possibly be replayed and are the only ones eviction may forget.
+const MAX_INVITE_LIFETIME_MS: i64 = 8 * 24 * 60 * 60 * 1_000;
 /// MP-18: Movie Party is a two-person app — one host, one guest. The host
 /// accepts exactly one authenticated peer at a time; a second, *different*
 /// peer is refused with `SERVER_FULL` at the authorization boundary.
@@ -879,7 +884,9 @@ impl QuicServer {
 
 #[derive(Debug, Clone, Default)]
 struct AuthReplayGuard {
-    accepted_nonces: Arc<Mutex<HashSet<String>>>,
+    /// Spent `device_id:nonce` pairs, each with the moment it was recorded, so
+    /// eviction can be honest about what is still within an invite's lifetime.
+    accepted_nonces: Arc<Mutex<HashMap<String, i64>>>,
     /// MP-15: the first public key seen for each device id.
     bound_public_keys: Arc<Mutex<HashMap<String, String>>>,
 }
@@ -891,11 +898,27 @@ impl AuthReplayGuard {
             Err(poisoned) => poisoned.into_inner(),
         };
 
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+
         if accepted_nonces.len() >= MAX_AUTH_NONCES {
-            accepted_nonces.clear();
+            // Used to `clear()` here, which quietly made every previously spent
+            // nonce spendable again. Only entries older than the longest invite
+            // any peer could still present are safe to forget.
+            accepted_nonces.retain(|_, recorded_at| now_ms - *recorded_at < MAX_INVITE_LIFETIME_MS);
+        }
+        if accepted_nonces.len() >= MAX_AUTH_NONCES {
+            // Still full: refuse rather than forget. A two-person room cannot
+            // plausibly exhaust this, so reaching it means something is wrong and
+            // denying authentication is the only safe reading.
+            return false;
         }
 
-        accepted_nonces.insert(format!("{device_id}:{invite_nonce}"))
+        accepted_nonces
+            .insert(format!("{device_id}:{invite_nonce}"), now_ms)
+            .is_none()
     }
 
     /// MP-15: bind `device_id` to `public_key` on first sight; a later
@@ -914,13 +937,14 @@ impl AuthReplayGuard {
             Err(poisoned) => poisoned.into_inner(),
         };
 
-        if bound.len() >= MAX_BOUND_IDENTITIES {
-            bound.clear();
-        }
-
         match bound.get(device_id) {
             Some(existing) => existing == public_key,
             None => {
+                if bound.len() >= MAX_BOUND_IDENTITIES {
+                    // Clearing here would drop the pin and let an established
+                    // device id be rebound to a fresh key. Refuse instead.
+                    return false;
+                }
                 bound.insert(device_id.to_owned(), public_key.to_owned());
                 true
             }
@@ -2888,8 +2912,9 @@ mod tests {
     use super::{
         certificate_fingerprint, ensure_crypto_provider, installed_signature_algorithms,
         loopback_bind_addr, monotonic_us, tailscale_bind_addr, validate_quic_bind_addr,
-        AuthRequest, ClientRequest, EventEnvelope, FingerprintVerifier, HelloPayload, QuicClient,
-        QuicError, QuicServer, RoomCredentials, ServerEvent, ServerResponse,
+        AuthReplayGuard, AuthRequest, ClientRequest, EventEnvelope, FingerprintVerifier,
+        HelloPayload, QuicClient, QuicError, QuicServer, RoomCredentials, ServerEvent,
+        ServerResponse, MAX_AUTH_NONCES, MAX_BOUND_IDENTITIES,
     };
     use crate::identity::DeviceIdentity;
     use crate::protocol::MAX_CONTROL_MESSAGE_BYTES;
@@ -3420,6 +3445,42 @@ mod tests {
         );
         client.wait_idle().await;
         server_task.abort();
+    }
+
+    #[test]
+    fn the_replay_guard_fails_closed_instead_of_forgetting_spent_nonces() {
+        let guard = AuthReplayGuard::default();
+        let device = "7d1a9c3e-2b4f-7a61-9c3e-000000000007";
+        assert!(guard.accept_once(device, "spent-nonce"));
+        // Saturate the guard. The previous implementation called `clear()` here,
+        // which silently returned every spent nonce to circulation.
+        for index in 0..(MAX_AUTH_NONCES - 1) {
+            assert!(guard.accept_once(device, &format!("fill-{index}")));
+        }
+        // Still full, so both a new nonce and the replay are refused. Refusing is
+        // correct: a two-person room cannot plausibly reach this bound.
+        assert!(!guard.accept_once(device, "one-too-many"));
+        assert!(
+            !guard.accept_once(device, "spent-nonce"),
+            "a spent nonce became replayable after saturation"
+        );
+    }
+
+    #[test]
+    fn identity_pinning_survives_capacity_rather_than_being_dropped() {
+        let guard = AuthReplayGuard::default();
+        assert!(guard.bind_identity("device-pinned", "key-one"));
+        for index in 0..(MAX_BOUND_IDENTITIES - 1) {
+            assert!(guard.bind_identity(&format!("fill-{index}"), "their-key"));
+        }
+        // The remembered device is still refused a new key...
+        assert!(guard.bind_identity("device-pinned", "key-one"));
+        assert!(
+            !guard.bind_identity("device-pinned", "key-two"),
+            "the MP-15 pin was cleared, allowing an established id to be rebound"
+        );
+        // ...and an unknown one is refused rather than silently accepted.
+        assert!(!guard.bind_identity("device-new", "any-key"));
     }
 
     #[tokio::test]

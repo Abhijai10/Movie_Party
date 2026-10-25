@@ -554,7 +554,11 @@ impl MoviePartyDb {
                  last_latency_ms = ?5,
                  connection_state = CASE
                      WHEN ?3 IS NOT NULL THEN 'MOVIE_PARTY_VERIFIED'
-                     WHEN COALESCE(?2, ip) IS NOT NULL AND connection_state = 'INVITED' THEN 'TAILSCALE_JOINED'
+                     -- Promotion needs NEW evidence. `COALESCE(?2, ip)` let a
+                     -- failed probe (ip NULL) promote off the address left behind
+                     -- by an earlier one, so a friend could read as on-network
+                     -- while every current check against them was failing.
+                     WHEN ?2 IS NOT NULL AND connection_state = 'INVITED' THEN 'TAILSCALE_JOINED'
                      ELSE connection_state END
              WHERE peer_key = ?1",
             rusqlite::params![
@@ -1129,6 +1133,70 @@ mod tests {
         let db = MoviePartyDb::open_in_memory().expect("open");
         let version = db.schema_version().expect("version");
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn a_failed_probe_cannot_promote_a_friend_from_a_stale_address() {
+        let db = MoviePartyDb::open_in_memory().expect("open");
+        let resolving = "tara-win.tailc930b7.ts.net.";
+        let stalled = "dev-mac.tailc930b7.ts.net.";
+        for peer in [resolving, stalled] {
+            db.upsert_friend(&StoredFriend {
+                peer_key: peer.to_string(),
+                display_name: peer.to_string(),
+                ip: if peer == stalled {
+                    Some("100.64.0.5".to_string())
+                } else {
+                    None
+                },
+                added_at_ms: 1_000,
+                last_verified_at_ms: None,
+                last_path: None,
+                last_latency_ms: None,
+                connection_state: FriendConnectionState::Invited,
+            })
+            .expect("insert");
+        }
+
+        // Resolving a fresh address IS evidence of on-network status.
+        db.update_friend_verification(resolving, Some("100.64.0.9"), None, None, None)
+            .expect("resolve");
+        assert_eq!(
+            state_of(&db, resolving),
+            FriendConnectionState::TailscaleJoined,
+            "real evidence failed to promote"
+        );
+
+        // A probe that found nothing must not promote by falling back to the
+        // address an earlier probe left behind.
+        db.update_friend_verification(stalled, None, None, None, None)
+            .expect("failed probe");
+        let stored = {
+            let friends = db.list_friends().expect("list");
+            friends
+                .into_iter()
+                .find(|friend| friend.peer_key == stalled)
+                .expect("row")
+        };
+        assert_eq!(
+            stored.connection_state,
+            FriendConnectionState::Invited,
+            "a failed probe promoted a friend from stale data"
+        );
+        assert_eq!(
+            stored.ip.as_deref(),
+            Some("100.64.0.5"),
+            "the cached address should survive a failed probe, not be wiped"
+        );
+    }
+
+    fn state_of(db: &MoviePartyDb, peer_key: &str) -> FriendConnectionState {
+        db.list_friends()
+            .expect("list")
+            .into_iter()
+            .find(|friend| friend.peer_key == peer_key)
+            .expect("row")
+            .connection_state
     }
 
     #[test]
