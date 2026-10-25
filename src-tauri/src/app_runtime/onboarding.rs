@@ -286,6 +286,11 @@ impl AppRuntime {
             // position is exactly the duplicate case requirement 16 lists.
             inputs.duplicate_invite_pending = inputs.invite == InviteStage::Sent;
         }
+        // A stored outstanding invitation says the same thing more precisely, and
+        // covers the case where the trust row has since moved on.
+        if self.has_outstanding_invite(&session.peer_key) {
+            inputs.duplicate_invite_pending = true;
+        }
 
         let observed = Session {
             tailnet: tailnet.clone(),
@@ -329,6 +334,10 @@ impl AppRuntime {
             .method
             .ok_or("MP-ONB-034 choose how the two devices will connect first")?;
         let sent = self.friend_invite_signed().await?;
+        // Attribute the issued invite to this peer, so "you already asked them"
+        // becomes a fact read from storage instead of an inference.
+        self.record_package_recipient(&sent.link, &session.peer_key)
+            .await?;
         let pasted = session.pasted.as_ref().map(|link| link.url().to_string());
         Ok(build_invitation_package(
             &sent.link,
@@ -411,6 +420,35 @@ impl AppRuntime {
             direction_evidence: direction_evidence(),
             observed_at_ms: 0,
         }
+    }
+
+    /// Stores which friend an issued invitation was handed to. The invite is
+    /// signed by us and only names us, so without this the ledger could never
+    /// tell an outstanding request for one peer from one for another.
+    pub(crate) async fn record_package_recipient(
+        &self,
+        link: &str,
+        recipient_peer_key: &str,
+    ) -> Result<(), String> {
+        let invite = crate::friends::parse_invite_link(link).map_err(|e| e.to_string())?;
+        let db = self
+            .lock()
+            .db
+            .clone()
+            .ok_or_else(|| "MP-STORE-001 no database".to_string())?;
+        db.set_invite_recipient(&invite.nonce, recipient_peer_key)
+            .map_err(|e| e.to_string())
+    }
+
+    /// True when an invitation we issued to this peer is still outstanding.
+    pub(crate) fn has_outstanding_invite(&self, recipient_peer_key: &str) -> bool {
+        let Some(db) = self.lock().db.clone() else {
+            return false;
+        };
+        db.pending_sent_invite_for_recipient(recipient_peer_key, wall_now_ms())
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     fn find_friend(&self, peer_key: &str) -> Option<StoredFriend> {
@@ -518,6 +556,8 @@ mod tests {
     use crate::onboarding::{CheckId, CheckState, Connectedness, WizardStage};
 
     const PEER: &str = "priya-mac.tailc930b7.ts.net";
+    /// This device's own tailnet name — an invitation names its sender.
+    const OUR_PEER: &str = "abhijai-mac.tailc930b7.ts.net";
     const SHARE_LINK: &str =
         "https://acme-abc123.ts.net.login.tailscale.com/a/TSKruntimelevelltsecret";
 
@@ -981,6 +1021,55 @@ mod tests {
             "the share token reached on-disk storage"
         );
 
+        clean(dir);
+    }
+
+    /// The wizard's duplicate-request notice is a stored fact: building a package
+    /// for a peer attributes the invite to them, and an accepted one stops being
+    /// outstanding. No inference from a trust column is involved.
+    #[tokio::test]
+    async fn a_duplicate_request_is_read_from_the_invite_ledger() {
+        let (runtime, dir) = runtime_with_db();
+        let recipient = format!("{PEER}.");
+        runtime.onboarding_begin(PEER, "HOST").expect("begun");
+        assert!(!runtime.has_outstanding_invite(&recipient));
+
+        let now_ms = wall_now_ms();
+        let invite = crate::friends::create_invite(
+            &runtime.device_identity_for_test(),
+            "Abhijai",
+            OUR_PEER,
+            now_ms,
+            crate::friends::FRIEND_INVITE_TTL_MS,
+        )
+        .expect("invite");
+        let link = crate::friends::encode_invite_link(&invite).expect("link");
+        runtime
+            .lock()
+            .db
+            .as_ref()
+            .expect("db")
+            .record_friend_invite(&invite, "SENT", now_ms)
+            .expect("record");
+
+        runtime
+            .record_package_recipient(&link, &recipient)
+            .await
+            .expect("attributed");
+        assert!(
+            runtime.has_outstanding_invite(&recipient),
+            "an attributed, unexpired sent invite is outstanding"
+        );
+
+        // Settling it — the friend's own acceptance — retires the notice.
+        runtime
+            .lock()
+            .db
+            .as_ref()
+            .expect("db")
+            .settle_friend_invite(&invite.nonce, "ACCEPTED", wall_now_ms())
+            .expect("settle");
+        assert!(!runtime.has_outstanding_invite(&recipient));
         clean(dir);
     }
 

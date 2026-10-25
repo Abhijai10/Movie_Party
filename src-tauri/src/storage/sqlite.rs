@@ -12,7 +12,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::StorageError;
 
-const CURRENT_SCHEMA_VERSION: i32 = 6;
+const CURRENT_SCHEMA_VERSION: i32 = 7;
 
 /// Helper to lock a Mutex, converting PoisonError to StorageError.
 fn lock_mutex<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, StorageError> {
@@ -331,6 +331,12 @@ impl MoviePartyDb {
                 }
                 exec_sql(conn, MIGRATION_006_INVITES)?;
                 exec_sql(conn, MIGRATION_006_BACKFILL)
+            }
+            7 => {
+                if !column_exists(conn, "friend_invites", "recipient_peer_key")? {
+                    exec_sql(conn, MIGRATION_007_ADD_COLUMN)?;
+                }
+                exec_sql(conn, MIGRATION_007_INDEX)
             }
             other => Err(StorageError::Sqlite(format!(
                 "MP-STORE-003 unknown migration version {other}"
@@ -832,6 +838,59 @@ impl MoviePartyDb {
                 |row| row.get::<_, String>(0),
             )
             .ok())
+    }
+
+    /// Records who an issued invitation was handed to. The invite itself only
+    /// names its sender, so without this the ledger cannot answer "have I
+    /// already asked this friend?" — which is what makes the wizard's duplicate
+    /// state a stored fact rather than an inference from a trust column.
+    pub fn set_invite_recipient(
+        &self,
+        nonce: &str,
+        recipient_peer_key: &str,
+    ) -> Result<(), StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        let changed = conn
+            .execute(
+                "UPDATE friend_invites SET recipient_peer_key = ?2
+                 WHERE nonce = ?1 AND direction = 'SENT'",
+                params![nonce, recipient_peer_key],
+            )
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        if changed == 0 {
+            return Err(StorageError::Sqlite(format!(
+                "MP-STORE-004 no sent invitation with nonce {nonce} to attribute"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The nonce of an outstanding invitation we issued to this peer and they
+    /// have neither accepted nor let expire. `None` means no request is on file,
+    /// so the wizard only reports a duplicate when one actually exists.
+    pub fn pending_sent_invite_for_recipient(
+        &self,
+        recipient_peer_key: &str,
+        now_ms: i64,
+    ) -> Result<Option<String>, StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT nonce FROM friend_invites
+                 WHERE direction = 'SENT' AND outcome = 'PENDING'
+                   AND recipient_peer_key = ?1 AND expires_at_ms > ?2
+                 ORDER BY issued_at_ms LIMIT 1",
+            )
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        let found = stmt
+            .query_map(params![recipient_peer_key, now_ms], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?
+            .next()
+            .transpose()
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(found)
     }
 
     /// Invitations addressed to us that are still waiting on a decision.
@@ -1446,6 +1505,19 @@ CREATE TABLE IF NOT EXISTS friend_invites (
 /// honest answer: this build never recorded an identity for them, so they must
 /// re-invite before their key can be trusted. Idempotent because it only ever
 /// touches rows with no trust state yet, and never demotes one that has it.
+/// Batch 9: which friend an issued invitation was handed to.
+///
+/// `friend_invites` records the inviter's own identity (an invite is signed by
+/// the device that created it, so `peer_key` is *ours*), which means nothing in
+/// the ledger could answer "have I already asked this person?". The wizard needs
+/// that to report a duplicate request from storage rather than inferring it from
+/// a trust state.
+const MIGRATION_007_ADD_COLUMN: &str =
+    "ALTER TABLE friend_invites ADD COLUMN recipient_peer_key TEXT;";
+
+const MIGRATION_007_INDEX: &str = "CREATE INDEX IF NOT EXISTS idx_friend_invites_recipient \
+    ON friend_invites (recipient_peer_key, direction, outcome);";
+
 const MIGRATION_006_BACKFILL: &str = "
 UPDATE friends SET trust_state = 'ACCEPTED',
     state_changed_at_ms = COALESCE(state_changed_at_ms, added_at_ms)
@@ -2639,5 +2711,104 @@ mod tests {
 
         db.retention_remove("to-delete").expect("remove");
         assert!(db.list_cache_entries().expect("list2").is_empty());
+    }
+
+    fn sent_invite(nonce_seed: u8, ours: &str, now_ms: i64) -> crate::friends::FriendInvite {
+        let identity = crate::identity::DeviceIdentity::from_seed_for_tests(ours, [nonce_seed; 32]);
+        crate::friends::create_invite(
+            &identity,
+            "Abhijai",
+            ours,
+            now_ms,
+            crate::friends::FRIEND_INVITE_TTL_MS,
+        )
+        .expect("invite")
+    }
+
+    #[test]
+    fn an_issued_invitation_can_be_attributed_to_the_friend_it_was_handed_to() {
+        let db = MoviePartyDb::open_in_memory().expect("open");
+        let ours = "abhijai-mac.tailc930b7.ts.net.";
+        let priya = "priya-mac.tailc930b7.ts.net.";
+        let now = 1_767_225_600_000_i64;
+        let invite = sent_invite(3, ours, now);
+        let nonce = invite.nonce.clone();
+        db.record_friend_invite(&invite, "SENT", now)
+            .expect("record");
+
+        // The invite names its sender, so until it is attributed there is no way
+        // to know who it was handed to — and no duplicate may be reported.
+        assert_eq!(
+            db.pending_sent_invite_for_recipient(priya, now)
+                .expect("query"),
+            None
+        );
+        db.set_invite_recipient(&nonce, priya).expect("attribute");
+        assert_eq!(
+            db.pending_sent_invite_for_recipient(priya, now)
+                .expect("query"),
+            Some(nonce.clone())
+        );
+        // Another friend's row must not inherit it.
+        assert_eq!(
+            db.pending_sent_invite_for_recipient("someone-else.tailc930b7.ts.net.", now)
+                .expect("query"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_settled_or_expired_invitation_is_no_longer_outstanding() {
+        let db = MoviePartyDb::open_in_memory().expect("open");
+        let ours = "abhijai-mac.tailc930b7.ts.net.";
+        let priya = "priya-mac.tailc930b7.ts.net.";
+        let now = 1_767_225_600_000_i64;
+        let invite = sent_invite(5, ours, now);
+        let nonce = invite.nonce.clone();
+        let expires = invite.expires_at_ms;
+        db.record_friend_invite(&invite, "SENT", now)
+            .expect("record");
+        db.set_invite_recipient(&nonce, priya).expect("attribute");
+        assert!(db
+            .pending_sent_invite_for_recipient(priya, now)
+            .expect("query")
+            .is_some());
+
+        // Past its expiry the same row stops counting, without any cleanup.
+        assert!(db
+            .pending_sent_invite_for_recipient(priya, expires)
+            .expect("query")
+            .is_none());
+
+        // And once it is accepted it is a friendship, not a pending request.
+        let second = sent_invite(6, ours, now);
+        let second_nonce = second.nonce.clone();
+        db.record_friend_invite(&second, "SENT", now)
+            .expect("record");
+        db.set_invite_recipient(&second_nonce, priya)
+            .expect("attribute");
+        assert!(db
+            .settle_friend_invite(&second_nonce, "ACCEPTED", now)
+            .expect("settle"));
+        assert_eq!(
+            db.pending_sent_invite_for_recipient(priya, now)
+                .expect("query"),
+            Some(nonce),
+            "the still-pending first invite is the outstanding one"
+        );
+    }
+
+    #[test]
+    fn an_invitation_we_received_is_never_attributed_as_one_we_sent() {
+        let db = MoviePartyDb::open_in_memory().expect("open");
+        let now = 1_767_225_600_000_i64;
+        let invite = sent_invite(9, "priya-mac.tailc930b7.ts.net.", now);
+        let nonce = invite.nonce.clone();
+        db.record_friend_invite(&invite, "RECEIVED", now)
+            .expect("record");
+        let error = db
+            .set_invite_recipient(&nonce, "someone")
+            .expect_err("a received invite is not ours to attribute");
+        assert!(error.to_string().contains("MP-STORE-004"), "{error}");
     }
 }
