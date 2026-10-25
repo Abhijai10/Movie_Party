@@ -12,7 +12,7 @@ use rusqlite::{params, Connection};
 
 use super::StorageError;
 
-const CURRENT_SCHEMA_VERSION: i32 = 5;
+const CURRENT_SCHEMA_VERSION: i32 = 6;
 
 /// Helper to lock a Mutex, converting PoisonError to StorageError.
 fn lock_mutex<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, StorageError> {
@@ -314,6 +314,23 @@ impl MoviePartyDb {
                 // present — that IS the interrupted state, where rows are
                 // still on the column default.
                 exec_sql(conn, MIGRATION_005_BACKFILL)
+            }
+            6 => {
+                // Each column is guarded on its own: an interrupted v6 leaves
+                // some of them present, and a blind re-run would abort the
+                // whole migration on the first duplicate (see the F51 note).
+                for column in [
+                    "peer_device_id",
+                    "public_key",
+                    "trust_state",
+                    "state_changed_at_ms",
+                ] {
+                    if !column_exists(conn, "friends", column)? {
+                        exec_sql(conn, &migration_006_add_column(column))?;
+                    }
+                }
+                exec_sql(conn, MIGRATION_006_INVITES)?;
+                exec_sql(conn, MIGRATION_006_BACKFILL)
             }
             other => Err(StorageError::Sqlite(format!(
                 "MP-STORE-003 unknown migration version {other}"
@@ -628,6 +645,169 @@ impl MoviePartyDb {
 
     /// Remove a saved friend by peer key.
     pub fn delete_friend(&self, peer_key: &str) -> Result<(), StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        conn.execute("DELETE FROM friends WHERE peer_key = ?1", [peer_key])
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(())
+    }
+
+    // ── Friendship lifecycle (v6) ──────────────────────────────────────────
+
+    /// Bind a friend row to the peer's device identity. Friendship is a claim
+    /// about a key; `peer_key` alone is a DNS name the other side can rename, and
+    /// `display_name` is text anyone can type.
+    pub fn set_friend_identity(
+        &self,
+        peer_key: &str,
+        peer_device_id: &str,
+        public_key: &str,
+    ) -> Result<(), StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        conn.execute(
+            "UPDATE friends SET peer_device_id = ?2, public_key = ?3 WHERE peer_key = ?1",
+            params![peer_key, peer_device_id, public_key],
+        )
+        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Move a friend along the lifecycle. `changed_at_ms` is stored so the UI can
+    /// say when a state began rather than guessing from `added_at_ms`.
+    pub fn set_friend_trust_state(
+        &self,
+        peer_key: &str,
+        state: crate::friends::FriendshipState,
+        changed_at_ms: i64,
+    ) -> Result<(), StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        conn.execute(
+            "UPDATE friends SET trust_state = ?2, state_changed_at_ms = ?3 WHERE peer_key = ?1",
+            params![peer_key, state.as_str(), changed_at_ms],
+        )
+        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(())
+    }
+
+    /// What we believe about an identity, looked up by device id **or** key. A
+    /// peer that reinstalls and gets a new device id is still the same key, and a
+    /// block that could be evaded by reinstalling is not a block.
+    pub fn trust_for_identity(
+        &self,
+        peer_device_id: &str,
+        public_key: &str,
+    ) -> Result<Option<crate::friends::FriendshipState>, StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT trust_state FROM friends
+                 WHERE peer_device_id = ?1 OR public_key = ?2 LIMIT 1",
+            )
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        let found = stmt
+            .query_map(params![peer_device_id, public_key], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?
+            .next()
+            .transpose()
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        match found.flatten() {
+            // A row with no trust state cannot exist after the v6 backfill, but
+            // reading one as `NOT_FRIENDS` is the only safe answer if it does.
+            Some(value) => crate::friends::FriendshipState::parse(&value)
+                .ok()
+                .map_or(Ok(None), |state| Ok(Some(state))),
+            None => Ok(None),
+        }
+    }
+
+    /// Record an invitation we issued or received. The nonce is the primary key,
+    /// which is what makes single-use a property of the storage rather than a
+    /// promise made in memory.
+    pub fn record_friend_invite(
+        &self,
+        invite: &crate::friends::FriendInvite,
+        direction: &str,
+        now_ms: i64,
+    ) -> Result<(), StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        conn.execute(
+            "INSERT INTO friend_invites
+                (nonce, direction, peer_device_id, public_key, display_name,
+                 issued_at_ms, expires_at_ms, outcome, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'PENDING', ?8)
+             ON CONFLICT(nonce) DO UPDATE SET updated_at_ms = excluded.updated_at_ms",
+            params![
+                invite.nonce,
+                direction,
+                invite.from_device_id,
+                invite.from_public_key,
+                invite.from_display_name,
+                invite.issued_at_ms,
+                invite.expires_at_ms,
+                now_ms
+            ],
+        )
+        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Settle an invitation exactly once. Returns false when it is already
+    /// settled, so a second acceptance cannot take effect.
+    pub fn settle_friend_invite(
+        &self,
+        nonce: &str,
+        outcome: &str,
+        now_ms: i64,
+    ) -> Result<bool, StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        let changed = conn
+            .execute(
+                "UPDATE friend_invites SET outcome = ?2, updated_at_ms = ?3
+                 WHERE nonce = ?1 AND outcome = 'PENDING'",
+                params![nonce, outcome, now_ms],
+            )
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(changed == 1)
+    }
+
+    pub fn friend_invite_outcome(&self, nonce: &str) -> Result<Option<String>, StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        Ok(conn
+            .query_row(
+                "SELECT outcome FROM friend_invites WHERE nonce = ?1",
+                [nonce],
+                |row| row.get::<_, String>(0),
+            )
+            .ok())
+    }
+
+    /// Invitations addressed to us that are still waiting on a decision.
+    pub fn pending_friend_invites(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<(String, String, String)>, StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT nonce, peer_device_id, display_name FROM friend_invites
+                 WHERE direction = 'RECEIVED' AND outcome = 'PENDING' AND expires_at_ms > ?1
+                 ORDER BY issued_at_ms",
+            )
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        let rows = stmt
+            .query_map([now_ms], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        let mut pending = Vec::new();
+        for row in rows {
+            pending.push(row.map_err(|e| StorageError::Sqlite(e.to_string()))?);
+        }
+        Ok(pending)
+    }
+
+    /// Delete a friendship row outright, tombstone included. Used only when the
+    /// user asks for their records cleared; removal itself keeps the tombstone.
+    pub fn purge_friend_identity(&self, peer_key: &str) -> Result<(), StorageError> {
         let conn = lock_mutex(&self.conn)?;
         conn.execute("DELETE FROM friends WHERE peer_key = ?1", [peer_key])
             .map_err(|e| StorageError::Sqlite(e.to_string()))?;
@@ -1110,8 +1290,61 @@ UPDATE friends SET connection_state = 'MOVIE_PARTY_VERIFIED'
     WHERE last_verified_at_ms IS NOT NULL;
 ";
 
-// ── Tests ───────────────────────────────────────────────────────────────────
+/// v6: friendship is a claim about a device IDENTITY, so the row must be able to
+/// say which key it trusts, which lifecycle stage the friendship is in, and — for
+/// `Removed`/`Blocked` — must keep saying so after a restart. `connection_state`
+/// stays what it always was: where the peer is on the network. Trust is separate,
+/// because the two answer different questions and must not overwrite each other.
+fn migration_006_add_column(column: &str) -> String {
+    let declaration = match column {
+        "peer_device_id" => "TEXT",
+        "public_key" => "TEXT",
+        // No default: an absent trust state must never read as a claim of
+        // friendship. The backfill below sets it explicitly for every row.
+        "trust_state" => "TEXT",
+        "state_changed_at_ms" => "INTEGER",
+        other => unreachable!("v6 asks for an unknown column {other}"),
+    };
+    format!("ALTER TABLE friends ADD COLUMN {column} {declaration};")
+}
 
+/// v6 (part 2): the invite ledger. One row per issued or received invitation,
+/// keyed by its nonce, so an answered, declined, revoked or lapsed invite can
+/// never be accepted again. `CREATE TABLE IF NOT EXISTS` is idempotent, so an
+/// interrupted step resumes without a guard.
+const MIGRATION_006_INVITES: &str = "
+CREATE TABLE IF NOT EXISTS friend_invites (
+    nonce            TEXT PRIMARY KEY,
+    direction        TEXT NOT NULL CHECK (direction IN ('SENT', 'RECEIVED')),
+    peer_device_id   TEXT NOT NULL,
+    public_key       TEXT NOT NULL,
+    display_name     TEXT NOT NULL,
+    issued_at_ms     INTEGER NOT NULL,
+    expires_at_ms    INTEGER NOT NULL,
+    outcome          TEXT NOT NULL DEFAULT 'PENDING'
+                     CHECK (outcome IN ('PENDING', 'ACCEPTED', 'DECLINED', 'REVOKED', 'EXPIRED')),
+    updated_at_ms    INTEGER NOT NULL
+);
+";
+
+/// v6 (part 3): place every pre-existing friend on the new lifecycle.
+///
+/// A row already treated as a friend becomes `ACCEPTED`; one still waiting on an
+/// invitation becomes `INVITED`. Their `public_key` stays NULL, which is the
+/// honest answer: this build never recorded an identity for them, so they must
+/// re-invite before their key can be trusted. Idempotent because it only ever
+/// touches rows with no trust state yet, and never demotes one that has it.
+const MIGRATION_006_BACKFILL: &str = "
+UPDATE friends SET trust_state = 'ACCEPTED',
+    state_changed_at_ms = COALESCE(state_changed_at_ms, added_at_ms)
+    WHERE trust_state IS NULL
+      AND connection_state IN ('TAILSCALE_JOINED', 'MOVIE_PARTY_VERIFIED');
+UPDATE friends SET trust_state = 'INVITED',
+    state_changed_at_ms = COALESCE(state_changed_at_ms, added_at_ms)
+    WHERE trust_state IS NULL;
+";
+
+// ── Tests ───────────────────────────────────────────────────────────────────
 /// Read the `user_version` schema header, propagating a read failure.
 ///
 /// Deliberately NOT `.unwrap_or(0)`. `0` means "no schema yet" and is below
@@ -1197,6 +1430,192 @@ mod tests {
             .find(|friend| friend.peer_key == peer_key)
             .expect("row")
             .connection_state
+    }
+
+    #[test]
+    fn a_block_follows_the_key_rather_than_the_device_id() {
+        use crate::friends::FriendshipState;
+        let db = MoviePartyDb::open_in_memory().expect("open");
+        let peer = "priya-mac.tailc930b7.ts.net.";
+        db.upsert_friend(&stored_friend(peer, FriendConnectionState::Invited))
+            .expect("insert");
+        db.set_friend_identity(peer, "device-one", "KEY-BYTES")
+            .expect("bind");
+        db.set_friend_trust_state(peer, FriendshipState::Blocked, 5_000)
+            .expect("block");
+
+        assert_eq!(
+            db.trust_for_identity("device-one", "OTHER-KEY")
+                .expect("read"),
+            Some(FriendshipState::Blocked)
+        );
+        // Reinstalling changes the device id, not the key. A block that could be
+        // evaded by reinstalling would not be a block.
+        assert_eq!(
+            db.trust_for_identity("device-two", "KEY-BYTES")
+                .expect("read"),
+            Some(FriendshipState::Blocked)
+        );
+        // An identity never seen before has no position at all — which is not the
+        // same answer as "blocked", and must not be coerced into one.
+        assert_eq!(
+            db.trust_for_identity("device-three", "UNKNOWN")
+                .expect("read"),
+            None
+        );
+    }
+
+    #[test]
+    fn removal_is_a_position_that_survives_and_can_be_taken_up_again() {
+        use crate::friends::FriendshipState;
+        let db = MoviePartyDb::open_in_memory().expect("open");
+        let peer = "sam-win.tailc930b7.ts.net.";
+        db.upsert_friend(&stored_friend(peer, FriendConnectionState::Invited))
+            .expect("insert");
+        db.set_friend_identity(peer, "device-sam", "SAM-KEY")
+            .expect("bind");
+        db.set_friend_trust_state(peer, FriendshipState::Removed, 6_000)
+            .expect("remove");
+        assert_eq!(
+            db.trust_for_identity("device-sam", "SAM-KEY")
+                .expect("read"),
+            Some(FriendshipState::Removed),
+            "removal must remain a recorded position, not become 'never known'"
+        );
+        // Re-adding is an explicit move back to PENDING_ACCEPTANCE, never a
+        // silent return to friendship.
+        db.set_friend_trust_state(peer, FriendshipState::PendingAcceptance, 7_000)
+            .expect("re-add");
+        assert_eq!(
+            db.trust_for_identity("device-sam", "SAM-KEY")
+                .expect("read"),
+            Some(FriendshipState::PendingAcceptance)
+        );
+    }
+
+    #[test]
+    fn an_invitation_settles_exactly_once() {
+        let db = MoviePartyDb::open_in_memory().expect("open");
+        let invite = crate::friends::create_invite(
+            &crate::identity::DeviceIdentity::from_seed_for_tests(
+                "7d1a9c3e-2b4f-7a61-9c3e-0000000000ab",
+                [4u8; 32],
+            ),
+            "Riya",
+            1_000,
+            60_000,
+        )
+        .expect("invite");
+        db.record_friend_invite(&invite, "RECEIVED", 1_100)
+            .expect("record");
+        // Receiving the same link twice does not create a second decision.
+        db.record_friend_invite(&invite, "RECEIVED", 1_200)
+            .expect("record again");
+        assert_eq!(db.pending_friend_invites(1_300).expect("pending").len(), 1);
+
+        assert!(
+            db.settle_friend_invite(&invite.nonce, "ACCEPTED", 1_400)
+                .expect("settle"),
+            "the first acceptance should take effect"
+        );
+        assert!(
+            !db.settle_friend_invite(&invite.nonce, "DECLINED", 1_500)
+                .expect("settle again"),
+            "a settled invite accepted a second decision"
+        );
+        assert_eq!(
+            db.friend_invite_outcome(&invite.nonce)
+                .expect("read")
+                .as_deref(),
+            Some("ACCEPTED")
+        );
+        assert!(db
+            .pending_friend_invites(1_600)
+            .expect("pending")
+            .is_empty());
+    }
+
+    #[test]
+    fn an_answered_invite_never_presents_itself_as_still_pending() {
+        let db = MoviePartyDb::open_in_memory().expect("open");
+        let invite = crate::friends::create_invite(
+            &crate::identity::DeviceIdentity::from_seed_for_tests(
+                "7d1a9c3e-2b4f-7a61-9c3e-0000000000cd",
+                [5u8; 32],
+            ),
+            "Dev",
+            1_000,
+            60_000,
+        )
+        .expect("invite");
+        db.record_friend_invite(&invite, "RECEIVED", 1_100)
+            .expect("record");
+        assert_eq!(db.pending_friend_invites(1_200).expect("pending").len(), 1);
+        // Past its expiry the invite is simply not offered for a decision again.
+        assert!(
+            db.pending_friend_invites(invite.expires_at_ms)
+                .expect("pending")
+                .is_empty(),
+            "an expired invite was still offered"
+        );
+        // Revocation works the same way without touching expiry arithmetic.
+        let other = crate::friends::create_invite(
+            &crate::identity::DeviceIdentity::from_seed_for_tests(
+                "7d1a9c3e-2b4f-7a61-9c3e-0000000000ef",
+                [6u8; 32],
+            ),
+            "Ann",
+            1_000,
+            60_000,
+        )
+        .expect("invite");
+        db.record_friend_invite(&other, "SENT", 1_100)
+            .expect("record");
+        db.settle_friend_invite(&other.nonce, "REVOKED", 1_200)
+            .expect("revoke");
+        assert_eq!(
+            db.friend_invite_outcome(&other.nonce)
+                .expect("read")
+                .as_deref(),
+            Some("REVOKED")
+        );
+    }
+
+    #[test]
+    fn migration_v6_is_safe_to_repeat_after_an_interruption() {
+        // The interrupted state: some columns present, version still 5.
+        let db = MoviePartyDb::open_in_memory().expect("open");
+        let conn = db.conn.lock().expect("lock");
+        assert!(
+            column_exists(&conn, "friends", "trust_state").expect("column check"),
+            "v6 did not add the trust state"
+        );
+        assert!(column_exists(&conn, "friends", "peer_device_id").expect("check"));
+        assert!(column_exists(&conn, "friends", "public_key").expect("check"));
+        assert!(column_exists(&conn, "friends", "state_changed_at_ms").expect("check"));
+        drop(conn);
+        // Applying the same step again must not abort on a duplicate column.
+        {
+            let conn = db.conn.lock().expect("lock");
+            MoviePartyDb::apply_migration_body(&conn, 6).expect("v6 re-run");
+        }
+        assert!(
+            db.list_friends().expect("list").is_empty(),
+            "a repeated migration invented a row"
+        );
+    }
+
+    fn stored_friend(peer_key: &str, state: FriendConnectionState) -> StoredFriend {
+        StoredFriend {
+            peer_key: peer_key.to_string(),
+            display_name: peer_key.split('.').next().unwrap_or(peer_key).to_string(),
+            ip: None,
+            added_at_ms: 1_000,
+            last_verified_at_ms: None,
+            last_path: None,
+            last_latency_ms: None,
+            connection_state: state,
+        }
     }
 
     #[test]
