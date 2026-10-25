@@ -1108,3 +1108,65 @@ export async function installCompanionHost(extensionId: string): Promise<string>
 export async function removeCompanionHost(): Promise<void> {
   await invoke("companion_remove_host");
 }
+
+/** Where a device stands in the friendship lifecycle. Distinct from
+ * `FriendConnectionState`, which describes the network, not the trust. */
+export type FriendshipState =
+  | "NOT_FRIENDS"
+  | "INVITED"
+  | "PENDING_ACCEPTANCE"
+  | "ACCEPTED"
+  | "BLOCKED"
+  | "REMOVED"
+  | "CONNECTION_UNAVAILABLE";
+
+export type IncomingInvite = {
+  nonce: string;
+  displayName: string;
+  peerKey: string;
+  fingerprint: string;
+  expiresAtMs: number;
+  knownState: FriendshipState | null;
+  warning: string | null;
+};
+
+export type SentInvite = { link: string; expiresAtMs: number; fingerprint: string };
+
+export async function requestSignedFriendInvite(): Promise<SentInvite> {
+  return invoke<SentInvite>("friend_invite_signed");
+}
+
+/** Read an invitation without committing anything. Accepting is a separate call. */
+export async function previewFriendInvite(link: string): Promise<IncomingInvite> {
+  return invoke<IncomingInvite>("preview_friend_invite", { link });
+}
+
+export async function acceptFriendInvitation(nonce: string): Promise<StoredFriend> {
+  return invoke<StoredFriend>("accept_friend_invitation", { nonce });
+}
+
+export async function declineFriendInvitation(nonce: string): Promise<void> {
+  await invoke("decline_friend_invitation", { nonce });
+}
+
+export async function blockFriend(peerKey: string): Promise<FriendshipState> {
+  return invoke<FriendshipState>("block_friend", { peerKey });
+}
+
+export async function unblockFriend(peerKey: string): Promise<FriendshipState> {
+  return invoke<FriendshipState>("unblock_friend", { peerKey });
+}
+
+export async function removeFriendTrust(peerKey: string): Promise<FriendshipState> {
+  return invoke<FriendshipState>("remove_friend_trust", { peerKey });
+}
+
+export async function getFriendshipState(peerKey: string): Promise<FriendshipState | null> {
+  return invoke<FriendshipState | null>("friendship_state", { peerKey });
+}
+
+/** Every saved friend's trust position, in one round trip. */
+export async function friendTrustStates(): Promise<Record<string, FriendshipState>> {
+  const rows = await invoke<[string, FriendshipState][]>("friendship_states");
+  return Object.fromEntries(rows);
+}
