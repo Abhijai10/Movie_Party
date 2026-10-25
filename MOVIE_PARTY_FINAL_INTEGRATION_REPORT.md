@@ -43,7 +43,7 @@ created; no release asset was uploaded.
 | Friend invitation/security | PASS — signing, replay, block/remove, consent gating, invite ledger |
 | Tailscale onboarding state | PASS — reducer + runtime + live CLI identity test |
 | `cargo audit` / `pnpm audit --prod` | PASS — 0 vulnerabilities (7 dev-only transitive findings documented) |
-| GitHub CI (macOS + Windows) | **NOT RUN** — dispatched on the candidate SHA (see Phase D); no CI run had completed at the time of the gate run |
+| GitHub CI (macOS + Windows) | PASS — rc-build run 40236368933 completed green on `d2ce3e0`; both platform jobs built the installers |
 
 ### Executions vs skips vs simulations
 
@@ -137,10 +137,10 @@ Automated evidence marks what the suites actually prove. Physical rows are
 | Item | Value |
 | --- | --- |
 | EXACT_FINAL_RC_SHA | ``d2ce3e03ee10d4c9a4eb54aa7b35eba186351589`` |
-| Local macOS build | not built locally; the approved `rc-build.yml` workflow is the only build path used |
-| CI dispatch | `rc-build.yml` on `d2ce3e0` — [run 40236368933](https://github.com/Abhijai10/Movie_Party/actions/runs/40236368933), dispatched 2026-10-26, in progress at report time |
-| Artifacts (names) | pending the dispatched run; names will follow the workflow's `Movie Party_0.9.9_*` pattern (Windows x64 NSIS EXE, macOS ARM64 DMG) |
-| SHA-256 checksums | pending the dispatched run; the workflow computes and uploads SHA-256 checksums itself |
+| Local macOS build | installed from the CI DMG into `/Applications/Movie Party.app` (0.9.9); Windows EXE copied to `~/Downloads` |
+| CI dispatch | `rc-build.yml` on `d2ce3e0` — [run 40236368933](https://github.com/Abhijai10/Movie_Party/actions/runs/40236368933) — **completed, both jobs succeeded** (Windows x64, macOS arm64) |
+| Artifacts (names) | `Movie Party_0.9.9_aarch64.dmg` (macOS ARM64), `Movie Party_0.9.9_x64-setup.exe` (Windows x64 NSIS) — both from run 40236368933 |
+| SHA-256 checksums | DMG `e34dcdd7f18578a5f509f2e22d8e10c47f65505d83f86075680ad3f3d3769327`; EXE `ac3556eaecd4b168bd6f91d4b30d2b0c81be5009d0f69bab4d0121dfb9a7f28e` — independently recomputed locally and matching the workflow's own `SHA256SUMS.txt` |
 | Tag / release created | **None** (by design and by instruction) |
 
 ## Phase E — physical validation
