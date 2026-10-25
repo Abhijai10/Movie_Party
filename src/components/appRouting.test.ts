@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { BOOT_SLOW_AFTER_SECONDS, resolveAppScreen, type AppRouteInput, type AppScreen } from "./appRouting";
+import {
+  BOOT_SLOW_AFTER_SECONDS,
+  resolveAppScreen,
+  type AppRouteInput,
+  type AppScreen,
+} from "./appRouting";
 
 /**
  * F55: the application shell's routing decision.
@@ -38,7 +43,9 @@ describe("boot gates", () => {
     expect(route({ hasSnapshot: false, secondsWaiting: BOOT_SLOW_AFTER_SECONDS - 1 })).toBe(
       "BOOT_STARTING",
     );
-    expect(route({ hasSnapshot: false, secondsWaiting: BOOT_SLOW_AFTER_SECONDS })).toBe("BOOT_SLOW");
+    expect(route({ hasSnapshot: false, secondsWaiting: BOOT_SLOW_AFTER_SECONDS })).toBe(
+      "BOOT_SLOW",
+    );
   });
 
   it("outranks every other input — nothing can be routed without a snapshot", () => {
@@ -194,6 +201,7 @@ describe("the route space is fully covered", () => {
       route({ localScreen: "SETTINGS" }),
       route({ localScreen: "SCHEDULE" }),
       route({ localScreen: "FRIENDS" }),
+      route({ localScreen: "ONBOARDING" }),
       route({ closePromptVisible: true }),
       route({ localScreen: "CREATE_PARTY" }),
       route({ backendScreen: "JOIN_PARTY" }),
@@ -214,6 +222,7 @@ describe("the route space is fully covered", () => {
       "SETTINGS",
       "SCHEDULE",
       "FRIENDS",
+      "ONBOARDING",
       "CLOSE_PROMPT",
       "END_PARTY_CONFIRM",
       "CREATE_PARTY",

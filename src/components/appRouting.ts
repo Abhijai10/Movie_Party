@@ -35,6 +35,8 @@ export type AppScreen =
   | "SETTINGS"
   | "SCHEDULE"
   | "FRIENDS"
+  /** Batch 9: the guided friend + Tailscale wizard. */
+  | "ONBOARDING"
   /** §69 window-close-during-party confirmation. */
   | "CLOSE_PROMPT"
   /** The backend's own `PARTY_END_CONFIRM` screen. */
@@ -106,6 +108,9 @@ export function resolveAppScreen(input: AppRouteInput): AppScreen {
   }
   if (input.localScreen === "FRIENDS") {
     return "FRIENDS";
+  }
+  if (input.localScreen === "ONBOARDING") {
+    return "ONBOARDING";
   }
 
   // 10. §69 close-during-party confirmation — outranks Create Party, but not

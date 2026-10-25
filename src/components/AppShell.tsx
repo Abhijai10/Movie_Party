@@ -23,6 +23,19 @@ import {
   openProviderBrowser,
   providerSessionErrorMessage,
   openTailscaleSetup,
+  onboardingBegin,
+  onboardingCancel,
+  onboardingCheckReachability,
+  onboardingChooseMethod,
+  onboardingInvitationPackage,
+  onboardingOpenAdmin,
+  onboardingOpenShareLink,
+  onboardingPasteShareLink,
+  onboardingRefresh,
+  onboardingReportLinkExpired,
+  onboardingSetSide,
+  onboardingView as fetchOnboardingView,
+  type OnboardingView,
   setSharedControls,
   showHome,
   showJoinParty,
@@ -46,6 +59,7 @@ import { CreatePartyView, type CreatePartyRequest } from "../views/CreatePartyVi
 import { EndPartyConfirmView } from "../views/EndPartyConfirmView";
 import { HomeView } from "../views/HomeView";
 import { FriendsView } from "../views/FriendsView";
+import { OnboardingWizardView } from "../views/OnboardingWizardView";
 import { JoinPartyView } from "../views/JoinPartyView";
 import { LobbyView } from "../views/LobbyView";
 import { ReadyCheckView } from "../views/ReadyCheckView";
@@ -56,11 +70,23 @@ import { listRecentMedia, localStorageOrNull } from "../schedule/recentMedia";
 import { LoadingState } from "./LoadingState";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { handleFailureEvent } from "../backend/appRuntime";
-import { createSingleFlight, isTailscaleReady, pollIntervalMs } from "../backend/tailscaleOnboarding";
+import {
+  createSingleFlight,
+  isTailscaleReady,
+  pollIntervalMs,
+} from "../backend/tailscaleOnboarding";
 import { resolveAppScreen } from "./appRouting";
 import { createFlowToken, evaluateSnapshotOutcome } from "../views/commandOutcome";
 
-type LocalScreen = "CREATE_PARTY" | "SETTINGS" | "SCHEDULE" | "FRIENDS" | "FIRST_RUN" | null;
+type LocalScreen =
+  | "CREATE_PARTY"
+  | "SETTINGS"
+  | "SCHEDULE"
+  | "FRIENDS"
+  /** Batch 9: the guided friend + Tailscale wizard. */
+  | "ONBOARDING"
+  | "FIRST_RUN"
+  | null;
 
 /** §69: window-close-during-party state. */
 type ClosePromptState = { visible: boolean; isHost: boolean };
@@ -71,20 +97,30 @@ const developmentPreviewEnabled =
 
 export function AppShell() {
   const { snapshot, setSnapshot } = useAppSnapshot();
-  const [isCreating,setIsCreating]=useState(false);
+  const [isCreating, setIsCreating] = useState(false);
   return (
     <>
-      <AppShellContent snapshot={snapshot} setSnapshot={setSnapshot} isCreating={isCreating} setIsCreating={setIsCreating} />
+      <AppShellContent
+        snapshot={snapshot}
+        setSnapshot={setSnapshot}
+        isCreating={isCreating}
+        setIsCreating={setIsCreating}
+      />
       <YoutubeRuntime snapshot={snapshot} onSnapshot={setSnapshot} allowAutomatic={!isCreating} />
     </>
   );
 }
 
-function AppShellContent({ snapshot, setSnapshot, isCreating, setIsCreating }: {
+function AppShellContent({
+  snapshot,
+  setSnapshot,
+  isCreating,
+  setIsCreating,
+}: {
   snapshot: AppSnapshot | null;
   setSnapshot: (next: AppSnapshot) => void;
   isCreating: boolean;
-  setIsCreating: (next:boolean) => void;
+  setIsCreating: (next: boolean) => void;
 }) {
   const [localScreen, setLocalScreen] = useState<LocalScreen>(null);
   const [isJoining, setIsJoining] = useState(false);
@@ -114,6 +150,14 @@ function AppShellContent({ snapshot, setSnapshot, isCreating, setIsCreating }: {
   const [preloadProgress, setPreloadProgress] = useState<Record<string, number>>({});
   /** Saved friends (Add Friend surface) — refreshed by FriendsPanel. */
   const [friends, setFriends] = useState<StoredFriend[]>([]);
+  /**
+   * Batch 9: the wizard's own reading. Held here rather than in the view so a
+   * refresh, a stage action and the poll all write one source of truth, and so
+   * the raw pasted Tailscale link never has to live in React state at all.
+   */
+  const [wizard, setWizard] = useState<OnboardingView | null>(null);
+  const [wizardBusy, setWizardBusy] = useState<string | null>(null);
+  const [wizardError, setWizardError] = useState<string | null>(null);
   /** A friend invite that arrived via deep link — accepted by FriendsView. */
   const [pendingFriendInvite, setPendingFriendInvite] = useState<string | null>(null);
   const [firstRunDone, setFirstRunDone] = useState<boolean>(() => {
@@ -318,8 +362,7 @@ function AppShellContent({ snapshot, setSnapshot, isCreating, setIsCreating }: {
 
   // (§53): refresh upcoming schedules when home is visible.
   const isHomeVisible =
-    snapshot === null ||
-    (snapshot.screen === "HOME" && localScreen === null && devScreen === null);
+    snapshot === null || (snapshot.screen === "HOME" && localScreen === null && devScreen === null);
   useEffect(() => {
     if (!isHomeVisible) return;
     let cancelled = false;
@@ -483,33 +526,26 @@ function AppShellContent({ snapshot, setSnapshot, isCreating, setIsCreating }: {
     });
   }, []);
 
-  const openSetup = useCallback(
-    (action: TailscaleSetupAction) => {
-      void openTailscaleSetup(action).then((message) => {
-        setSetupOpenError(message);
-      });
-    },
-    [],
-  );
+  const openSetup = useCallback((action: TailscaleSetupAction) => {
+    void openTailscaleSetup(action).then((message) => {
+      setSetupOpenError(message);
+    });
+  }, []);
 
   useEffect(() => {
     void refreshConnectivity();
   }, [refreshConnectivity]);
 
-  const tailscaleReady =
-    tailscaleReadiness !== null && isTailscaleReady(tailscaleReadiness.state);
+  const tailscaleReady = tailscaleReadiness !== null && isTailscaleReady(tailscaleReadiness.state);
 
   useEffect(() => {
     // Poll connectivity continuously. A slower cadence while READY keeps the
     // setup gate truthful for READY → STOPPED transitions without hammering
     // the backend; a fast cadence while not READY lets the app unlock the
     // moment Tailscale becomes usable.
-    const interval = setInterval(
-      () => {
-        void refreshConnectivity();
-      },
-      pollIntervalMs(tailscaleReady),
-    );
+    const interval = setInterval(() => {
+      void refreshConnectivity();
+    }, pollIntervalMs(tailscaleReady));
     return () => {
       clearInterval(interval);
     };
@@ -557,6 +593,56 @@ function AppShellContent({ snapshot, setSnapshot, isCreating, setIsCreating }: {
     setCommandError(null);
     setDevScreen(null);
     setLocalScreen("FRIENDS");
+  };
+
+  /** One in-flight wizard action at a time; any failure stays readable. */
+  const runWizard = useCallback(async (action: string, call: () => Promise<OnboardingView>) => {
+    setWizardBusy(action);
+    setWizardError(null);
+    try {
+      setWizard(await call());
+    } catch (error) {
+      setWizardError(commandErrorMessage(error, "The wizard could not complete this step."));
+    } finally {
+      setWizardBusy(null);
+    }
+  }, []);
+
+  const pasteWizardLink = useCallback(async (link: string) => {
+    setWizardBusy("paste");
+    setWizardError(null);
+    try {
+      // The backend keeps the link in memory only; the shell never stores it.
+      await onboardingPasteShareLink(link);
+      setWizard(await fetchOnboardingView());
+    } catch (error) {
+      setWizardError(commandErrorMessage(error, "The wizard could not complete this step."));
+    } finally {
+      setWizardBusy(null);
+    }
+  }, []);
+
+  const copyWizardPackage = useCallback(async () => {
+    setWizardBusy("package");
+    setWizardError(null);
+    try {
+      const pkg = await onboardingInvitationPackage();
+      // A rejection here (no clipboard permission in the webview) lands in the
+      // same catch as every other wizard failure, with readable copy.
+      await navigator.clipboard.writeText(pkg.text);
+    } catch (error) {
+      setWizardError(commandErrorMessage(error, "The wizard could not complete this step."));
+    } finally {
+      setWizardBusy(null);
+    }
+  }, []);
+
+  const goOnboarding = () => {
+    abandonFlows();
+    setCommandError(null);
+    setDevScreen(null);
+    setLocalScreen("ONBOARDING");
+    void runWizard("refresh", fetchOnboardingView);
   };
 
   /**
@@ -644,7 +730,12 @@ function AppShellContent({ snapshot, setSnapshot, isCreating, setIsCreating }: {
           return false;
         }
 
-        const providerSnapshot = await launchProvider(request.providerId, source, request.mode, request.selectionKey);
+        const providerSnapshot = await launchProvider(
+          request.providerId,
+          source,
+          request.mode,
+          request.selectionKey,
+        );
         if (!createFlow.current.isCurrent(token)) return false;
         if (providerSnapshot.error) {
           applySnapshot(partySnapshot);
@@ -918,6 +1009,7 @@ function AppShellContent({ snapshot, setSnapshot, isCreating, setIsCreating }: {
           onOpenSettings={goSettings}
           onOpenSchedule={goSchedule}
           onOpenFriends={goFriends}
+          onOpenOnboarding={goOnboarding}
           onCancelSchedule={cancelSchedule}
         />
         {debugHudEnabled ? <DebugHud snapshot={snapshot} /> : null}
@@ -933,11 +1025,7 @@ function AppShellContent({ snapshot, setSnapshot, isCreating, setIsCreating }: {
   if (appScreen === "SETTINGS") {
     return (
       <>
-        <SettingsView
-          snapshot={snapshot}
-          onBack={goHome}
-          onSnapshot={applySnapshot}
-        />
+        <SettingsView snapshot={snapshot} onBack={goHome} onSnapshot={applySnapshot} />
         {debugHudEnabled ? <DebugHud snapshot={snapshot} /> : null}
       </>
     );
@@ -969,11 +1057,67 @@ function AppShellContent({ snapshot, setSnapshot, isCreating, setIsCreating }: {
       <>
         <FriendsView
           onBack={goHome}
+          onOpenOnboarding={goOnboarding}
           friends={friends}
           onFriendsChanged={setFriends}
           pendingInvite={pendingFriendInvite}
           onPendingInviteConsumed={() => {
             setPendingFriendInvite(null);
+          }}
+        />
+        {debugHudEnabled ? <DebugHud snapshot={snapshot} /> : null}
+      </>
+    );
+  }
+
+  // Batch 9: the guided friend + Tailscale wizard.
+  if (appScreen === "ONBOARDING") {
+    return (
+      <>
+        <OnboardingWizardView
+          view={wizard}
+          friends={friends}
+          busy={wizardBusy}
+          error={wizardError}
+          onBack={goHome}
+          onStart={(peerKey, side) => {
+            void runWizard("start", () => onboardingBegin(peerKey, side));
+          }}
+          onSetSide={(side) => {
+            void runWizard("side", () => onboardingSetSide(side));
+          }}
+          onChooseMethod={(method) => {
+            void runWizard("method", () => onboardingChooseMethod(method));
+          }}
+          onOpenAdmin={() => {
+            void runWizard("admin", onboardingOpenAdmin);
+          }}
+          onPasteShareLink={(link) => {
+            void pasteWizardLink(link);
+          }}
+          onOpenShareLink={() => {
+            void runWizard("openLink", async () => {
+              await onboardingOpenShareLink();
+              return fetchOnboardingView();
+            });
+          }}
+          onRefresh={() => {
+            void runWizard("refresh", onboardingRefresh);
+          }}
+          onCheckReachability={() => {
+            void runWizard("reachability", onboardingCheckReachability);
+          }}
+          onReportLinkExpired={() => {
+            void runWizard("expired", onboardingReportLinkExpired);
+          }}
+          onCopyPackage={() => {
+            void copyWizardPackage();
+          }}
+          onFinish={() => {
+            // Leaving the wizard forgets the session, and with it any pasted link.
+            void onboardingCancel().catch(() => undefined);
+            setWizard(null);
+            goHome();
           }}
         />
         {debugHudEnabled ? <DebugHud snapshot={snapshot} /> : null}
@@ -1118,6 +1262,7 @@ function AppShellContent({ snapshot, setSnapshot, isCreating, setIsCreating }: {
         onOpenSettings={goSettings}
         onOpenSchedule={goSchedule}
         onOpenFriends={goFriends}
+        onOpenOnboarding={goOnboarding}
         onCancelSchedule={cancelSchedule}
       />
       {debugHudEnabled ? <DebugHud snapshot={snapshot} /> : null}

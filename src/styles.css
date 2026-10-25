@@ -5504,3 +5504,138 @@ input[type=range].mp-range::-webkit-slider-thumb {
 .companion-settings ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .companion-settings li { font-size: 13px; color: #bdb3ce; border-bottom: 1px solid #2c2438; padding-bottom: 6px; }
 .companion-note { font-size: 12px; }
+
+/* ── Batch 9: the guided friend + Tailscale wizard ─────────────────────────
+   Same reason as every other custom surface in this file: styles.css is a
+   pre-built Tailwind output with no Tailwind dependency in the repo, so the few
+   things this screen needs that were never generated as utilities — a two-column
+   operate grid, an inner-scrolling checklist, a compact back pill, a four-column
+   flow table, a stage rail — are hand-written here. Nothing below redraws a
+   control: every clickable thing in the wizard is still a CinemaButton. */
+.onboarding-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 320px) minmax(0, 1fr);
+  gap: 1.5rem;
+  align-items: start;
+}
+@media (max-width: 1023px) {
+  .onboarding-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.onboarding-checklist {
+  display: grid;
+  gap: 10px;
+  max-height: 460px;
+  overflow-y: auto;
+  padding-right: 4px;
+  min-width: 0;
+}
+.onboarding-methods {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  min-width: 0;
+}
+@media (min-width: 1200px) {
+  .onboarding-methods {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+.onboarding-bullet {
+  position: relative;
+  padding-left: 14px;
+}
+.onboarding-bullet::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 0.62em;
+  width: 4px;
+  height: 4px;
+  border-radius: 9999px;
+  background: currentColor;
+  opacity: 0.7;
+}
+.onboarding-scroll-x {
+  overflow-x: auto;
+  min-width: 0;
+}
+.onboarding-flow-table {
+  width: 100%;
+  min-width: 520px;
+  border-collapse: collapse;
+  font-size: 12px;
+  color: #c6bed5;
+}
+.onboarding-flow-table th,
+.onboarding-flow-table td {
+  text-align: left;
+  padding: 7px 10px;
+  border-bottom: 1px solid #2c2438;
+  vertical-align: top;
+}
+.onboarding-flow-table thead th {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #bdb3ce;
+}
+.onboarding-flow-table tbody th {
+  color: #f4f1fa;
+  font-weight: 500;
+}
+.onboarding-rail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  margin: 20px 0 0;
+  padding: 0;
+  list-style: none;
+}
+/* Upcoming steps are the base state, so they carry the dimming; past and current
+   override it. 0.7 keeps a 10px uppercase label legible on the dark canvas. */
+.onboarding-rail li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #bdb3ce;
+  opacity: 0.7;
+}
+.onboarding-rail-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  border: 1px solid #5c526b;
+  flex-shrink: 0;
+}
+.onboarding-rail li[data-state="past"] {
+  color: #bdb3ce;
+  opacity: 1;
+}
+.onboarding-rail li[data-state="past"] .onboarding-rail-dot {
+  background: #7c55d6;
+  border-color: #7c55d6;
+}
+.onboarding-rail li[data-state="current"] {
+  color: #f4f1fa;
+  opacity: 1;
+}
+.onboarding-rail li[data-state="current"] .onboarding-rail-dot {
+  background: #9f7aea;
+  border-color: #c4b5fd;
+  box-shadow: 0 0 0 3px rgba(159, 122, 234, 0.18);
+}
+.onboarding-back {
+  min-height: 0;
+  padding: 10px 18px;
+  letter-spacing: 0.12em;
+}
+.onboarding-connected {
+  background: #2c1b2b;
+}

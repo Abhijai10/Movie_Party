@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { ArrowRight, CalendarDays, Settings, Ticket, Users } from "lucide-react";
+import { ArrowRight, CalendarDays, Compass, Settings, Ticket, Users } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { StoredSchedule } from "../backend/appRuntime";
 import { CinemaButton } from "../components/mp/CinemaButton";
@@ -23,6 +23,8 @@ type HomeViewProps = {
   onOpenSchedule: () => void;
   /** Open the Friends tab (invite links + friend list). */
   onOpenFriends: () => void;
+  /** Batch 9: open the guided friend + Tailscale setup wizard. */
+  onOpenOnboarding: () => void;
   /** F39: cancel a pending schedule. Absent when the caller cannot cancel. */
   onCancelSchedule?: (scheduleId: string) => void;
 };
@@ -67,9 +69,7 @@ function NavChip({
       className="flex items-center gap-2 px-3.5 py-2 rounded-full border border-white/12 bg-white/[0.06] hover:bg-white/[0.12] hover:border-white/25 transition text-white/75 hover:text-white"
     >
       <Icon className="w-4 h-4" strokeWidth={1.7} />
-      {iconOnly ? null : (
-        <span className="text-[11px] tracking-[0.18em] uppercase">{label}</span>
-      )}
+      {iconOnly ? null : <span className="text-[11px] tracking-[0.18em] uppercase">{label}</span>}
     </button>
   );
 }
@@ -83,6 +83,7 @@ export function HomeView({
   onOpenSettings,
   onOpenSchedule,
   onOpenFriends,
+  onOpenOnboarding,
   onCancelSchedule,
 }: HomeViewProps) {
   const mediaNameFor = mediaNameById;
@@ -91,10 +92,7 @@ export function HomeView({
     return percent != null ? String(Math.round(percent * 100)) : "0";
   };
   return (
-    <div
-      className="relative w-full min-h-screen flex flex-col"
-      data-testid="home-screen"
-    >
+    <div className="relative w-full min-h-screen flex flex-col" data-testid="home-screen">
       <div className="fixed inset-0 pointer-events-none">
         <SilkBackground />
       </div>
@@ -127,6 +125,12 @@ export function HomeView({
             testId="home-schedule-btn"
           />
           <NavChip icon={Users} label="Friends" onClick={onOpenFriends} testId="home-friends-btn" />
+          <NavChip
+            icon={Compass}
+            label="Set up"
+            onClick={onOpenOnboarding}
+            testId="home-onboarding-btn"
+          />
           <NavChip
             icon={Settings}
             label="Settings"
@@ -199,9 +203,7 @@ export function HomeView({
               guest is offline (§19). Nothing is faked. */}
           {upcoming.length > 0 ? (
             <section className="mt-10" data-testid="home-upcoming" aria-label="Upcoming parties">
-              <p className="text-[11px] tracking-[0.28em] uppercase text-white/45 mb-3">
-                Upcoming
-              </p>
+              <p className="text-[11px] tracking-[0.28em] uppercase text-white/45 mb-3">Upcoming</p>
               <ul className="space-y-3">
                 {upcoming.map((schedule) => (
                   <li

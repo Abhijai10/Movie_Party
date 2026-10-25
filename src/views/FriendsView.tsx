@@ -69,6 +69,8 @@ import {
  */
 type FriendsViewProps = {
   onBack: () => void;
+  /** Batch 9: open the guided friend + Tailscale setup wizard. */
+  onOpenOnboarding?: () => void;
   friends: StoredFriend[];
   onFriendsChanged: (friends: StoredFriend[]) => void;
   /** A friend invite that arrived via deep link — accepted on mount. */
@@ -78,6 +80,7 @@ type FriendsViewProps = {
 
 export function FriendsView({
   onBack,
+  onOpenOnboarding,
   friends,
   onFriendsChanged,
   pendingInvite,
@@ -333,7 +336,19 @@ export function FriendsView({
         >
           <ArrowLeft className="w-4 h-4" strokeWidth={1.6} /> Back
         </button>
-        <StatusIndicator state="sync" label="Strict Sync" />
+        <div className="flex items-center gap-3">
+          {onOpenOnboarding ? (
+            <CinemaButton
+              variant="neutral"
+              className="!min-h-11 !px-5"
+              onClick={onOpenOnboarding}
+              data-testid="friends-onboarding-btn"
+            >
+              Guided setup
+            </CinemaButton>
+          ) : null}
+          <StatusIndicator state="sync" label="Strict Sync" />
+        </div>
       </header>
 
       <main className="relative z-10 max-w-[1100px] w-full mx-auto px-12 mt-6 pb-20 flex-1 flex flex-col">
@@ -757,6 +772,9 @@ export function FriendsView({
                                   network themselves in the Tailscale app — using the Tailscale
                                   invite your network sends them (email or invite link), not this
                                   app. Movie Party cannot and will never join for them.
+                                  {onOpenOnboarding
+                                    ? " Guided setup (top right) walks both steps in one place."
+                                    : ""}
                                 </p>
                                 <div className="mt-2.5 flex flex-wrap items-center gap-2.5">
                                   <button

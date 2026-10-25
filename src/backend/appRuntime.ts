@@ -1170,3 +1170,185 @@ export async function friendTrustStates(): Promise<Record<string, FriendshipStat
   const rows = await invoke<[string, FriendshipState][]>("friendship_states");
   return Object.fromEntries(rows);
 }
+
+// ── Batch 9: guided friend + Tailscale onboarding ──────────────────────
+
+export type OnboardingSide = "HOST" | "GUEST";
+export type OnboardingMethod = "DEVICE_SHARING" | "TAILNET_MEMBERSHIP";
+export type WizardStage =
+  | "INVITE_FRIEND"
+  | "CHOOSE_METHOD"
+  | "TAILSCALE_APPROVAL"
+  | "PEER_REACHABILITY"
+  | "IDENTITY_VERIFICATION"
+  | "FRIEND_READY";
+export type CheckId =
+  | "TAILSCALE_INSTALLED"
+  | "TAILSCALE_SIGNED_IN"
+  | "NODE_KEY_VALID"
+  | "ADMIN_ABLE_TO_GRANT_ACCESS"
+  | "FRIEND_INVITED"
+  | "METHOD_CHOSEN"
+  | "PEER_VISIBLE_ON_NETWORK"
+  | "PEER_REACHABLE_THROUGH_TUNNEL"
+  | "DIRECTION_WORKS_FOR_MOVIE_PARTY"
+  | "MOVIE_PARTY_TRANSPORT_HANDSHAKE";
+export type CheckState = "PASSED" | "WAITING" | "FAILED" | "NOT_APPLICABLE";
+/** Requirement 15: only the last of these may be shown as "Connected". */
+export type Connectedness = "NOT_ATTEMPTED" | "TUNNEL_REACHABLE_ONLY" | "MOVIE_PARTY_HANDSHAKED";
+export type TailnetRole = "OWNER" | "ADMIN" | "LIMITED_USER" | "UNKNOWN";
+export type NodeKeyState = "UNKNOWN" | "VALID" | "EXPIRING_SOON" | "EXPIRED";
+export type DirectionEvidence = "REASONED_FROM_CODE_AND_DOCS" | "LIVE_VERIFIED_TWO_DEVICES";
+export type ShareLinkKind = "TAILSCALE_INVITE" | "TAILSCALE_LOGIN" | "NOT_A_TAILSCALE_LINK";
+
+/** Structured serde variants keep their payload in an object. */
+export type PeerTopology =
+  "SAME_TAILNET" | "UNKNOWN" | { SHARED_ACROSS_TAILNETS: { sharer: OnboardingSide } };
+export type DirectionVerdict =
+  "BOTH_DIRECTIONS_AVAILABLE" | "COMPATIBLE" | "UNKNOWN" | { INCOMPATIBLE: { remedy: string } };
+
+export type WizardCheck = { id: CheckId; state: CheckState; code: string | null };
+export type WizardIssue = {
+  id: string;
+  code: string;
+  headline: string;
+  guidance: string;
+  blocking: boolean;
+  stage: WizardStage;
+};
+
+export type OnboardingProgress = {
+  stage: WizardStage;
+  method: OnboardingMethod | null;
+  checks: WizardCheck[];
+  issues: WizardIssue[];
+  topology: PeerTopology;
+  direction: DirectionVerdict;
+  connectedness: Connectedness;
+  hasHandshakeProof: boolean;
+  finished: boolean;
+  waitingOnPartner: boolean;
+};
+
+export type MethodFacts = {
+  method: OnboardingMethod;
+  summary: string;
+  grants: string[];
+  limits: string[];
+  adminNeededBy: OnboardingSide;
+  recipientMustConsent: boolean;
+  adminUrl: string;
+};
+
+export type TransportFlow = {
+  name: string;
+  startsFrom: OnboardingSide;
+  needsReverseInitiation: boolean;
+  evidence: string;
+};
+
+export type TailnetIdentity = {
+  stableId: string | null;
+  magicDnsSuffix: string | null;
+  role: TailnetRole;
+  keyExpiry: string | null;
+  haveNodeKey: boolean | null;
+  loginUrlPending: boolean;
+};
+
+/**
+ * What Movie Party knows about a pasted Tailscale link. Deliberately metadata
+ * only: the bearer token is never in this shape, so it cannot be rendered,
+ * stored, or logged from it.
+ */
+export type ShareLinkSummary = {
+  kind: ShareLinkKind;
+  tokenFingerprint: string;
+  tailnetHandleMatchesLocal: boolean | null;
+};
+
+export type OnboardingView = {
+  active: boolean;
+  connected: boolean;
+  peerKey: string;
+  displayName: string;
+  mySide: OnboardingSide;
+  progress: OnboardingProgress;
+  shareLink: ShareLinkSummary | null;
+  ourFingerprint: string;
+  theirFingerprint: string | null;
+  nodeKey: NodeKeyState;
+  tailnet: TailnetIdentity | null;
+  probe: PeerConnectionProbe | null;
+  methods: MethodFacts[];
+  flows: TransportFlow[];
+  directionEvidence: DirectionEvidence;
+  observedAtMs: number;
+};
+
+export type InvitationPackage = {
+  text: string;
+  method: OnboardingMethod;
+  expiresAtMs: number;
+  oneTime: boolean;
+  carriesNoTailscaleSecret: boolean;
+};
+
+export async function onboardingView(): Promise<OnboardingView> {
+  return invoke<OnboardingView>("onboarding_view");
+}
+
+export async function onboardingBegin(
+  peerKey: string,
+  mySide: OnboardingSide,
+): Promise<OnboardingView> {
+  return invoke<OnboardingView>("onboarding_begin", { peerKey, mySide });
+}
+
+export async function onboardingCancel(): Promise<void> {
+  await invoke("onboarding_cancel");
+}
+
+export async function onboardingSetSide(mySide: OnboardingSide): Promise<OnboardingView> {
+  return invoke<OnboardingView>("onboarding_set_side", { mySide });
+}
+
+export async function onboardingChooseMethod(method: OnboardingMethod): Promise<OnboardingView> {
+  return invoke<OnboardingView>("onboarding_choose_method", { method });
+}
+
+/** Opens Tailscale's own admin page. Movie Party creates nothing itself. */
+export async function onboardingOpenAdmin(): Promise<OnboardingView> {
+  return invoke<OnboardingView>("onboarding_open_admin");
+}
+
+export async function onboardingPasteShareLink(link: string): Promise<ShareLinkSummary> {
+  return invoke<ShareLinkSummary>("onboarding_paste_share_link", { link });
+}
+
+export async function onboardingOpenShareLink(): Promise<void> {
+  await invoke("onboarding_open_share_link");
+}
+
+export async function onboardingReportLinkExpired(): Promise<OnboardingView> {
+  return invoke<OnboardingView>("onboarding_report_link_expired");
+}
+
+export async function onboardingRefresh(): Promise<OnboardingView> {
+  return invoke<OnboardingView>("onboarding_refresh");
+}
+
+export async function onboardingCheckReachability(): Promise<OnboardingView> {
+  return invoke<OnboardingView>("onboarding_check_reachability");
+}
+
+export async function onboardingInvitationPackage(): Promise<InvitationPackage> {
+  return invoke<InvitationPackage>("onboarding_invitation_package");
+}
+
+/** Stable MP-ONB code from a thrown command error, for honest failure copy. */
+export function onboardingErrorCode(error: unknown): string | null {
+  const text = error instanceof Error ? error.message : String(error);
+  const match = text.match(/MP-ONB-\d{3}/);
+  return match ? match[0] : null;
+}
