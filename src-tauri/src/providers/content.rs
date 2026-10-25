@@ -9,6 +9,10 @@ pub struct ContentIdentity {
     pub content_id: String,
     pub allowed_url: String,
     pub playlist_id: Option<String>,
+    /// The instalment within a show. A show ID alone cannot guarantee both
+    /// people land on the same episode, so it participates in the canonical
+    /// URL and the selection key while `content_id` stays the site's own ID.
+    pub episode_id: Option<String>,
 }
 
 fn token(value: &str, min: usize, max: usize) -> bool {
@@ -16,6 +20,32 @@ fn token(value: &str, min: usize, max: usize) -> bool {
         && value
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+}
+
+/// One validated episode discriminator from the query, if the URL carries it.
+pub fn sub_id(url: &url::Url, provider: &str, key: &str) -> Result<Option<String>, String> {
+    let found: Vec<_> = url
+        .query_pairs()
+        .filter(|(name, _)| name == key)
+        .map(|(_, value)| value.into_owned())
+        .collect();
+    match found.as_slice() {
+        [] => Ok(None),
+        [value] => {
+            if value.is_empty()
+                || value.len() > 120
+                || !value
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b':'))
+            {
+                return Err(format!("The {provider} episode ID is invalid."));
+            }
+            Ok(Some(value.clone()))
+        }
+        _ => Err(format!(
+            "The {provider} URL names more than one episode; choose a single title."
+        )),
+    }
 }
 
 pub fn provider_page(provider: &str, input: &str) -> bool {
@@ -102,7 +132,7 @@ pub fn parse_content(provider: &str, input: &str) -> Result<ContentIdentity, Str
         .filter(|s| !s.is_empty())
         .collect();
     let mut playlist_id = None;
-    let (id, allowed_url) = match provider {
+    let (id, allowed_url, episode_id) = match provider {
         "youtube" => {
             let ids: Vec<_> = url
                 .query_pairs()
@@ -148,18 +178,39 @@ pub fn parse_content(provider: &str, input: &str) -> Result<ContentIdentity, Str
             if let Some(list) = &playlist_id {
                 canonical.query_pairs_mut().append_pair("list", list);
             }
-            (id, canonical.into())
+            (id, canonical.into(), None)
         }
-        "netflix"
-            if parts.len() == 2
-                && ["watch", "title"].contains(&parts[0])
-                && parts[1].bytes().all(|c| c.is_ascii_digit())
-                && token(parts[1], 1, 20) =>
-        {
-            (
-                parts[1].into(),
-                format!("https://www.netflix.com/{}/{}", parts[0], parts[1]),
-            )
+        "netflix" => {
+            // `/title/{id}` and `/watch/{id}` reach the same instalment, and
+            // Netflix appends `/watch` to a title route during playback. All
+            // three routes collapse to one canonical URL so a host on the
+            // title page and a guest on the watch page still agree.
+            let show = match parts.as_slice() {
+                [route, id] | [route, id, "watch"]
+                    if ["watch", "title"].contains(route)
+                        && token(id, 1, 20)
+                        && id.bytes().all(|c| c.is_ascii_digit()) =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            };
+            let Some(show) = show else {
+                return Err("Choose a Netflix title or episode; browse, search and hub pages are not playable selections.".into());
+            };
+            // `ep` names the instalment on a watch route, `v` on a title route.
+            let ep = sub_id(&url, "Netflix", "ep")?;
+            let video = sub_id(&url, "Netflix", "v")?;
+            if ep.is_some() && video.is_some() && ep != video {
+                return Err("The Netflix URL names two different episodes.".into());
+            }
+            let episode_id = ep.or(video);
+            let mut canonical = url::Url::parse("https://www.netflix.com/watch").unwrap();
+            canonical.set_path(&format!("/watch/{show}"));
+            if let Some(episode) = &episode_id {
+                canonical.query_pairs_mut().append_pair("ep", episode);
+            }
+            (show.to_string(), canonical.into(), episode_id)
         }
         "prime" => {
             if url.host_str().is_some_and(|h| h.ends_with("amazon.com"))
@@ -179,10 +230,16 @@ pub fn parse_content(provider: &str, input: &str) -> Result<ContentIdentity, Str
             if !token(id, 10, 40) {
                 return Err("The Prime Video content ID is invalid.".into());
             }
-            (
-                id.into(),
-                format!("https://{}/{}", url.host_str().unwrap(), parts.join("/")),
-            )
+            // `eid` is the instalment selector Prime Video uses on both its own
+            // host and Amazon's video routes; everything else is navigation.
+            let episode_id = sub_id(&url, "Prime Video", "eid")?;
+            let mut canonical =
+                url::Url::parse(&format!("https://{}", url.host_str().unwrap())).unwrap();
+            canonical.set_path(&format!("/{}", parts.join("/")));
+            if let Some(episode) = &episode_id {
+                canonical.query_pairs_mut().append_pair("eid", episode);
+            }
+            (id.into(), canonical.into(), episode_id)
         }
         "jiohotstar" => {
             let id = parts
@@ -196,9 +253,12 @@ pub fn parse_content(provider: &str, input: &str) -> Result<ContentIdentity, Str
             {
                 return Err("Choose a movie or episode title, not the provider homepage.".into());
             }
+            // JioHotstar puts the instalment's own ID in the path, so the
+            // content ID is already episode-level.
             (
                 id.to_string(),
                 format!("https://{}/{}", url.host_str().unwrap(), parts.join("/")),
+                None,
             )
         }
         _ => {
@@ -212,6 +272,7 @@ pub fn parse_content(provider: &str, input: &str) -> Result<ContentIdentity, Str
         content_id: id,
         allowed_url,
         playlist_id,
+        episode_id,
     })
 }
 
@@ -418,6 +479,129 @@ mod tests {
             assert!(parse_content("youtube", url).is_err(), "accepted {url}");
         }
     }
+    #[test]
+    fn netflix_episodes_of_one_show_are_distinct_selections() {
+        let first = parse_content(
+            "netflix",
+            "https://www.netflix.com/watch/80181170?ep=70218421&t=256&trackId=private",
+        )
+        .unwrap();
+        let second = parse_content(
+            "netflix",
+            "https://www.netflix.com/watch/80181170?ep=70218422",
+        )
+        .unwrap();
+        // content_id stays the site's own show ID so player evidence can still
+        // match it; the instalment lives in episode_id and the canonical URL.
+        assert_eq!(first.content_id, second.content_id);
+        assert_ne!(
+            first.episode_id, second.episode_id,
+            "show id alone is not enough"
+        );
+        assert_ne!(first.allowed_url, second.allowed_url);
+        assert_eq!(first.episode_id.as_deref(), Some("70218421"));
+        assert_eq!(
+            first.allowed_url,
+            "https://www.netflix.com/watch/80181170?ep=70218421"
+        );
+        assert!(
+            !first.allowed_url.contains("trackId") && !first.allowed_url.contains("t=256"),
+            "{}",
+            first.allowed_url
+        );
+
+        // The same episode from either route, or with other tracking attached,
+        // must remain one selection so host and guest always agree.
+        let again = parse_content(
+            "netflix",
+            "https://www.netflix.com/title/80181170/watch?ep=70218421&mode=single-lid&jcp=x",
+        )
+        .unwrap();
+        assert_eq!(again.allowed_url, first.allowed_url);
+
+        // A bare show is its own identity and never equals one of its episodes.
+        let show = parse_content("netflix", "https://www.netflix.com/title/80181170").unwrap();
+        assert_eq!(show.episode_id, None);
+        assert_ne!(show.allowed_url, first.allowed_url);
+
+        for url in [
+            "https://www.netflix.com/watch/80181170?ep=1&ep=2",
+            "https://www.netflix.com/watch/80181170?ep=",
+            "https://www.netflix.com/watch/80181170?ep=..%2Fevil",
+            "https://www.netflix.com/watch/80181170?ep=%3Cscript%3E",
+            "https://www.netflix.com/browse?ep=70218421",
+        ] {
+            assert!(parse_content("netflix", url).is_err(), "accepted {url}");
+        }
+    }
+
+    #[test]
+    fn prime_episodes_are_distinct_and_tracking_free() {
+        let one = parse_content(
+            "prime",
+            "https://www.primevideo.com/detail/B08C7JV476?eid=A2QDU1YM0X7YQZ%3AB09C3JPP7Q&ref_=wl_dp_1",
+        )
+        .unwrap();
+        assert_eq!(one.episode_id.as_deref(), Some("A2QDU1YM0X7YQZ:B09C3JPP7Q"));
+        assert!(!one.allowed_url.contains("ref_"), "{}", one.allowed_url);
+        assert!(one.allowed_url.contains("eid="), "{}", one.allowed_url);
+
+        let two = parse_content(
+            "prime",
+            "https://www.primevideo.com/detail/B08C7JV476?eid=A2QDU1YM0X7YQZ%3AB09TKWPKKZ",
+        )
+        .unwrap();
+        assert_ne!(one.allowed_url, two.allowed_url);
+        assert_eq!(one.content_id, two.content_id);
+
+        for url in [
+            "https://www.primevideo.com/detail/B08C7JV476?eid=&ref_=x",
+            "https://www.primevideo.com/detail/B08C7JV476?eid=a%20b",
+            "https://www.amazon.com/gp/video/detail/B012345678?eid=x&eid=y",
+        ] {
+            assert!(parse_content("prime", url).is_err(), "accepted {url}");
+        }
+    }
+
+    #[test]
+    fn youtube_identity_keeps_an_explicit_absent_episode_field() {
+        let value = parse_content("youtube", "https://youtu.be/dQw4w9WgXcQ").unwrap();
+        assert_eq!(value.episode_id, None);
+        assert_eq!(
+            serde_json::to_string(&value).unwrap(),
+            r#"{"providerId":"youtube","contentId":"dQw4w9WgXcQ","allowedUrl":"https://www.youtube.com/watch?v=dQw4w9WgXcQ","playlistId":null,"episodeId":null}"#
+        );
+    }
+
+    #[test]
+    fn an_episode_identity_changes_the_tab_selection_key() {
+        let key = |identity: ContentIdentity| {
+            let tab = ContentTab {
+                player: None,
+                selection_key: String::new(),
+                target_id: "t".into(),
+                title: "A series".into(),
+                identity: Some(identity),
+                thumbnail_url: None,
+                document_id: "d".into(),
+                focused: false,
+                visible: false,
+                playback_ready: true,
+                evidence: None,
+                issue: None,
+            };
+            tab.selection_key()
+        };
+        assert_ne!(
+            key(parse_content("netflix", "https://www.netflix.com/watch/80181170").unwrap()),
+            key(parse_content(
+                "netflix",
+                "https://www.netflix.com/watch/80181170?ep=70218421"
+            )
+            .unwrap())
+        );
+    }
+
     #[test]
     fn subscription_titles_require_real_routes_and_clean_canonical_urls() {
         for (provider, input, id) in [
