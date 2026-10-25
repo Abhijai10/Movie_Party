@@ -4,6 +4,7 @@ pub mod capture;
 pub mod chat;
 pub mod companion;
 pub mod encode;
+pub mod friends;
 pub mod identity;
 pub mod media;
 pub mod network;
