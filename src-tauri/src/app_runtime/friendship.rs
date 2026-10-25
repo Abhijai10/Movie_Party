@@ -308,7 +308,7 @@ impl AppRuntime {
     }
 }
 
-fn normalised_peer_key(value: &str) -> String {
+pub(crate) fn normalised_peer_key(value: &str) -> String {
     format!("{}.", value.trim().trim_end_matches('.'))
 }
 

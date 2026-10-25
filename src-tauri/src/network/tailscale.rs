@@ -30,6 +30,16 @@ pub struct TailscalePeer {
     pub tailscale_ips: Vec<Ipv4Addr>,
     pub online: bool,
     pub path: TailscalePath,
+    /// The MagicDNS suffix part of `dns_name` ("tailabc123.ts.net"). A peer
+    /// whose suffix differs from this device's own tailnet suffix reached the
+    /// tailnet through sharing rather than membership.
+    pub dns_suffix: String,
+    /// The CLI's `ShareeNode` flag: a node shared in from another tailnet.
+    /// Absent (older CLIs / own-tailnet peers) is `false`, which is why the
+    /// suffix comparison is the primary signal and this only corroborates it.
+    pub shared_in: bool,
+    /// RFC3339 expiry of that node's key, when the CLI reports one.
+    pub key_expiry: Option<String>,
 }
 
 impl TailscalePeer {
@@ -66,6 +76,9 @@ pub struct FriendCandidate {
     pub online: bool,
     /// direct | peerRelay | derpRelay | unknown | offline
     pub path: String,
+    /// `Some(true)` same tailnet, `Some(false)` reached through sharing from
+    /// another tailnet, `None` when the CLI did not report enough to compare.
+    pub same_tailnet: Option<bool>,
 }
 
 /// Human label for a peer's DNS name: strips the trailing dot and the
@@ -103,6 +116,7 @@ pub fn friend_candidates(status: &TailscaleStatus) -> Vec<FriendCandidate> {
             ip: p.usable_ipv4().map(|ip| ip.to_string()),
             online: p.online,
             path: path_label(&p.path).to_string(),
+            same_tailnet: peer_is_same_tailnet(status, p),
         })
         .collect();
     candidates.sort_by(|a, b| {
@@ -120,6 +134,9 @@ pub fn friend_candidates(status: &TailscaleStatus) -> Vec<FriendCandidate> {
 pub struct TailnetPeersView {
     pub candidates: Vec<FriendCandidate>,
     pub saved: Vec<crate::storage::sqlite::StoredFriend>,
+    /// Which tailnet this device is on and what role its login holds there —
+    /// the onboarding wizard needs it to decide who can create a share.
+    pub tailnet: Option<TailnetIdentity>,
 }
 
 /// verify_friend payload: the refreshed friend record + the raw probe.
@@ -269,6 +286,192 @@ pub struct TailscaleStatus {
     pub local_ipv4: Option<Ipv4Addr>,
     pub device_name: Option<String>,
     pub peers: Vec<TailscalePeer>,
+    pub tailnet: Option<TailnetIdentity>,
+}
+
+/// What role this device's Tailscale login holds on its own tailnet, taken
+/// from the capability list the CLI reports for `Self`.
+///
+/// This exists because Movie Party must not assume every user administers
+/// their tailnet: creating a share or inviting a user is an administrative
+/// action, and a `LimitedUser` cannot do it from their own device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TailnetRole {
+    /// The CLI reported the owner capability.
+    Owner,
+    /// The CLI reported the admin capability (not owner).
+    Admin,
+    /// Signed in, but the CLI reported capabilities and none was admin/owner.
+    LimitedUser,
+    /// The CLI reported no capability list at all (older version, or a
+    /// key-only node). Movie Party treats this as "unknown", never as
+    /// "not an admin".
+    Unknown,
+}
+
+impl TailnetRole {
+    /// True only when this device is *known* to be able to create shares and
+    /// invitations itself. `Unknown` is deliberately excluded: the wizard
+    /// offers the "ask your tailnet admin" path instead of assuming.
+    pub fn can_administer(self) -> bool {
+        matches!(self, TailnetRole::Owner | TailnetRole::Admin)
+    }
+}
+
+/// The tailnet this device belongs to, as reported by the local CLI. Read-only
+/// identification — nothing here is a credential, and it never leaves the
+/// device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TailnetIdentity {
+    /// `CurrentTailnet.StableID` — the tailnet's stable id (`Tn…`). The
+    /// owner's `Name` is deliberately not captured: for a personal account it
+    /// is an email address, and the onboarding UI has no need for it.
+    pub stable_id: Option<String>,
+    /// MagicDNS suffix of this tailnet, e.g. `tailc930b7.ts.net`.
+    pub magic_dns_suffix: Option<String>,
+    /// This device's own role on that tailnet.
+    pub role: TailnetRole,
+    /// RFC3339 expiry of this device's node key, when reported.
+    pub key_expiry: Option<String>,
+    /// `HaveNodeKey` as reported; `None` means the CLI did not say.
+    pub have_node_key: Option<bool>,
+    /// `AuthURL` was non-empty: the backend wants an interactive sign-in.
+    pub login_url_pending: bool,
+}
+
+/// State of a Tailscale node key at a given moment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum NodeKeyState {
+    /// The CLI reported no expiry.
+    Unknown,
+    Valid,
+    /// Expires within `NODE_KEY_WARNING_DAYS` days.
+    ExpiringSoon,
+    /// The reported expiry is in the past.
+    Expired,
+}
+
+/// How close to expiry a node key starts warning the user. Tailscale's own
+/// key-expiry default is 180 days, so 30 days leaves a full month to act.
+pub const NODE_KEY_WARNING_DAYS: i64 = 30;
+
+const SECONDS_PER_DAY: i64 = 86_400;
+
+/// Maps an RFC3339 UTC timestamp (`2027-02-20T20:43:23Z`, as emitted by
+/// `tailscale status --json`) to unix milliseconds. Hand-rolled because the
+/// crate has no date library and adding one for two fields is not worth it.
+pub fn rfc3339_utc_to_ms(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let (date, time) = value.split_once('T')?;
+    let time = time.strip_suffix('Z')?;
+    let mut date_parts = date.split('-');
+    let year: i64 = date_parts.next()?.parse().ok()?;
+    let month: i64 = date_parts.next()?.parse().ok()?;
+    let day: i64 = date_parts.next()?.parse().ok()?;
+    let mut time_parts = time.split(':');
+    let hour: i64 = time_parts.next()?.parse().ok()?;
+    let minute: i64 = time_parts.next()?.parse().ok()?;
+    let second: i64 = time_parts.next()?.parse().ok()?;
+    if !(1..=12).contains(&month) || hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    // Day-of-month must be legal for that month, so "2027-02-30" is a failure
+    // rather than a silently normalised date 30 days past February 1st.
+    if day < 1 || day > days_in_month(year, month) {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    Some((days * SECONDS_PER_DAY + hour * 3600 + minute * 60 + second) * 1_000)
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Days since the unix epoch for a proleptic-Gregorian date (Howard Hinnant's
+/// `days_from_civil`, shifted so March is the first month of the year).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let year_of_era = y - era * 400;
+    let month_shifted = if month > 2 { month - 3 } else { month + 9 };
+    let day_of_year = (153 * month_shifted + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+impl NodeKeyState {
+    /// Classify a reported expiry against `now_ms`.
+    pub fn from_expiry(expiry: Option<&str>, now_ms: i64) -> Self {
+        let Some(ms) = expiry.and_then(rfc3339_utc_to_ms) else {
+            return NodeKeyState::Unknown;
+        };
+        if ms <= now_ms {
+            return NodeKeyState::Expired;
+        }
+        let days_left = (ms - now_ms) / (SECONDS_PER_DAY * 1_000);
+        if days_left <= NODE_KEY_WARNING_DAYS {
+            NodeKeyState::ExpiringSoon
+        } else {
+            NodeKeyState::Valid
+        }
+    }
+
+    pub fn is_blocking(self) -> bool {
+        self == NodeKeyState::Expired
+    }
+
+    pub fn warns(self) -> bool {
+        matches!(self, NodeKeyState::Expired | NodeKeyState::ExpiringSoon)
+    }
+}
+
+/// The MagicDNS suffix part of a peer DNS name. `host.tailabc.ts.net.` →
+/// `tailabc.ts.net`; a single-label name has no suffix and yields "".
+pub fn peer_dns_suffix(dns_name: &str) -> String {
+    let trimmed = dns_name.trim().trim_end_matches('.');
+    match trimmed.split_once('.') {
+        Some((_, suffix)) => suffix.to_string(),
+        None => String::new(),
+    }
+}
+
+/// `Some(true)` when the peer shares this device's tailnet suffix, `Some(false)`
+/// when the suffixes differ (the peer came from another tailnet through
+/// sharing), `None` when either side's suffix is unknown.
+pub fn peer_is_same_tailnet(status: &TailscaleStatus, peer: &TailscalePeer) -> Option<bool> {
+    let own = status
+        .tailnet
+        .as_ref()
+        .and_then(|t| t.magic_dns_suffix.as_deref())
+        .map(|s| s.trim().trim_end_matches('.'))
+        .filter(|s| !s.is_empty())?;
+    let theirs = peer.dns_suffix.trim().trim_end_matches('.');
+    if theirs.is_empty() {
+        return None;
+    }
+    if peer.shared_in {
+        return Some(false);
+    }
+    Some(theirs.eq_ignore_ascii_case(own))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -729,12 +932,14 @@ pub fn parse_status_json(bytes: &[u8]) -> Result<TailscaleStatus, TailscaleError
         .as_ref()
         .and_then(|node| node.dns_name.clone());
 
+    let tailnet = build_tailnet_identity(&raw);
+
     let peers = raw
         .peer
         .unwrap_or_default()
         .into_values()
         .map(|peer| TailscalePeer {
-            dns_name: peer.dns_name.unwrap_or_default(),
+            dns_name: peer.dns_name.clone().unwrap_or_default(),
             tailscale_ips: peer
                 .tailscale_ips
                 .iter()
@@ -743,6 +948,9 @@ pub fn parse_status_json(bytes: &[u8]) -> Result<TailscaleStatus, TailscaleError
                 .collect(),
             online: peer.online.unwrap_or(false),
             path: classify_path(peer.cur_addr.as_deref(), peer.relay.as_deref(), peer.online),
+            dns_suffix: peer_dns_suffix(peer.dns_name.as_deref().unwrap_or_default()),
+            shared_in: peer.sharee_node.unwrap_or(false),
+            key_expiry: peer.key_expiry,
         })
         .collect();
 
@@ -751,6 +959,52 @@ pub fn parse_status_json(bytes: &[u8]) -> Result<TailscaleStatus, TailscaleError
         local_ipv4,
         device_name,
         peers,
+        tailnet,
+    })
+}
+
+/// Assembles the tailnet identity from the status document. Present on
+/// `tailscale status --json` since at least 1.36; every field is individually
+/// optional because a stopped or key-only backend omits blocks.
+fn build_tailnet_identity(raw: &RawStatus) -> Option<TailnetIdentity> {
+    let self_node = raw.self_node.as_ref()?;
+    let role = role_from_caps(self_node.cap_map.as_ref());
+    // The `User` block only tells us the node has a real signed-in user behind
+    // it; the login name itself is never read into the struct.
+    let has_user_record = self_node
+        .user_id
+        .and_then(|id| raw.users.as_ref().and_then(|u| u.get(&id.to_string())))
+        .is_some();
+    let tailnet = raw.current_tailnet.as_ref();
+    let login_url_pending = raw
+        .auth_url
+        .as_deref()
+        .is_some_and(|url| !url.trim().is_empty());
+    // When the CLI reported nothing about the network or this node's standing
+    // in it, say "unknown" rather than inventing an identity.
+    if role == TailnetRole::Unknown
+        && tailnet.is_none()
+        && !has_user_record
+        && !login_url_pending
+        && raw.have_node_key.is_none()
+        && self_node.key_expiry.is_none()
+    {
+        return None;
+    }
+    let reported_suffix = tailnet.and_then(|t| t.magic_dns_suffix.clone());
+    let own_suffix_from_dns = self_node
+        .dns_name
+        .as_deref()
+        .map(|dns| peer_dns_suffix(dns).trim_end_matches('.').to_string());
+    Some(TailnetIdentity {
+        stable_id: tailnet.and_then(|t| t.stable_id.clone()),
+        magic_dns_suffix: reported_suffix
+            .or(own_suffix_from_dns)
+            .filter(|s| !s.is_empty()),
+        role,
+        key_expiry: self_node.key_expiry.clone(),
+        have_node_key: raw.have_node_key,
+        login_url_pending,
     })
 }
 
@@ -802,6 +1056,24 @@ struct RawStatus {
     self_node: Option<RawNode>,
     #[serde(rename = "Peer")]
     peer: Option<std::collections::BTreeMap<String, RawNode>>,
+    #[serde(rename = "CurrentTailnet")]
+    current_tailnet: Option<RawTailnet>,
+    /// Keyed by user id. Only the presence of a record is used (the login name
+    /// inside it is an email address Movie Party never reads).
+    #[serde(rename = "User")]
+    users: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+    #[serde(rename = "AuthURL")]
+    auth_url: Option<String>,
+    #[serde(rename = "HaveNodeKey")]
+    have_node_key: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawTailnet {
+    #[serde(rename = "StableID")]
+    stable_id: Option<String>,
+    #[serde(rename = "MagicDNSSuffix")]
+    magic_dns_suffix: Option<String>,
 }
 
 fn option_vec_string_null_as_empty<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -825,6 +1097,45 @@ struct RawNode {
     cur_addr: Option<String>,
     #[serde(rename = "Relay")]
     relay: Option<String>,
+    #[serde(rename = "UserID")]
+    user_id: Option<i64>,
+    #[serde(rename = "KeyExpiry")]
+    key_expiry: Option<String>,
+    #[serde(rename = "ShareeNode")]
+    sharee_node: Option<bool>,
+    /// The capability buckets granted to this node. A key-only/older CLI omits
+    /// it, which is why `TailnetRole::Unknown` exists.
+    #[serde(rename = "CapMap")]
+    cap_map: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+}
+
+/// Capability strings the Tailscale CLI uses for tailnet administration.
+const CAP_IS_OWNER: &str = "https://tailscale.com/cap/is-owner";
+const CAP_IS_ADMIN: &str = "https://tailscale.com/cap/is-admin";
+const CAP_TAILNET_LOCK: &str = "https://tailscale.com/cap/tailnet-lock";
+const CAP_NETWORK_FLOW: &str = "https://tailscale.com/cap/netflow";
+const CAP_DEBUG: &str = "https://tailscale.com/cap/debug";
+
+/// Owner/admin/LimitedUser from the node's capability buckets. Tailnet-lock,
+/// netflow and debug are admin-only capabilities, so they let Movie Party
+/// recognise an administrator even when the coarse `is-admin` bucket is absent.
+fn role_from_caps(
+    cap_map: Option<&std::collections::BTreeMap<String, serde_json::Value>>,
+) -> TailnetRole {
+    let Some(map) = cap_map else {
+        return TailnetRole::Unknown;
+    };
+    if map.contains_key(CAP_IS_OWNER) {
+        return TailnetRole::Owner;
+    }
+    if map.contains_key(CAP_IS_ADMIN)
+        || map.contains_key(CAP_TAILNET_LOCK)
+        || map.contains_key(CAP_NETWORK_FLOW)
+        || map.contains_key(CAP_DEBUG)
+    {
+        return TailnetRole::Admin;
+    }
+    TailnetRole::LimitedUser
 }
 
 #[cfg(test)]
@@ -832,9 +1143,10 @@ mod tests {
     use super::{
         friend_candidates, is_allowed_party_ipv4, is_usable_tailscale_ipv4,
         is_wrapper_error_stdout, parse_friend_invite, parse_ping_stdout, parse_status_json,
-        peer_display_name, readiness_from_error, readiness_from_status, required_ipv4,
-        usable_peers, FriendCandidate, PeerConnectionProbe, TailscaleError, TailscalePath,
-        TailscalePeer, TailscaleState,
+        peer_display_name, peer_dns_suffix, peer_is_same_tailnet, readiness_from_error,
+        readiness_from_status, required_ipv4, rfc3339_utc_to_ms, usable_peers, FriendCandidate,
+        NodeKeyState, PeerConnectionProbe, TailnetRole, TailscaleError, TailscalePath,
+        TailscalePeer, TailscaleState, NODE_KEY_WARNING_DAYS,
     };
 
     #[test]
@@ -1197,6 +1509,9 @@ mod tests {
             ],
             online: true,
             path: TailscalePath::Direct,
+            dns_suffix: "tailnet.ts.net".to_string(),
+            shared_in: false,
+            key_expiry: None,
         };
         assert_eq!(
             peer.usable_ipv4().expect("usable ipv4").to_string(),
@@ -1234,18 +1549,27 @@ mod tests {
             tailscale_ips: vec!["100.64.0.10".parse().unwrap()],
             online: true,
             path: TailscalePath::Direct,
+            dns_suffix: "tailnet.ts.net".to_string(),
+            shared_in: false,
+            key_expiry: None,
         };
         let offline = TailscalePeer {
             dns_name: "b".to_string(),
             tailscale_ips: vec!["100.64.0.11".parse().unwrap()],
             online: false,
             path: TailscalePath::Offline,
+            dns_suffix: "tailnet.ts.net".to_string(),
+            shared_in: false,
+            key_expiry: None,
         };
         let lan_only = TailscalePeer {
             dns_name: "c".to_string(),
             tailscale_ips: vec!["192.168.1.12".parse().unwrap()],
             online: true,
             path: TailscalePath::Direct,
+            dns_suffix: "tailnet.ts.net".to_string(),
+            shared_in: false,
+            key_expiry: None,
         };
         let all = [online.clone(), offline, lan_only];
         let result = usable_peers(&all);
@@ -1404,11 +1728,14 @@ mod tests {
             ip: Some("100.64.0.1".to_string()),
             online: true,
             path: "direct".to_string(),
+            same_tailnet: Some(false),
         };
         let json = serde_json::to_string(&candidate).expect("serializes");
         assert!(json.contains("\"peerKey\""));
         assert!(json.contains("\"displayName\""));
-        assert!(json.contains("\"latencyMs\"") || !json.contains("latencyMs"));
+        assert!(json.contains("\"sameTailnet\":false"));
+        let back: FriendCandidate = serde_json::from_str(&json).expect("round-trips");
+        assert_eq!(back, candidate);
     }
 
     /// F21: the identity-only invite contract must hold on the Rust side.
@@ -1455,5 +1782,367 @@ mod tests {
 
         // A non-object payload is malformed, not accepted.
         assert!(parse_friend_invite(&link(r#"["n","pk"]"#)).is_err());
+    }
+
+    // ── Batch 9: tailnet identity, role, key expiry, topology ────────
+
+    /// Shape captured from a real `tailscale status --json` on macOS
+    /// (Tailscale 1.102.x), reduced to the blocks Batch 9 reads.
+    const REAL_SHAPE: &str = r#"{
+      "Version": "1.102.4",
+      "BackendState": "Running",
+      "AuthURL": "",
+      "HaveNodeKey": true,
+      "MagicDNSSuffix": "tailc930b7.ts.net",
+      "CurrentTailnet": {
+        "Name": "someone@example.com",
+        "StableID": "TnSLAyoyHo11CNTRL",
+        "MagicDNSSuffix": "tailc930b7.ts.net",
+        "MagicDNSEnabled": true
+      },
+      "User": {
+        "7429568193493714": {"ID": 7429568193493714, "LoginName": "someone@example.com"}
+      },
+      "Self": {
+        "ID": "nodekey:1111111111111111",
+        "DNSName": "some-mac.tailc930b7.ts.net.",
+        "HostName": "some-mac",
+        "UserID": 7429568193493714,
+        "TailscaleIPs": ["100.64.0.10"],
+        "Online": true,
+        "KeyExpiry": "2027-02-20T20:43:23Z",
+        "CapMap": {
+          "https://tailscale.com/cap/is-owner": [[]],
+          "https://tailscale.com/cap/file-sharing": [[]]
+        }
+      },
+      "Peer": {
+        "nodekey:2222222222222222": {
+          "DNSName": "rahul-mac.tailc930b7.ts.net.",
+          "TailscaleIPs": ["100.64.0.42"],
+          "Online": true,
+          "CurAddr": "100.64.0.42:41641",
+          "UserID": 7429568193493714
+        },
+        "nodekey:3333333333333333": {
+          "DNSName": "priya-win.tail99aa00.ts.net.",
+          "TailscaleIPs": ["100.64.0.77"],
+          "Online": true,
+          "UserID": 5000000000000000,
+          "ShareeNode": true
+        }
+      }
+    }"#;
+
+    #[test]
+    fn real_shape_yields_tailnet_identity_and_owner_role() {
+        let status = parse_status_json(REAL_SHAPE.as_bytes()).expect("real shape parses");
+        let tailnet = status.tailnet.clone().expect("tailnet identity present");
+        assert_eq!(tailnet.stable_id.as_deref(), Some("TnSLAyoyHo11CNTRL"));
+        assert_eq!(
+            tailnet.magic_dns_suffix.as_deref(),
+            Some("tailc930b7.ts.net")
+        );
+        assert_eq!(tailnet.role, TailnetRole::Owner);
+        assert!(tailnet.role.can_administer());
+        assert_eq!(tailnet.key_expiry.as_deref(), Some("2027-02-20T20:43:23Z"));
+        assert_eq!(tailnet.have_node_key, Some(true));
+        assert!(!tailnet.login_url_pending);
+    }
+
+    #[test]
+    fn tailnet_identity_never_carries_the_owner_login_name() {
+        // `CurrentTailnet.Name` is normally an email address. Movie Party has no
+        // need for it, and the wizard renders this struct — so it must not be
+        // reachable through the IPC payload at all.
+        let status = parse_status_json(REAL_SHAPE.as_bytes()).expect("real shape parses");
+        let json = serde_json::to_string(&status.tailnet.expect("identity")).expect("serializes");
+        assert!(
+            !json.contains("example.com"),
+            "tailnet identity leaked a login name: {json}"
+        );
+    }
+
+    #[test]
+    fn role_distinguishes_admin_limited_user_and_unknown() {
+        // Built with the JSON macro so the capability buckets are data, not
+        // brace-escaped string literals.
+        let parse_with_caps = |caps: serde_json::Value| {
+            let doc = serde_json::json!({
+                "BackendState": "Running",
+                "CurrentTailnet": { "StableID": "Tn1", "MagicDNSSuffix": "t.ts.net" },
+                "Self": {
+                    "DNSName": "a.t.ts.net.",
+                    "TailscaleIPs": ["100.64.0.1"],
+                    "CapMap": caps
+                }
+            });
+            parse_status_json(serde_json::to_vec(&doc).expect("json").as_slice())
+                .expect("parses")
+                .tailnet
+                .expect("identity from CurrentTailnet")
+        };
+        assert_eq!(
+            parse_with_caps(serde_json::json!({ "https://tailscale.com/cap/is-admin": [[]] })).role,
+            TailnetRole::Admin
+        );
+        // Tailnet-lock and netflow are admin-only, so they identify an
+        // administrator even without the coarse is-admin bucket.
+        assert_eq!(
+            parse_with_caps(serde_json::json!({ "https://tailscale.com/cap/tailnet-lock": [[]] }))
+                .role,
+            TailnetRole::Admin
+        );
+        let limited =
+            parse_with_caps(serde_json::json!({ "https://tailscale.com/cap/file-sharing": [[]] }));
+        assert_eq!(limited.role, TailnetRole::LimitedUser);
+        assert!(!limited.role.can_administer());
+        let empty = parse_with_caps(serde_json::json!({}));
+        assert_eq!(empty.role, TailnetRole::LimitedUser);
+    }
+
+    #[test]
+    fn missing_capmap_is_unknown_role_not_limited_user() {
+        // A CLI that reports no capability buckets must not be told it is
+        // "just a limited user" — that would hide the admin path from someone
+        // who can in fact share.
+        let status = parse_status_json(
+            br#"{"BackendState":"Running","CurrentTailnet":{"StableID":"Tn1","MagicDNSSuffix":"t.ts.net"},
+                 "Self":{"DNSName":"a.t.ts.net.","TailscaleIPs":["100.64.0.1"]}}"#,
+        )
+        .expect("parses");
+        let tailnet = status.tailnet.expect("identity from CurrentTailnet");
+        assert_eq!(tailnet.role, TailnetRole::Unknown);
+        assert!(!tailnet.role.can_administer());
+    }
+
+    #[test]
+    fn login_url_present_means_backend_wants_interactive_signin() {
+        let status = parse_status_json(
+            br#"{"BackendState":"NeedsLogin","AuthURL":"https://login.tailscale.com/a/xyz",
+                 "Self":{"DNSName":"a.t.ts.net.","TailscaleIPs":[]}}"#,
+        )
+        .expect("parses");
+        assert!(status.tailnet.expect("identity").login_url_pending);
+    }
+
+    #[test]
+    fn peer_on_another_tailnet_is_detected_by_dns_suffix() {
+        let status = parse_status_json(REAL_SHAPE.as_bytes()).expect("real shape parses");
+        let own = status
+            .peers
+            .iter()
+            .find(|p| p.dns_name.starts_with("rahul-mac"))
+            .expect("same-tailnet peer");
+        let shared = status
+            .peers
+            .iter()
+            .find(|p| p.dns_name.starts_with("priya-win"))
+            .expect("shared-in peer");
+        assert_eq!(peer_is_same_tailnet(&status, own), Some(true));
+        assert_eq!(peer_is_same_tailnet(&status, shared), Some(false));
+        assert!(shared.shared_in);
+        assert_eq!(shared.dns_suffix, "tail99aa00.ts.net");
+        assert_eq!(own.dns_suffix, "tailc930b7.ts.net");
+    }
+
+    #[test]
+    fn topology_is_unknown_when_the_cli_reported_no_suffix() {
+        // An older CLI without CurrentTailnet and a peer without a suffixable
+        // DNS name must yield `None` ("cannot tell"), never a confident
+        // "same tailnet".
+        let status = parse_status_json(
+            br#"{"BackendState":"Running",
+                 "Self":{"DNSName":"plain","TailscaleIPs":["100.64.0.1"]},
+                 "Peer":{"k":{"DNSName":"other.t.ts.net.","TailscaleIPs":["100.64.0.2"],"Online":true}}}"#,
+        )
+        .expect("parses");
+        assert!(status.tailnet.is_none());
+        assert_eq!(peer_is_same_tailnet(&status, &status.peers[0]), None);
+    }
+
+    #[test]
+    fn shared_in_flag_overrides_a_matching_suffix() {
+        // If the CLI explicitly flags a node as shared in, believe it even when
+        // the suffix happens to match (renamed/legacy tailnet suffixes).
+        let mut status = parse_status_json(REAL_SHAPE.as_bytes()).expect("real shape parses");
+        let index = status
+            .peers
+            .iter()
+            .position(|p| p.dns_name.starts_with("rahul-mac"))
+            .expect("peer");
+        status.peers[index].shared_in = true;
+        assert_eq!(
+            peer_is_same_tailnet(&status, &status.peers[index]),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn peer_dns_suffix_splits_the_host_label_off() {
+        assert_eq!(
+            peer_dns_suffix("rahul-mac.tailc930b7.ts.net."),
+            "tailc930b7.ts.net"
+        );
+        assert_eq!(
+            peer_dns_suffix("rahul-mac.tailnet.ts.net"),
+            "tailnet.ts.net"
+        );
+        // A bare host name has no tailnet part to compare.
+        assert_eq!(peer_dns_suffix("plain-host"), "");
+        assert_eq!(peer_dns_suffix(""), "");
+        assert_eq!(peer_dns_suffix("."), "");
+    }
+
+    #[test]
+    fn friend_candidates_expose_per_peer_topology() {
+        let status = parse_status_json(REAL_SHAPE.as_bytes()).expect("real shape parses");
+        let candidates = friend_candidates(&status);
+        assert_eq!(candidates.len(), 2);
+        let rahul = candidates
+            .iter()
+            .find(|c| c.display_name == "rahul-mac")
+            .expect("candidate");
+        let priya = candidates
+            .iter()
+            .find(|c| c.display_name == "priya-win")
+            .expect("candidate");
+        assert_eq!(rahul.same_tailnet, Some(true));
+        assert_eq!(priya.same_tailnet, Some(false));
+    }
+
+    #[test]
+    fn rfc3339_utc_to_ms_matches_known_epochs() {
+        assert_eq!(rfc3339_utc_to_ms("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            rfc3339_utc_to_ms("2027-02-20T20:43:23Z"),
+            Some(1_803_156_203_000)
+        );
+        assert_eq!(
+            rfc3339_utc_to_ms("2026-01-01T00:00:00Z"),
+            Some(1_767_225_600_000)
+        );
+        assert_eq!(
+            rfc3339_utc_to_ms("2000-02-29T12:00:00Z"),
+            Some(951_825_600_000)
+        );
+        // 2024 is a leap year; 2100 is not (divisible by 100, not 400).
+        assert_eq!(
+            rfc3339_utc_to_ms("2024-02-29T00:00:00Z"),
+            Some(1_709_164_800_000)
+        );
+        assert_eq!(
+            rfc3339_utc_to_ms("2024-03-01T00:00:00Z"),
+            Some(1_709_251_200_000)
+        );
+        assert_eq!(
+            rfc3339_utc_to_ms("2100-03-01T00:00:00Z"),
+            Some(4_107_542_400_000)
+        );
+    }
+
+    #[test]
+    fn rfc3339_utc_to_ms_rejects_anything_it_cannot_trust() {
+        for bad in [
+            "",
+            "2027-02-20",
+            "2027-02-20T20:43:23",
+            "2027-02-20T20:43:23+05:30",
+            "2027-02-30T00:00:00Z",
+            "2026-02-29T00:00:00Z",
+            "2100-02-29T00:00:00Z",
+            "2027-13-01T00:00:00Z",
+            "2027-00-10T00:00:00Z",
+            "2027-01-00T00:00:00Z",
+            "not a date",
+        ] {
+            assert_eq!(rfc3339_utc_to_ms(bad), None, "must be rejected: {bad:?}");
+        }
+        // 2024 and 2000 are leap years; the day must be accepted.
+        assert!(rfc3339_utc_to_ms("2024-02-29T00:00:00Z").is_some());
+        assert!(rfc3339_utc_to_ms("2000-02-29T00:00:00Z").is_some());
+    }
+
+    #[test]
+    fn node_key_state_classifies_expiry() {
+        let now = 1_767_225_600_000_i64; // 2026-01-01T00:00:00Z
+        let day = 86_400_000_i64;
+        assert_eq!(NodeKeyState::from_expiry(None, now), NodeKeyState::Unknown);
+        assert_eq!(
+            NodeKeyState::from_expiry(Some("nonsense"), now),
+            NodeKeyState::Unknown
+        );
+        assert_eq!(
+            NodeKeyState::from_expiry(Some("2025-12-31T00:00:00Z"), now),
+            NodeKeyState::Expired
+        );
+        assert_eq!(
+            NodeKeyState::from_expiry(Some("2026-01-15T00:00:00Z"), now),
+            NodeKeyState::ExpiringSoon
+        );
+        assert_eq!(
+            NodeKeyState::from_expiry(Some("2027-01-01T00:00:00Z"), now),
+            NodeKeyState::Valid
+        );
+        // Exactly the warning horizon counts as "soon", one day past it does not.
+        assert_eq!(
+            NodeKeyState::from_expiry(Some(&rfc3339_add_ms(now, NODE_KEY_WARNING_DAYS * day)), now),
+            NodeKeyState::ExpiringSoon
+        );
+        assert_eq!(
+            NodeKeyState::from_expiry(
+                Some(&rfc3339_add_ms(now, (NODE_KEY_WARNING_DAYS + 1) * day)),
+                now
+            ),
+            NodeKeyState::Valid
+        );
+        assert!(NodeKeyState::Expired.is_blocking());
+        assert!(!NodeKeyState::ExpiringSoon.is_blocking());
+        assert!(NodeKeyState::ExpiringSoon.warns());
+        assert!(!NodeKeyState::Valid.warns());
+        assert!(!NodeKeyState::Unknown.warns());
+    }
+
+    /// Test helper: format unix ms back into the UTC form Tailscale reports.
+    fn rfc3339_add_ms(base_ms: i64, add_ms: i64) -> String {
+        let total = base_ms + add_ms;
+        let days = total.div_euclid(86_400_000);
+        let secs_of_day = total.rem_euclid(86_400_000) / 1_000;
+        let (y, m, d) = civil_from_days(days);
+        format!(
+            "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+            secs_of_day / 3600,
+            (secs_of_day % 3600) / 60,
+            secs_of_day % 60
+        )
+    }
+
+    /// Inverse of `days_from_civil`, for building expiry strings in tests.
+    fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
+        let z = days_since_epoch + 719_468;
+        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        (if m <= 2 { y + 1 } else { y }, m, d)
+    }
+
+    #[test]
+    fn civil_round_trip_agrees_with_known_epochs() {
+        // The inverse helper must agree with the forward one, otherwise the
+        // boundary assertions above are testing a different calendar.
+        for ms in [
+            0_i64,
+            1_709_164_800_000,
+            1_709_251_200_000,
+            4_107_542_400_000,
+        ] {
+            let text = rfc3339_add_ms(0, ms);
+            assert_eq!(rfc3339_utc_to_ms(&text), Some(ms), "round trip of {ms}");
+        }
     }
 }

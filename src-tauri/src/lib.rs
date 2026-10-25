@@ -9,6 +9,7 @@ pub mod identity;
 pub mod media;
 pub mod network;
 pub mod notifications;
+pub mod onboarding;
 pub mod privacy;
 pub mod process;
 pub mod protocol;
@@ -188,6 +189,10 @@ pub fn run() {
             friendship_states,
             decline_friend_invitation, block_friend, unblock_friend, remove_friend_trust,
             friendship_state,
+            onboarding_begin, onboarding_cancel, onboarding_view, onboarding_set_side,
+            onboarding_choose_method, onboarding_open_admin, onboarding_paste_share_link,
+            onboarding_open_share_link, onboarding_report_link_expired, onboarding_refresh,
+            onboarding_check_reachability, onboarding_invitation_package,
             focus_provider_playback,
             reset_provider_session,
             create_schedule,
@@ -1024,6 +1029,116 @@ fn friendship_state(
     runtime
         .friendship_state(&peer_key)
         .map(|state| state.as_str().to_string())
+}
+
+// ── Batch 9: guided friend + Tailscale onboarding ──────────────────────
+
+/// Start the wizard for one peer. `my_side` decides which direction the
+/// connection runs, so the sharing advice can be correct.
+#[tauri::command]
+fn onboarding_begin(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    peer_key: String,
+    my_side: String,
+) -> Result<app_runtime::onboarding::OnboardingView, String> {
+    runtime.onboarding_begin(&peer_key, &my_side)
+}
+
+#[tauri::command]
+fn onboarding_cancel(runtime: tauri::State<'_, app_runtime::AppRuntime>) {
+    runtime.onboarding_cancel();
+}
+
+/// The current wizard state. Never fails: with no session it returns the idle
+/// shape so the shell can route normally.
+#[tauri::command]
+fn onboarding_view(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> app_runtime::onboarding::OnboardingView {
+    runtime
+        .onboarding_view()
+        .unwrap_or_else(|_| runtime.onboarding_idle_view())
+}
+
+#[tauri::command]
+fn onboarding_set_side(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    my_side: String,
+) -> Result<app_runtime::onboarding::OnboardingView, String> {
+    runtime.onboarding_set_side(&my_side)
+}
+
+#[tauri::command]
+fn onboarding_choose_method(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    method: String,
+) -> Result<app_runtime::onboarding::OnboardingView, String> {
+    runtime.onboarding_choose_method(&method)
+}
+
+/// Opens the official Tailscale admin page for the chosen method. Nothing is
+/// created, installed or changed here — the user does that in Tailscale.
+#[tauri::command]
+fn onboarding_open_admin(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<app_runtime::onboarding::OnboardingView, String> {
+    let url = runtime.onboarding_admin_url()?;
+    open_external_url(&url)?;
+    runtime.onboarding_view()
+}
+
+/// Pastes a share/invite link. Movie Party keeps it in memory only, returns its
+/// fingerprint, and never stores or logs the token.
+#[tauri::command]
+fn onboarding_paste_share_link(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    link: String,
+) -> Result<crate::onboarding::ShareLinkSummary, String> {
+    runtime.onboarding_paste_share_link(&link)
+}
+
+/// Opens the pasted link in the user's own browser, on their explicit request.
+#[tauri::command]
+fn onboarding_open_share_link(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<(), String> {
+    let url = runtime.onboarding_share_link_url()?;
+    open_external_url(&url)
+}
+
+/// The user reports their partner's link never worked. Movie Party cannot see
+/// another tailnet's shares, so this is the only honest source of that state.
+#[tauri::command]
+fn onboarding_report_link_expired(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<app_runtime::onboarding::OnboardingView, String> {
+    runtime.onboarding_report_link_expired()
+}
+
+/// Re-reads the local Tailscale CLI and recomputes the wizard.
+#[tauri::command]
+async fn onboarding_refresh(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<app_runtime::onboarding::OnboardingView, String> {
+    runtime.onboarding_refresh().await
+}
+
+/// A real `tailscale ping` toward the peer. Proves reachability only; "Connected"
+/// still waits for a transport handshake.
+#[tauri::command]
+async fn onboarding_check_reachability(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<app_runtime::onboarding::OnboardingView, String> {
+    runtime.onboarding_check_reachability().await
+}
+
+/// The copyable invitation: signed Movie Party invite + Tailscale steps. Never
+/// carries the pasted share link.
+#[tauri::command]
+async fn onboarding_invitation_package(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<crate::onboarding::InvitationPackage, String> {
+    runtime.onboarding_invitation_package().await
 }
 
 /// The opt-in existing-browser companion. Starting it writes the loopback

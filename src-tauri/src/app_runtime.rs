@@ -1,5 +1,6 @@
 pub mod companion;
 pub mod friendship;
+pub mod onboarding;
 mod provider_chooser;
 mod provider_playback;
 mod provider_room;
@@ -547,6 +548,7 @@ struct AppRuntimeState {
     guest_provider: crate::providers::selection::GuestSelection,
     youtube: youtube::YoutubeState,
     companion: companion::CompanionState,
+    onboarding: onboarding::OnboardingState,
     provider_verifying: Option<String>,
     provider_prepare_started: Option<Instant>,
     provider_gesture_required: bool,
@@ -884,6 +886,7 @@ impl AppRuntime {
                     guest_provider: crate::providers::selection::GuestSelection::default(),
                     youtube: youtube::YoutubeState::default(),
                     companion: companion::CompanionState::default(),
+                    onboarding: onboarding::OnboardingState::default(),
                     provider_verifying: None,
                     provider_prepare_started: None,
                     provider_gesture_required: false,
@@ -1344,6 +1347,7 @@ impl AppRuntime {
         Ok(crate::network::tailscale::TailnetPeersView {
             candidates: crate::network::tailscale::friend_candidates(&status),
             saved,
+            tailnet: status.tailnet.clone(),
         })
     }
 
@@ -3388,6 +3392,9 @@ impl AppRuntime {
         if auth_accept.host_device_id != invite.host_device_id {
             return Err("MP-NET-001 authenticated host identity mismatch".to_string());
         }
+        // Batch 9: the guest's side of the same proof. Recorded only after the
+        // authenticated accept came back for the device id the invite named.
+        self.record_guest_side_handshake(&invite.host_device_id);
 
         if let Some(descriptor) = &auth_accept.provider_room {
             descriptor.validate(&credentials.room_id)?;
@@ -3514,7 +3521,7 @@ impl AppRuntime {
             } => {
                 let mut state = self.lock();
                 state.peer_participant = Some(ParticipantSnapshot {
-                    id: device_id,
+                    id: device_id.clone(),
                     display_name,
                     role: "Guest".to_string(),
                     connected: true,
@@ -3525,6 +3532,12 @@ impl AppRuntime {
                 });
                 state.network.connected = true;
                 state.network.path = "Guest authenticated over QUIC".to_string();
+                // Batch 9: this is the only event allowed to make the wizard say
+                // Connected — the guest's join secret, device id and signature
+                // just verified. A tailnet status entry is not this.
+                drop(state);
+                self.record_host_side_handshake(&device_id);
+                let mut state = self.lock();
                 // Mirror the coordinator: a reconnecting room must NOT jump to
                 // LOBBY and resume blindly — the room stays RECONNECTING until
                 // the host runs a fresh play protocol cycle.

@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::StorageError;
 
@@ -719,6 +719,57 @@ impl MoviePartyDb {
                 .map_or(Ok(None), |state| Ok(Some(state))),
             None => Ok(None),
         }
+    }
+
+    /// The cryptographic identity bound to a saved friend by Batch 8's
+    /// acceptance, when there is one. The wizard needs it twice over: to match
+    /// the device that just completed a Movie Party handshake against this
+    /// friend, and to print the fingerprint they can read back.
+    pub fn friend_identity_for_peer(
+        &self,
+        peer_key: &str,
+    ) -> Result<Option<(String, String)>, StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        let found = conn
+            .query_row(
+                "SELECT peer_device_id, public_key FROM friends WHERE peer_key = ?1 LIMIT 1",
+                params![peer_key],
+                |row| {
+                    let device: Option<String> = row.get(0)?;
+                    let key: Option<String> = row.get(1)?;
+                    Ok((device, key))
+                },
+            )
+            .optional()
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?
+            .and_then(|(device, key)| match (device, key) {
+                (Some(device), Some(key))
+                    if !device.trim().is_empty() && !key.trim().is_empty() =>
+                {
+                    Some((device, key))
+                }
+                _ => None,
+            });
+        Ok(found)
+    }
+
+    /// The inverse lookup: which saved friend owns this device id. Used by the
+    /// host when a guest authenticates, so a handshake can be credited to the
+    /// right friendship rather than to whoever is first in the list.
+    pub fn friend_key_for_device(
+        &self,
+        peer_device_id: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        let found = conn
+            .query_row(
+                "SELECT peer_key FROM friends WHERE peer_device_id = ?1 LIMIT 1",
+                params![peer_device_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        Ok(found)
     }
 
     /// Record an invitation we issued or received. The nonce is the primary key,
