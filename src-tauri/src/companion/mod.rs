@@ -404,18 +404,57 @@ mod tests {
         assert!(verify(&pairing.secret, challenge, &mac));
         assert!(!verify(&pairing.secret, "other nonce", &mac));
         assert!(!verify(&generate_pairing().secret, challenge, &mac));
-        for tampered in [
-            mac[..mac.len() - 1].to_string() + "A",
-            "A".to_string() + &mac[1..],
+        let tampered = [
+            mutate_base64url(&mac, mac.len() - 1),
+            mutate_base64url(&mac, 0),
             String::new(),
             mac.repeat(2),
-        ] {
+        ];
+        for candidate in tampered {
+            assert_ne!(candidate, mac, "the test must tamper, not reprint");
             assert!(
-                !verify(&pairing.secret, challenge, &tampered),
-                "accepted {tampered}"
+                !verify(&pairing.secret, challenge, &candidate),
+                "accepted {candidate}"
             );
         }
         assert_ne!(generate_pairing().secret, pairing.secret);
+    }
+
+    /// `value` with the byte at `index` replaced by a *different* base64url
+    /// character. The previous `… + "A"` / `"A" + …` construction silently
+    /// produced the original string whenever the MAC already began or ended in
+    /// `A` — roughly one run in thirty — and a correct verifier was reported as
+    /// having accepted a near miss.
+    fn mutate_base64url(value: &str, index: usize) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut bytes = value.as_bytes().to_vec();
+        let target = bytes[index];
+        for candidate in ALPHABET.iter().copied() {
+            if candidate != target {
+                bytes[index] = candidate;
+                return String::from_utf8(bytes).expect("base64url is ascii");
+            }
+        }
+        unreachable!("any base64url byte has 63 different alternatives")
+    }
+
+    #[test]
+    fn a_mutated_mac_is_always_actually_different() {
+        for seed in 0..200_u8 {
+            // Every possible first character, so the old `A` collision is
+            // covered rather than merely avoided.
+            let mac = format!("{}{}", seed_char(seed), "Q".repeat(42));
+            assert_ne!(mutate_base64url(&mac, 0), mac);
+            assert_ne!(mutate_base64url(&mac, mac.len() - 1), mac);
+        }
+    }
+
+    /// A base64url character chosen by index, for the sweep above.
+    fn seed_char(index: u8) -> char {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        ALPHABET[usize::from(index % 64)] as char
     }
 
     #[test]
