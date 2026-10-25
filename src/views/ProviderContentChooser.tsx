@@ -183,25 +183,25 @@ export function ProviderContentChooser({
         </p>
       )}
       <div role="group" aria-label="Find content" className="provider-chooser-find">
-        <div className="provider-chooser-actions">
-          <button
-            type="button"
+        <div role="group" aria-label="Content lookup mode" className="provider-chooser-actions">
+          <CinemaButton
+            variant={direct ? "ghost" : "primary"}
             aria-pressed={!direct}
             onClick={() => {
               setDirect(false);
             }}
           >
             Search by title
-          </button>
-          <button
-            type="button"
+          </CinemaButton>
+          <CinemaButton
+            variant={direct ? "primary" : "ghost"}
             aria-pressed={direct}
             onClick={() => {
               setDirect(true);
             }}
           >
             Paste video or title URL
-          </button>
+          </CinemaButton>
         </div>
         <label htmlFor="provider-content-input">
           {direct ? "Provider URL" : `Search ${provider?.displayName ?? "provider"}`}
@@ -244,15 +244,15 @@ export function ProviderContentChooser({
       {(message || pollMessage || snapshot?.issue) && (
         <div role="alert" className="provider-chooser-notice">
           <p>{message ?? pollMessage ?? snapshot?.issue}</p>
-          <button
-            type="button"
+          <CinemaButton
+            variant="neutral"
             disabled={busy || isCreating}
             onClick={() => {
               setEpoch((value) => value + 1);
             }}
           >
             Retry and refresh
-          </button>
+          </CinemaButton>
           <p>
             For a closed browser, use Open above. For a closed or changed tab, choose and confirm it
             again.
@@ -284,8 +284,8 @@ export function ProviderContentChooser({
                     : "Provider tab")}
               </p>
             </div>
-            <button
-              type="button"
+            <CinemaButton
+              variant={previewId === tab.targetId ? "primary" : "ghost"}
               disabled={busy || isCreating || !tab.identity || Boolean(tab.issue)}
               aria-pressed={previewId === tab.targetId}
               onClick={() => {
@@ -293,7 +293,7 @@ export function ProviderContentChooser({
               }}
             >
               Preview title
-            </button>
+            </CinemaButton>
           </li>
         ))}
       </ul>

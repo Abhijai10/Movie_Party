@@ -119,6 +119,44 @@ not be run in parallel.
 WKWebView and macOS managed-Chrome paths have evidence. Windows webview
 differences, and two-device Cinema certification, remain outstanding.
 
+## Follow-up — control uniformity
+
+The integrated player's surfaces mixed two button languages: the app-wide
+`CinemaButton` pill and plain `<button>` elements that `.provider-chooser` CSS
+redrew as rectangular, sentence-case, 10px-radius boxes. Both appeared inside the
+same panel, so the YouTube screens read as foreign to Create Party and the local
+movie controls.
+
+Every control in the provider and YouTube surfaces now goes through
+`CinemaButton` — the lookup-mode toggle, tab preview selection, and the recovery
+action in `ProviderContentChooser`, joining the driver toggle in
+`YoutubePanel`. Selected state uses the existing `primary`/`ghost` variants rather
+than a bespoke fill, so it matches the action button beside it exactly. The three
+competing rules (the rectangular box, its flat `aria-pressed` fill, and its
+brightness hover) were deleted; focus-visible and disabled rules were kept.
+`.youtube-panel` typography, thumbnail radius, the disclosure label and the error
+notice were aligned to the values the provider panels already use.
+
+Verified by computed style in the rendered fixture, not by eye: all six controls
+on the YouTube surfaces now report identical `border-radius: 9999px`,
+`text-transform: uppercase`, `letter-spacing: 2.24px`, `min-height: 56px`, and the
+selected one carries the same `linear-gradient(124,85,214 …)` as the pre-existing
+"Search in Chrome" action.
+
+`src/views/providerUiContracts.test.ts` locks the invariant in — no raw `<button>`
+in any provider or YouTube control surface, and no CSS rule may redraw a
+provider-chooser control as a competing rectangle. It was confirmed to fail
+against the pre-change sources and pass against these.
+
+Gates after the change: `tsc` 0, `eslint --max-warnings=0` 0, `vitest` **371
+passed / 33 files** (365 plus the 6 new contract tests), `pnpm build` succeeds.
+No Rust file was touched, so the 679-test result above still stands. The Impeccable
+detector reports only the pre-existing `transition-property: width` at
+`src/styles.css:2073`. `src/styles.css` remains Prettier-unformatted as it was
+before this change (3,778 lines of the file's compact house style, present in the
+committed version; `pnpm format` is not a CI gate, and reformatting it would bury
+this diff in unrelated churn).
+
 
 ## Native platform evidence and limits
 
