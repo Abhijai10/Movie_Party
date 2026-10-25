@@ -342,6 +342,40 @@ impl InviteLedger {
     }
 }
 
+/// Encode an invite as the deep link the OS hands back to Movie Party. The
+/// scheme and path are unchanged from the older link shape, so existing
+/// registration keeps working; the payload is what got stronger.
+pub fn encode_invite_link(invite: &FriendInvite) -> Result<String, FriendError> {
+    let json = serde_json::to_vec(invite).map_err(|_| FriendError::InvalidShape)?;
+    Ok(format!(
+        "movieparty://{FRIEND_INVITE_PATH}/{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+    ))
+}
+
+/// Decode one. A payload that is recognisably the *old* unsigned shape is
+/// reported as such, because "this link is too old to trust" is a different and
+/// more useful answer than "this link is malformed".
+pub fn parse_invite_link(link: &str) -> Result<FriendInvite, FriendError> {
+    let prefix = format!("movieparty://{FRIEND_INVITE_PATH}/");
+    let remainder = link
+        .strip_prefix(&prefix)
+        .ok_or(FriendError::InvalidShape)?;
+    let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(remainder.trim_end_matches('/'))
+        .map_err(|_| FriendError::InvalidShape)?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&json).map_err(|_| FriendError::InvalidShape)?;
+    if value.get("v").is_none()
+        && value.get("n").is_some()
+        && value.get("pk").is_some()
+        && value.get("signature").is_none()
+    {
+        return Err(FriendError::UnsignedLegacy);
+    }
+    serde_json::from_value(value).map_err(|_| FriendError::InvalidShape)
+}
+
 /// What to do when a peer that we know about arrives. Friendship grants trust; it
 /// does not grant a room seat on its own, and a room seat does not mint friendship.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -679,6 +713,65 @@ mod tests {
         assert_eq!(
             decide_trust(None, false),
             TrustDecision::Refused(S::NotFriends)
+        );
+    }
+
+    #[test]
+    fn a_link_round_trips_and_a_truncated_or_tampered_one_is_refused() {
+        let invite = fresh_invite();
+        let link = encode_invite_link(&invite).expect("link");
+        assert!(link.starts_with("movieparty://friend/"));
+        assert_eq!(parse_invite_link(&link).unwrap(), invite);
+        // Verified again after the trip through the OS.
+        let verified = verify_invite(
+            &parse_invite_link(&link).unwrap(),
+            "0f0f0f0f-1111-7111-8111-000000000000",
+            NOW,
+            &ledger(),
+        )
+        .expect("verified after decode");
+        assert_eq!(verified.nonce, invite.nonce);
+
+        for junk in [
+            "",
+            "movieparty://friend/",
+            "movieparty://friend/!!!not-base64!!!",
+            "movieparty://join/abcdefgh",
+            "https://example.com/friend/abc",
+            "movieparty://friend/bm90IGpzb24",
+        ] {
+            assert!(
+                parse_invite_link(junk).is_err(),
+                "accepted malformed {junk:?}"
+            );
+        }
+        // Truncating the link must not yield an invite that still verifies.
+        let cut = link[..link.len() - 8].to_string();
+        assert!(
+            parse_invite_link(&cut).is_err() || {
+                let parsed = parse_invite_link(&cut).unwrap();
+                verify_invite(
+                    &parsed,
+                    "0f0f0f0f-1111-7111-8111-000000000000",
+                    NOW,
+                    &ledger(),
+                )
+                .is_err()
+            }
+        );
+    }
+
+    #[test]
+    fn an_old_unsigned_link_is_named_as_too_old_not_as_corrupt() {
+        // The shape the previous build produced: name and peer key, no signature.
+        let legacy = format!(
+            "movieparty://friend/{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(r#"{"n":"Priya","pk":"priya-mac.tailc930b7.ts.net"}"#)
+        );
+        assert_eq!(
+            parse_invite_link(&legacy).unwrap_err(),
+            FriendError::UnsignedLegacy
         );
     }
 

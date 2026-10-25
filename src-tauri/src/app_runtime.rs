@@ -1,4 +1,5 @@
 pub mod companion;
+pub mod friendship;
 mod provider_chooser;
 mod provider_playback;
 mod provider_room;

@@ -733,15 +733,16 @@ impl MoviePartyDb {
         let conn = lock_mutex(&self.conn)?;
         conn.execute(
             "INSERT INTO friend_invites
-                (nonce, direction, peer_device_id, public_key, display_name,
+                (nonce, direction, peer_device_id, public_key, peer_key, display_name,
                  issued_at_ms, expires_at_ms, outcome, updated_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'PENDING', ?8)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'PENDING', ?9)
              ON CONFLICT(nonce) DO UPDATE SET updated_at_ms = excluded.updated_at_ms",
             params![
                 invite.nonce,
                 direction,
                 invite.from_device_id,
                 invite.from_public_key,
+                invite.from_peer_key,
                 invite.from_display_name,
                 invite.issued_at_ms,
                 invite.expires_at_ms,
@@ -803,6 +804,54 @@ impl MoviePartyDb {
             pending.push(row.map_err(|e| StorageError::Sqlite(e.to_string()))?);
         }
         Ok(pending)
+    }
+
+    /// The decision record for one invitation, as stored. The signature was
+    /// verified when the row was written, so a later Accept checks the row's own
+    /// facts — outcome, expiry, and whether the identity is blocked — rather than
+    /// asking the user to still hold the original link.
+    pub fn friend_invite_row(&self, nonce: &str) -> Result<Option<InviteRecord>, StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        Ok(conn
+            .query_row(
+                "SELECT peer_device_id, public_key, peer_key, display_name,
+                        expires_at_ms, outcome
+                 FROM friend_invites WHERE nonce = ?1",
+                [nonce],
+                |row| {
+                    Ok(InviteRecord {
+                        device_id: row.get(0)?,
+                        public_key: row.get(1)?,
+                        peer_key: row.get(2)?,
+                        display_name: row.get(3)?,
+                        expires_at_ms: row.get(4)?,
+                        outcome: row.get(5)?,
+                    })
+                },
+            )
+            .ok())
+    }
+
+    /// Where a saved friend stands in the friendship lifecycle.
+    pub fn friendship_state(
+        &self,
+        peer_key: &str,
+    ) -> Result<Option<crate::friends::FriendshipState>, StorageError> {
+        let conn = lock_mutex(&self.conn)?;
+        let stored = conn
+            .query_row(
+                "SELECT trust_state FROM friends WHERE peer_key = ?1",
+                [peer_key],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten();
+        match stored {
+            Some(value) => crate::friends::FriendshipState::parse(&value)
+                .map(Some)
+                .map_err(|_| StorageError::Sqlite(format!("MP-STORE-004 {value}"))),
+            None => Ok(None),
+        }
     }
 
     /// Delete a friendship row outright, tombstone included. Used only when the
@@ -1295,6 +1344,17 @@ UPDATE friends SET connection_state = 'MOVIE_PARTY_VERIFIED'
 /// `Removed`/`Blocked` — must keep saying so after a restart. `connection_state`
 /// stays what it always was: where the peer is on the network. Trust is separate,
 /// because the two answer different questions and must not overwrite each other.
+/// One stored invitation, as the receiving side needs it to decide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InviteRecord {
+    pub device_id: String,
+    pub public_key: String,
+    pub peer_key: String,
+    pub display_name: String,
+    pub expires_at_ms: i64,
+    pub outcome: String,
+}
+
 fn migration_006_add_column(column: &str) -> String {
     let declaration = match column {
         "peer_device_id" => "TEXT",
@@ -1318,6 +1378,7 @@ CREATE TABLE IF NOT EXISTS friend_invites (
     direction        TEXT NOT NULL CHECK (direction IN ('SENT', 'RECEIVED')),
     peer_device_id   TEXT NOT NULL,
     public_key       TEXT NOT NULL,
+    peer_key         TEXT NOT NULL,
     display_name     TEXT NOT NULL,
     issued_at_ms     INTEGER NOT NULL,
     expires_at_ms    INTEGER NOT NULL,

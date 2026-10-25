@@ -184,6 +184,10 @@ pub fn run() {
             youtube_driver, youtube_attach, youtube_detach, youtube_event,
             companion_status, companion_start, companion_stop, companion_new_code,
             companion_unlink, companion_install_host, companion_remove_host,
+            friend_invite_signed, preview_friend_invite, accept_friend_invitation,
+            friendship_states,
+            decline_friend_invitation, block_friend, unblock_friend, remove_friend_trust,
+            friendship_state,
             focus_provider_playback,
             reset_provider_session,
             create_schedule,
@@ -937,6 +941,91 @@ fn youtube_detach(
 ) -> Result<(), String> {
     runtime.youtube_detach(&lease)
 }
+#[tauri::command]
+async fn friend_invite_signed(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<app_runtime::friendship::SentInvite, String> {
+    runtime.friend_invite_signed().await
+}
+
+/// Read an invitation without acting on it. Nothing is committed until the user
+/// accepts, so a deep link arriving from the OS cannot create a friendship.
+#[tauri::command]
+fn preview_friend_invite(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    link: String,
+) -> Result<app_runtime::friendship::IncomingInvite, String> {
+    runtime.preview_friend_invite(&link)
+}
+
+#[tauri::command]
+async fn accept_friend_invitation(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    nonce: String,
+) -> Result<crate::storage::sqlite::StoredFriend, String> {
+    runtime.accept_friend_invitation(nonce).await
+}
+
+#[tauri::command]
+fn decline_friend_invitation(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    nonce: String,
+) -> Result<(), String> {
+    runtime.decline_friend_invitation(nonce)
+}
+
+#[tauri::command]
+fn block_friend(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    peer_key: String,
+) -> Result<String, String> {
+    runtime
+        .block_friend(&peer_key)
+        .map(|state| state.as_str().to_string())
+}
+
+#[tauri::command]
+fn unblock_friend(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    peer_key: String,
+) -> Result<String, String> {
+    runtime
+        .unblock_friend(&peer_key)
+        .map(|state| state.as_str().to_string())
+}
+
+/// Removal records a position rather than deleting the record, so the revocation
+/// outlives the link that created it.
+#[tauri::command]
+fn remove_friend_trust(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    peer_key: String,
+) -> Result<String, String> {
+    runtime
+        .remove_friend_trust(&peer_key)
+        .map(|state| state.as_str().to_string())
+}
+
+/// Every saved friend's trust position, in one call.
+#[tauri::command]
+fn friendship_states(runtime: tauri::State<'_, app_runtime::AppRuntime>) -> Vec<(String, String)> {
+    runtime
+        .friendship_states()
+        .into_iter()
+        .map(|(key, state)| (key, state.as_str().to_string()))
+        .collect()
+}
+
+#[tauri::command]
+fn friendship_state(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    peer_key: String,
+) -> Option<String> {
+    runtime
+        .friendship_state(&peer_key)
+        .map(|state| state.as_str().to_string())
+}
+
 /// The opt-in existing-browser companion. Starting it writes the loopback
 /// endpoint the native host reads, and nothing at all is installed here.
 #[tauri::command]
