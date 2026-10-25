@@ -15,7 +15,24 @@ const capability: ProviderCapability = {
   syncAvailable: true,
   sharedAvailable: false,
   sharedReason: "Off",
-  verification: "EXTERNAL_VERIFICATION_PENDING",
+  verification: "LIVE_VERIFIED_MACOS_PARTIAL",
+  actions: [
+    {
+      operation: "seek_command",
+      evidence: "LIVE_VERIFIED",
+      note: "Live run required the playhead to actually move.",
+    },
+    {
+      operation: "consensus_playback",
+      evidence: "AUTOMATED_ONLY",
+      note: "Loopback QUIC with synthetic observations.",
+    },
+    {
+      operation: "two_device_sync",
+      evidence: "UNVERIFIED",
+      note: "No two-device session has ever run.",
+    },
+  ],
 };
 const tabs: ContentTab[] = ["first", "second"].map((targetId, index) => ({
   targetId,

@@ -5294,6 +5294,20 @@ input[type=range].mp-range::-webkit-slider-thumb {
 .provider-content-preview div { min-width: 0; display: grid; gap: 12px; }
 .provider-content-url { overflow-wrap: anywhere; }
 .provider-chooser-notice { padding: 16px; background: #2c1b2b; border-radius: 10px; display: grid; gap: 12px; }
+/* Honest capability disclosure: the tier is always named in words, never by colour alone. */
+.provider-chooser-evidence, .provider-companion-change { border-top: 1px solid #40364f; padding-top: 4px; }
+.provider-chooser-evidence > summary, .provider-companion-change > summary { cursor: pointer; padding: 10px 0; font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase; color: #c6bed5; transition: color .3s ease; }
+.provider-chooser-evidence > summary:hover, .provider-companion-change > summary:hover { color: #c4a4ff; }
+.provider-chooser-evidence > summary:focus-visible, .provider-companion-change > summary:focus-visible { outline: 2px solid #c4a4ff; outline-offset: 3px; }
+.provider-chooser-evidence ul { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 10px; }
+.provider-chooser-evidence li { display: grid; gap: 2px; }
+.provider-chooser-evidence li > span { font-size: 13px; font-weight: 600; color: #f4f1fa; }
+.provider-chooser-evidence li p { font-size: 12px; margin: 0; color: #bdb3ce; }
+.provider-chooser-evidence em { font-size: 11px; font-style: normal; letter-spacing: 0.08em; text-transform: uppercase; }
+.provider-evidence-live_verified { color: #9de3b5; }
+.provider-evidence-automated_only { color: #c4a4ff; }
+.provider-evidence-unverified { color: #e8b4a8; }
+.provider-companion-title strong { color: #f4f1fa; font-weight: 600; }
 @media (max-width: 1050px) { .provider-content-preview { grid-template-columns: 1fr; } .provider-content-preview img { max-width: 240px; } }
 
 /* Provider loading adds status/recovery without hiding the existing lobby actions. */

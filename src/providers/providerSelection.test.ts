@@ -19,8 +19,10 @@ const netflix: ProviderCapability = {
   titleResolution: "PROVIDER_SEARCH",
   syncAvailable: true,
   sharedAvailable: false,
-  sharedReason: "Provider Shared is experimental and unavailable until capture is verified on this device.",
-  verification: "EXTERNAL_VERIFICATION_PENDING",
+  sharedReason:
+    "Provider Shared is experimental and unavailable until capture is verified on this device.",
+  verification: "NOT_LIVE_VERIFIED",
+  actions: [],
 };
 
 const youtube: ProviderCapability = {
@@ -30,8 +32,10 @@ const youtube: ProviderCapability = {
   titleResolution: "DIRECT_URL",
   syncAvailable: true,
   sharedAvailable: false,
-  sharedReason: "Provider Shared is experimental and unavailable until capture is verified on this device.",
-  verification: "EXTERNAL_VERIFICATION_PENDING",
+  sharedReason:
+    "Provider Shared is experimental and unavailable until capture is verified on this device.",
+  verification: "NOT_LIVE_VERIFIED",
+  actions: [],
 };
 
 describe("provider source selection", () => {
@@ -137,7 +141,15 @@ describe("provider readiness state machine", () => {
     expect(netflix.supportLevel).toBe("SUPPORTED");
     expect(youtube.titleResolution).toBe("DIRECT_URL");
     expect(netflix.titleResolution).toBe("PROVIDER_SEARCH");
-    expect(netflix.verification).toBe("EXTERNAL_VERIFICATION_PENDING");
+    expect(netflix.verification).toBe("NOT_LIVE_VERIFIED");
+    // A summary may only claim live verification when an operation carries that
+    // tier, so the payload cannot drift from its own evidence.
+    for (const capability of [netflix, youtube]) {
+      const live = capability.actions.some((record) => record.evidence === "LIVE_VERIFIED");
+      expect(capability.verification).toBe(
+        live ? "LIVE_VERIFIED_MACOS_PARTIAL" : "NOT_LIVE_VERIFIED",
+      );
+    }
   });
 });
 describe("provider select labels (dark Emergent select)", () => {

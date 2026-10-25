@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
-import type { AppSnapshot } from "../backend/appRuntime";
+import type { AppSnapshot, ProviderCapability } from "../backend/appRuntime";
 import { CinemaView } from "../views/CinemaView";
 import { LobbyView } from "../views/LobbyView";
 import { ReadyCheckView } from "../views/ReadyCheckView";
@@ -123,9 +123,40 @@ captureStyle.textContent =
   "* { animation: none !important; transition: none !important; } [style*=opacity] { opacity: 1 !important; }";
 document.head.appendChild(captureStyle);
 mockWindows("main");
+// Typed, so a capability payload cannot silently drift from the real shape.
+// Production reports 14 operations; the fixture keeps one per evidence tier.
+const capabilities: ProviderCapability[] = [
+  {
+    id: "youtube",
+    displayName: "YouTube",
+    supportLevel: "PARTIAL",
+    titleResolution: "DIRECT_URL",
+    syncAvailable: true,
+    sharedAvailable: false,
+    sharedReason:
+      "Provider Shared is experimental and unavailable until capture is verified on this device.",
+    verification: "LIVE_VERIFIED_MACOS_PARTIAL",
+    actions: [
+      {
+        operation: "seek_command",
+        evidence: "LIVE_VERIFIED",
+        note: "Live run required the playhead to actually move.",
+      },
+      {
+        operation: "consensus_playback",
+        evidence: "AUTOMATED_ONLY",
+        note: "Loopback QUIC with synthetic observations.",
+      },
+      {
+        operation: "two_device_sync",
+        evidence: "UNVERIFIED",
+        note: "No two-device session has ever run.",
+      },
+    ],
+  },
+];
 mockIPC((command) => {
-  if (command === "get_provider_capabilities")
-    return [{ id: "youtube", displayName: "YouTube", syncSupported: true, sharedSupported: false }];
+  if (command === "get_provider_capabilities") return capabilities;
   if (command === "youtube_driver")
     return { ...initial, youtube: { ...initial.youtube, enabled: false } };
   return null;

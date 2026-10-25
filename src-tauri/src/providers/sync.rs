@@ -49,6 +49,9 @@ pub struct ProviderCapability {
     pub shared_available: bool,
     pub shared_reason: String,
     pub verification: String,
+    /// Per-operation evidence. `support_level` and `verification` are summaries;
+    /// this is the record that may not be optimistic.
+    pub actions: Vec<ProviderAction>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +64,159 @@ pub enum Platform {
 pub enum VerificationStatus {
     ExternalVerificationPending,
     Verified,
+}
+
+/// How strongly an operation is actually evidenced. Declaring support is only
+/// allowed from evidence, never from the fact that code exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ActionEvidence {
+    /// Observed on the real provider page or in the real browser on a named OS.
+    LiveVerified,
+    /// Exercised by an automated test against a fixture, synthetic page or
+    /// loopback transport only.
+    AutomatedOnly,
+    /// Implemented, but nothing has ever observed it working.
+    Unverified,
+}
+
+/// One provider operation with the evidence behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderAction {
+    pub operation: &'static str,
+    pub evidence: ActionEvidence,
+    pub note: &'static str,
+}
+
+/// The single source of truth for what each provider's Provider Sync path can
+/// honestly claim. Everything here is either an automated test that exists in
+/// this repository or a run recorded in a batch report; nothing is inferred
+/// from a selector having been written.
+pub fn provider_actions(provider: ProviderId) -> Vec<ProviderAction> {
+    use ActionEvidence::{AutomatedOnly, LiveVerified, Unverified};
+    let live = provider == ProviderId::YouTube;
+    let youtube_gate = [
+        ProviderAction {
+            operation: "play_command",
+            evidence: AutomatedOnly,
+            note: "Real YouTube playback needs a user gesture; the live run asserted pause and seek, not play.",
+        },
+        ProviderAction {
+            operation: "login_gate_detection",
+            evidence: Unverified,
+            note: "The in-app player never reads provider sign-in state.",
+        },
+    ];
+    let subscription_only = [
+        ProviderAction {
+            operation: "play_command",
+            evidence: Unverified,
+            note: "Never exercised on this provider's protected player.",
+        },
+        ProviderAction {
+            operation: "login_gate_detection",
+            evidence: Unverified,
+            note: "The adapter's selector has never run against a real signed-out page.",
+        },
+    ];
+    let mut actions = vec![
+        ProviderAction {
+            operation: "managed_chrome_launch",
+            evidence: if live { LiveVerified } else { AutomatedOnly },
+            note: if live {
+                "Real visible Chrome on macOS."
+            } else {
+                "Real Chrome evidence exists only via YouTube and localhost pages."
+            },
+        },
+        ProviderAction {
+            operation: "provider_page_navigation",
+            evidence: if live { LiveVerified } else { Unverified },
+            note: if live {
+                "Live YouTube watch page navigated in the real browser."
+            } else {
+                "Search and detail URLs are built and validated, never loaded."
+            },
+        },
+        ProviderAction {
+            operation: "content_identity_extraction",
+            evidence: AutomatedOnly,
+            note: "Unit-tested against recorded URLs; the live run only proved a real URL parses.",
+        },
+        ProviderAction {
+            operation: "episode_identity",
+            evidence: AutomatedOnly,
+            note: if live {
+                "YouTube has no episode concept; video IDs are unit-tested."
+            } else {
+                "Netflix `ep`/`v` and Prime `eid` parsing is unit-tested, never observed on the site."
+            },
+        },
+        ProviderAction {
+            operation: "playback_observation",
+            evidence: if live { LiveVerified } else { Unverified },
+            note: if live {
+                "Real finite currentTime observed on the live page."
+            } else {
+                "Depends on a visible HTML5 <video> existing during protected playback — unconfirmed."
+            },
+        },
+        ProviderAction {
+            operation: "pause_command",
+            evidence: if live { LiveVerified } else { Unverified },
+            note: "Generic HTML5 pause; only YouTube has been observed obeying it.",
+        },
+        ProviderAction {
+            operation: "seek_command",
+            evidence: if live { LiveVerified } else { Unverified },
+            note: "Live run required the playhead to actually move, not just return true.",
+        },
+        ProviderAction {
+            operation: "consensus_playback",
+            evidence: AutomatedOnly,
+            note: "Loopback QUIC with synthetic observations; two physical devices never agreed.",
+        },
+        ProviderAction {
+            operation: "two_device_sync",
+            evidence: Unverified,
+            note: "No two-device session has ever run for any provider.",
+        },
+        ProviderAction {
+            operation: "entitlement_or_region_failure",
+            evidence: Unverified,
+            note: "A title unavailable to one account is not yet distinguished from other errors.",
+        },
+        ProviderAction {
+            operation: "session_expiry_recovery",
+            evidence: Unverified,
+            note: "Never exercised mid-party.",
+        },
+        ProviderAction {
+            operation: "site_change_resilience",
+            evidence: Unverified,
+            note: "Selectors break silently when a provider redesigns.",
+        },
+    ];
+    actions.extend(if live {
+        &youtube_gate[..]
+    } else {
+        &subscription_only[..]
+    });
+    actions.sort_by(|a, b| a.operation.cmp(b.operation));
+    actions
+}
+
+/// The strongest evidence tier a provider actually holds.
+pub fn provider_verification(provider: ProviderId) -> &'static str {
+    if provider_actions(provider)
+        .iter()
+        .any(|action| action.evidence == ActionEvidence::LiveVerified)
+    {
+        "LIVE_VERIFIED_MACOS_PARTIAL"
+    } else {
+        "NOT_LIVE_VERIFIED"
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,22 +291,33 @@ pub fn provider_id_from_str(provider_id: &str) -> Option<ProviderId> {
 
 pub fn provider_capabilities() -> Vec<ProviderCapability> {
     [
-        ("youtube", "YouTube", "PARTIAL", "DIRECT_URL"),
-        ("netflix", "Netflix", "PARTIAL", "PROVIDER_SEARCH"),
-        ("prime", "Prime Video", "PARTIAL", "PROVIDER_SEARCH"),
-        ("jiohotstar", "JioHotstar", "PARTIAL", "PROVIDER_SEARCH"),
+        (
+            ProviderId::YouTube,
+            "youtube",
+            "YouTube",
+            "DIRECT_URL",
+        ),
+        (ProviderId::Netflix, "netflix", "Netflix", "PROVIDER_SEARCH"),
+        (ProviderId::Prime, "prime", "Prime Video", "PROVIDER_SEARCH"),
+        (
+            ProviderId::JioHotstar,
+            "jiohotstar",
+            "JioHotstar",
+            "PROVIDER_SEARCH",
+        ),
     ]
     .into_iter()
-    .map(|(id, display_name, support_level, title_resolution)| ProviderCapability {
+    .map(|(provider, id, display_name, title_resolution)| ProviderCapability {
         id: id.to_string(),
         display_name: display_name.to_string(),
-        support_level: support_level.to_string(),
+        support_level: "PARTIAL".to_string(),
         title_resolution: title_resolution.to_string(),
         sync_available: true,
         shared_available: false,
         shared_reason: "Provider Shared is experimental and unavailable until capture is verified on this device."
             .to_string(),
-        verification: "EXTERNAL_VERIFICATION_PENDING".to_string(),
+        verification: provider_verification(provider).to_string(),
+        actions: provider_actions(provider),
     })
     .collect()
 }
@@ -717,9 +884,20 @@ mod tests {
         assert!(capabilities
             .iter()
             .all(|capability| !capability.shared_available));
-        assert!(capabilities
-            .iter()
-            .all(|capability| capability.verification == "EXTERNAL_VERIFICATION_PENDING"));
+        assert_eq!(
+            capabilities
+                .iter()
+                .map(|capability| capability.verification.as_str())
+                .collect::<Vec<_>>(),
+            // Only YouTube has ever been driven on its real page. A summary must
+            // never read as verified for a provider nobody has loaded.
+            vec![
+                "LIVE_VERIFIED_MACOS_PARTIAL",
+                "NOT_LIVE_VERIFIED",
+                "NOT_LIVE_VERIFIED",
+                "NOT_LIVE_VERIFIED",
+            ]
+        );
         assert!(capabilities
             .iter()
             .all(|capability| capability.support_level == "PARTIAL"));
@@ -734,6 +912,89 @@ mod tests {
             .iter()
             .filter(|capability| capability.id != "youtube")
             .all(|capability| capability.title_resolution == "PROVIDER_SEARCH"));
+    }
+
+    #[test]
+    fn evidence_never_claims_two_device_entitlement_or_recovery_support() {
+        for provider in [
+            ProviderId::YouTube,
+            ProviderId::Netflix,
+            ProviderId::Prime,
+            ProviderId::JioHotstar,
+        ] {
+            let actions = provider_actions(provider);
+            for name in [
+                "two_device_sync",
+                "entitlement_or_region_failure",
+                "session_expiry_recovery",
+                "site_change_resilience",
+            ] {
+                let action = actions
+                    .iter()
+                    .find(|record| record.operation == name)
+                    .unwrap_or_else(|| panic!("{provider:?} omits {name}"));
+                assert_eq!(
+                    action.evidence,
+                    ActionEvidence::Unverified,
+                    "{name} claims evidence it does not have"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn live_evidence_is_confined_to_operations_the_macos_run_observed() {
+        let live = |provider: ProviderId| -> Vec<&'static str> {
+            provider_actions(provider)
+                .iter()
+                .filter(|record| record.evidence == ActionEvidence::LiveVerified)
+                .map(|record| record.operation)
+                .collect()
+        };
+        assert_eq!(
+            live(ProviderId::YouTube),
+            vec![
+                "managed_chrome_launch",
+                "pause_command",
+                "playback_observation",
+                "provider_page_navigation",
+                "seek_command",
+            ]
+        );
+        for provider in [
+            ProviderId::Netflix,
+            ProviderId::Prime,
+            ProviderId::JioHotstar,
+        ] {
+            assert!(
+                live(provider).is_empty(),
+                "{provider:?} has no real-page run to claim"
+            );
+        }
+    }
+
+    #[test]
+    fn every_operation_is_listed_once_with_a_reason_for_its_tier() {
+        for provider in [
+            ProviderId::YouTube,
+            ProviderId::Netflix,
+            ProviderId::Prime,
+            ProviderId::JioHotstar,
+        ] {
+            let actions = provider_actions(provider);
+            assert!(!actions.is_empty());
+            let mut names: Vec<&str> = actions.iter().map(|record| record.operation).collect();
+            names.sort_unstable();
+            let before = names.len();
+            names.dedup();
+            assert_eq!(names.len(), before, "duplicate operation");
+            assert!(
+                actions
+                    .iter()
+                    .all(|record| !record.note.trim().is_empty() && !record.note.contains('{')),
+                "each tier needs an untemplated reason"
+            );
+        }
     }
 
     #[test]

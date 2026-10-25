@@ -10,6 +10,11 @@ import {
   getProviderContent,
   type ContentChooserSnapshot,
 } from "../providers/contentChooser";
+import {
+  providerEvidence,
+  providerEvidenceLabel,
+  providerEvidenceTierLabel,
+} from "../providers/roomProviderState";
 import type { CreatePartyRequest } from "./CreatePartyView";
 
 export function ProviderContentChooser({
@@ -140,6 +145,26 @@ export function ProviderContentChooser({
         Provider Sync plays independently on both devices. Each viewer uses their own account.
         Provider Shared is off.
       </p>
+      {provider && (
+        <details className="provider-chooser-evidence">
+          <summary>What is actually verified</summary>
+          <p role="note">
+            {providerEvidenceLabel(providerEvidence(provider.actions))} Check each provider before
+            relying on it: docs/PROVIDER_VERIFICATION_CHECKLIST.md
+          </p>
+          <ul>
+            {provider.actions.map((action) => (
+              <li key={action.operation}>
+                <span>{action.operation.replaceAll("_", " ")}</span>
+                <em className={`provider-evidence-${action.evidence.toLowerCase()}`}>
+                  {providerEvidenceTierLabel(action.evidence)}
+                </em>
+                <p>{action.note}</p>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
       <div className="provider-chooser-actions">
         <CinemaButton
           variant="neutral"

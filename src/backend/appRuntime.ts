@@ -81,6 +81,14 @@ export type TailscaleReadiness = {
   message: string;
 };
 
+export type ProviderActionEvidence = "LIVE_VERIFIED" | "AUTOMATED_ONLY" | "UNVERIFIED";
+
+export type ProviderAction = {
+  operation: string;
+  evidence: ProviderActionEvidence;
+  note: string;
+};
+
 export type ProviderCapability = {
   id: string;
   displayName: string;
@@ -89,7 +97,12 @@ export type ProviderCapability = {
   syncAvailable: boolean;
   sharedAvailable: boolean;
   sharedReason: string;
-  verification: "EXTERNAL_VERIFICATION_PENDING" | "VERIFIED";
+  verification:
+    | "LIVE_VERIFIED_MACOS_PARTIAL"
+    | "NOT_LIVE_VERIFIED"
+    | "EXTERNAL_VERIFICATION_PENDING"
+    | "VERIFIED";
+  actions: ProviderAction[];
 };
 
 export type AppSnapshot = {
@@ -157,9 +170,20 @@ export type AppSnapshot = {
   providerContent?: {
     gestureRequired?: boolean;
     playbackPhase?: "VERIFYING" | "APPLIED" | "FAILED" | null;
-    selection: { version: number; provider: string; content_id: string; canonical_url: string; title: string; state_epoch: string; host_sequence: number; content_revision: number } | null;
-    localState: "UNSELECTED" | "OPENING" | "CONTENT_CONFIRMED" | "PLAYBACK_READY" | "ERROR" | "AUTH_REQUIRED";
-    peerState: "UNSELECTED" | "OPENING" | "CONTENT_CONFIRMED" | "PLAYBACK_READY" | "ERROR" | "AUTH_REQUIRED";
+    selection: {
+      version: number;
+      provider: string;
+      content_id: string;
+      canonical_url: string;
+      title: string;
+      state_epoch: string;
+      host_sequence: number;
+      content_revision: number;
+    } | null;
+    localState:
+      "UNSELECTED" | "OPENING" | "CONTENT_CONFIRMED" | "PLAYBACK_READY" | "ERROR" | "AUTH_REQUIRED";
+    peerState:
+      "UNSELECTED" | "OPENING" | "CONTENT_CONFIRMED" | "PLAYBACK_READY" | "ERROR" | "AUTH_REQUIRED";
   } | null;
   provider: {
     mode: string;
@@ -321,11 +345,7 @@ export type TailnetPeersView = {
  * show "waiting for their device to join" rather than a flat offline.
  */
 export type FriendFlowStatus =
-  | "INVITED"
-  | "TAILSCALE_PENDING"
-  | "MOVIE_PARTY_VERIFIED"
-  | "ONLINE"
-  | "OFFLINE";
+  "INVITED" | "TAILSCALE_PENDING" | "MOVIE_PARTY_VERIFIED" | "ONLINE" | "OFFLINE";
 
 export function friendStatusFor(
   friend: StoredFriend,
@@ -579,19 +599,28 @@ export async function checkProviderStatus(providerId: string): Promise<AppSnapsh
   return invokeSnapshot("check_provider_status", { providerId });
 }
 
-export async function resetProviderSession(providerId: string, confirmed: boolean): Promise<AppSnapshot> {
+export async function resetProviderSession(
+  providerId: string,
+  confirmed: boolean,
+): Promise<AppSnapshot> {
   return invokeSnapshot("reset_provider_session", { providerId, confirmed });
 }
 
 export function providerSessionErrorMessage(error: unknown): string | null {
   if (!(error instanceof BackendCommandError)) return null;
   switch (error.code) {
-    case "MP-PROVIDER-001": return "Install Google Chrome, then open the provider again. Saved provider sessions are kept.";
-    case "MP-PROVIDER-003": return "The managed browser did not respond. Close its Movie Party window, then open the provider again.";
-    case "MP-PROVIDER-005": return "This provider profile is still in use. Close its Movie Party browser window and retry. Your ordinary Chrome can stay open.";
-    case "MP-PROVIDER-006": return "Movie Party could not use its saved browser data. Check app-data permissions, or use Reset provider session in Settings if the data is corrupt. Sign-ins are never removed automatically.";
-    case "MP-PROVIDER-007": return "Confirm Reset provider session before removing its saved sign-in.";
-    default: return null;
+    case "MP-PROVIDER-001":
+      return "Install Google Chrome, then open the provider again. Saved provider sessions are kept.";
+    case "MP-PROVIDER-003":
+      return "The managed browser did not respond. Close its Movie Party window, then open the provider again.";
+    case "MP-PROVIDER-005":
+      return "This provider profile is still in use. Close its Movie Party browser window and retry. Your ordinary Chrome can stay open.";
+    case "MP-PROVIDER-006":
+      return "Movie Party could not use its saved browser data. Check app-data permissions, or use Reset provider session in Settings if the data is corrupt. Sign-ins are never removed automatically.";
+    case "MP-PROVIDER-007":
+      return "Confirm Reset provider session before removing its saved sign-in.";
+    default:
+      return null;
   }
 }
 
@@ -697,7 +726,6 @@ export async function enterCinema(): Promise<AppSnapshot> {
   return invokeSnapshot("enter_cinema");
 }
 
-
 /** §25: host starts the backend-driven 3-2-1 countdown. The snapshot
  *  returns the pending operation whose deadline the UI animates from. */
 export async function requestPlayCountdown(): Promise<AppSnapshot> {
@@ -720,9 +748,7 @@ export type StoredProviderDiagnostic = {
   sampleSeconds: number;
 };
 
-export async function listProviderDiagnostics(): Promise<
-  StoredProviderDiagnostic[]
-> {
+export async function listProviderDiagnostics(): Promise<StoredProviderDiagnostic[]> {
   return invoke<StoredProviderDiagnostic[]>("list_provider_diagnostics");
 }
 
@@ -765,15 +791,11 @@ function enqueueSurfaceOp<T>(op: () => Promise<T>): Promise<T> {
   return run;
 }
 
-export async function attachNativeVideoSurface(
-  bounds: NativeVideoBounds,
-): Promise<AppSnapshot> {
+export async function attachNativeVideoSurface(bounds: NativeVideoBounds): Promise<AppSnapshot> {
   return enqueueSurfaceOp(() => invokeSnapshot("attach_native_video_surface", { bounds }));
 }
 
-export async function resizeNativeVideoSurface(
-  bounds: NativeVideoBounds,
-): Promise<AppSnapshot> {
+export async function resizeNativeVideoSurface(bounds: NativeVideoBounds): Promise<AppSnapshot> {
   return enqueueSurfaceOp(() => invokeSnapshot("resize_native_video_surface", { bounds }));
 }
 
@@ -1037,6 +1059,10 @@ export async function listenToSnapshots(
   });
 }
 
-export async function retryRoomProvider(): Promise<AppSnapshot> { return invoke<AppSnapshot>("retry_room_provider"); }
+export async function retryRoomProvider(): Promise<AppSnapshot> {
+  return invoke<AppSnapshot>("retry_room_provider");
+}
 
-export async function focusProviderPlayback(): Promise<AppSnapshot> { return invoke<AppSnapshot>("focus_provider_playback"); }
+export async function focusProviderPlayback(): Promise<AppSnapshot> {
+  return invoke<AppSnapshot>("focus_provider_playback");
+}
