@@ -114,6 +114,25 @@ account shared what.
 | — | Rows O17–O29 (two devices) | Not run — one machine, one tailnet. |
 | — | O19–O24 media/call across a share | Not run — same. These are what turn requirement 13 from "reasoned" into "verified". |
 
+## 7b. Tailscale control-plane access (Batch 10)
+
+See `TAILSCALE_ONBOARDING_SECURITY_REVIEW.md` for the evidence behind these rows.
+No row here can be automated: the matrix marks every operation console-only or
+policy-refused.
+
+| # | Step | Expected | Tier today | Result |
+| --- | --- | --- | --- | --- |
+| A1 | Open the access panel as an Owner/Admin | Share plan can be prepared; role reads "allowed" | LIVE (single device, macOS — role read) | |
+| A2 | Same panel on a non-admin account | Refused with the sentence naming who can share | UNVERIFIED | |
+| A3 | Tailscale reports no role | Says "cannot tell", does not refuse | AUTOMATED | |
+| A4 | Plan a share of "this machine" | Shows this device's tailnet name, one recipient, 1–30 days | AUTOMATED | |
+| A5 | Try two recipients, a tag, or 31 days | Refused with a stable `MP-ACCESS` code | AUTOMATED | |
+| A6 | Open the Machines page from the panel | Tailscale's own page; no share created by Movie Party | UNVERIFIED | |
+| A7 | Revoke a share in the console, then "Check again" | "No longer visible" only if the node was seen as a share first | AUTOMATED (logic) / UNVERIFIED (live) | |
+| A8 | Check revocation for a peer never seen as a share | `UNKNOWN`, pointing at the console | AUTOMATED | |
+| A9 | Use the three removal cards | Three distinct effects, three distinct confirmations; only the friend removal is local | AUTOMATED | |
+| A10 | Confirm with a real second person | They must sign in and accept, and be an admin of their own tailnet | UNVERIFIED | |
+
 ## 8. Two-device and other-platform gaps carried forward
 
 - O19–O24, O26–O29, O31, O35 are the batch's core unknowns: they need two
