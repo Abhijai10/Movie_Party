@@ -4,6 +4,7 @@ pub mod onboarding;
 mod provider_chooser;
 mod provider_playback;
 mod provider_room;
+pub mod tailscale_access;
 pub mod youtube;
 use std::{
     collections::{HashMap, VecDeque},
@@ -549,6 +550,7 @@ struct AppRuntimeState {
     youtube: youtube::YoutubeState,
     companion: companion::CompanionState,
     onboarding: onboarding::OnboardingState,
+    tailscale_access: tailscale_access::TailscaleAccessState,
     provider_verifying: Option<String>,
     provider_prepare_started: Option<Instant>,
     provider_gesture_required: bool,
@@ -887,6 +889,7 @@ impl AppRuntime {
                     youtube: youtube::YoutubeState::default(),
                     companion: companion::CompanionState::default(),
                     onboarding: onboarding::OnboardingState::default(),
+                    tailscale_access: tailscale_access::TailscaleAccessState::default(),
                     provider_verifying: None,
                     provider_prepare_started: None,
                     provider_gesture_required: false,

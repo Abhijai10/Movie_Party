@@ -15,6 +15,10 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { CinemaButton } from "../components/mp/CinemaButton";
+import {
+  TailscaleAccessPanel,
+  type TailscaleAccessPanelProps,
+} from "../components/mp/TailscaleAccessPanel";
 import { SilkBackground } from "../components/mp/SilkBackground";
 import { StatusIndicator } from "../components/mp/StatusIndicator";
 import type {
@@ -84,6 +88,11 @@ export type OnboardingWizardViewProps = {
   onReportLinkExpired: () => void;
   onCopyPackage: () => void;
   onFinish: () => void;
+  /**
+   * Batch 10's access surface. Optional so the browser fixture and any callers
+   * that only exercise the six stages keep working unchanged.
+   */
+  access?: TailscaleAccessPanelProps;
 };
 
 /** True when the shell reports any of these spellings as the in-flight action. */
@@ -995,6 +1004,7 @@ export function OnboardingWizardView({
   onReportLinkExpired,
   onCopyPackage,
   onFinish,
+  access,
 }: OnboardingWizardViewProps): JSX.Element {
   const isBusy: IsBusy = (tokens) => {
     if (busy === null) return false;
@@ -1183,6 +1193,11 @@ export function OnboardingWizardView({
                       onReportLinkExpired,
                     }}
                   />
+                  {access != null && view.progress.stage === "TAILSCALE_APPROVAL" ? (
+                    <div className="mt-4">
+                      <TailscaleAccessPanel {...access} />
+                    </div>
+                  ) : null}
                   <ActionFooter
                     view={view}
                     isBusy={isBusy}

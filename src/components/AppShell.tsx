@@ -35,6 +35,15 @@ import {
   onboardingReportLinkExpired,
   onboardingSetSide,
   onboardingView as fetchOnboardingView,
+  removeFriendTrust,
+  tailscaleAccessMatrix,
+  tailscaleOpenConsole,
+  tailscaleRevocationState,
+  tailscaleSharePlan,
+  type AccessMatrixView,
+  type DestructiveActionId,
+  type RevocationView,
+  type SharePlanView,
   type OnboardingView,
   setSharedControls,
   showHome,
@@ -158,6 +167,15 @@ function AppShellContent({
   const [wizard, setWizard] = useState<OnboardingView | null>(null);
   const [wizardBusy, setWizardBusy] = useState<string | null>(null);
   const [wizardError, setWizardError] = useState<string | null>(null);
+  /**
+   * Batch 10: the access surface's own reading. The matrix is static data from
+   * the Rust module; the plan and the revocation observation are per-session.
+   */
+  const [accessMatrix, setAccessMatrix] = useState<AccessMatrixView | null>(null);
+  const [sharePlanView, setSharePlanView] = useState<SharePlanView | null>(null);
+  const [revocation, setRevocation] = useState<RevocationView | null>(null);
+  const [accessBusy, setAccessBusy] = useState<string | null>(null);
+  const [accessError, setAccessError] = useState<string | null>(null);
   /** A friend invite that arrived via deep link — accepted by FriendsView. */
   const [pendingFriendInvite, setPendingFriendInvite] = useState<string | null>(null);
   const [firstRunDone, setFirstRunDone] = useState<boolean>(() => {
@@ -637,12 +655,72 @@ function AppShellContent({
     }
   }, []);
 
+  const loadAccessMatrix = useCallback(async () => {
+    try {
+      setAccessMatrix(await tailscaleAccessMatrix());
+    } catch (error) {
+      setAccessError(commandErrorMessage(error, "Couldn't read what Movie Party may do in Tailscale."));
+    }
+  }, []);
+
+  const planShare = useCallback(async (recipient: string, lifetimeDays: number) => {
+    setAccessBusy("plan");
+    setAccessError(null);
+    try {
+      setSharePlanView(await tailscaleSharePlan(recipient, lifetimeDays));
+    } catch (error) {
+      setSharePlanView(null);
+      setAccessError(commandErrorMessage(error, "That plan couldn't be prepared."));
+    } finally {
+      setAccessBusy(null);
+    }
+  }, []);
+
+  const checkRevocation = useCallback(async () => {
+    if (!wizard) return;
+    setAccessBusy("revocation");
+    setAccessError(null);
+    try {
+      setRevocation(await tailscaleRevocationState(wizard.peerKey));
+    } catch (error) {
+      setAccessError(commandErrorMessage(error, "Couldn't read the share state."));
+    } finally {
+      setAccessBusy(null);
+    }
+  }, [wizard]);
+
+  const openAccessConsole = useCallback(async (action: DestructiveActionId) => {
+    setAccessError(null);
+    try {
+      // Opening Tailscale's own page is the whole action; Movie Party performs
+      // no write and does not claim one afterwards.
+      await tailscaleOpenConsole(action);
+    } catch (error) {
+      setAccessError(commandErrorMessage(error, "Tailscale's page couldn't be opened."));
+    }
+  }, []);
+
+  const removeFriendLocally = useCallback(async () => {
+    if (!wizard) return;
+    setAccessError(null);
+    try {
+      await removeFriendTrust(wizard.peerKey);
+      await runWizard("refresh", fetchOnboardingView);
+    } catch (error) {
+      setAccessError(commandErrorMessage(error, "The friend couldn't be removed."));
+    }
+  }, [wizard, runWizard]);
+
   const goOnboarding = () => {
     abandonFlows();
     setCommandError(null);
     setDevScreen(null);
     setLocalScreen("ONBOARDING");
+    setSharePlanView(null);
+    setRevocation(null);
+    setAccessError(null);
     void runWizard("refresh", fetchOnboardingView);
+    void loadAccessMatrix();
   };
 
   /**
@@ -1112,6 +1190,25 @@ function AppShellContent({
           }}
           onCopyPackage={() => {
             void copyWizardPackage();
+          }}
+          access={{
+            matrix: accessMatrix,
+            plan: sharePlanView,
+            revocation,
+            busy: accessBusy,
+            error: accessError,
+            onPlan: (recipient, lifetimeDays) => {
+              void planShare(recipient, lifetimeDays);
+            },
+            onOpenConsole: (action) => {
+              void openAccessConsole(action);
+            },
+            onCheckRevocation: () => {
+              void checkRevocation();
+            },
+            onRemoveFriend: () => {
+              void removeFriendLocally();
+            },
           }}
           onFinish={() => {
             // Leaving the wizard forgets the session, and with it any pasted link.

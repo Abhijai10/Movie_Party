@@ -53,6 +53,45 @@ describe("onboarding wizard control uniformity", () => {
   });
 });
 
+describe("Batch 10: the access surface never impersonates Tailscale", () => {
+  const PANEL = "src/components/mp/TailscaleAccessPanel.tsx";
+
+  it("drives every control through CinemaButton", () => {
+    const source = code(readFileSync(PANEL, "utf8"));
+    expect(source).not.toContain("<button");
+    expect(source).toContain("CinemaButton");
+  });
+
+  it("says it performs no write, where the buttons are", () => {
+    const source = code(readFileSync(PANEL, "utf8"));
+    expect(source).toContain("never creates the share itself");
+    expect(source).toContain("onOpenConsole");
+    // It must never call an API that would create or revoke anything.
+    for (const forbidden of ["fetch(", "axios", "invoke("]) {
+      expect(source, `the panel must not call ${forbidden}`).not.toContain(forbidden);
+    }
+  });
+
+  it("keeps the three removals as three confirmed cards", () => {
+    const model = code(readFileSync("src/onboarding/access.ts", "utf8"));
+    for (const id of [
+      "REMOVE_MOVIE_PARTY_FRIEND",
+      "REVOKE_TAILSCALE_DEVICE_SHARE",
+      "REMOVE_TAILNET_MEMBER",
+    ]) {
+      expect(model).toContain(id);
+    }
+    const panel = code(readFileSync(PANEL, "utf8"));
+    expect(panel).toContain("onboarding-action-confirm-");
+    expect(panel).toContain("onRemoveFriend");
+  });
+
+  it("renders the evidence link for every documented row", () => {
+    const panel = code(readFileSync(PANEL, "utf8"));
+    expect(panel).toContain("href={row.evidenceUrl}");
+  });
+});
+
 describe("onboarding CSS stays inside the shared system", () => {
   it("no rule redraws a wizard control as a competing rectangle", () => {
     const css = readFileSync("src/styles.css", "utf8");

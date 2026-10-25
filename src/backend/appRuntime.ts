@@ -1344,3 +1344,86 @@ export function onboardingErrorCode(error: unknown): string | null {
   const match = text.match(/MP-ONB-\d{3}/);
   return match ? match[0] : null;
 }
+
+// ── Batch 10: Tailscale control-plane access ───────────────────────────
+
+export type AccessOperation =
+  | "CREATE_USER_INVITE"
+  | "LIST_USER_INVITES"
+  | "REVOKE_USER_INVITE"
+  | "CREATE_DEVICE_SHARE"
+  | "LIST_DEVICE_SHARES"
+  | "REVOKE_DEVICE_SHARE"
+  | "REMOVE_TAILNET_MEMBER"
+  | "CREATE_AUTH_KEY";
+export type AutomationVerdict =
+  | "AUTOMATABLE"
+  | "DOCUMENTED_BUT_UNSCOPED"
+  | "CONSOLE_ONLY"
+  | "FORBIDDEN_BY_POLICY";
+export type ShareRoleVerdict = "ALLOWED" | "NOT_ALLOWED" | "UNKNOWN";
+export type DestructiveActionId =
+  | "REMOVE_MOVIE_PARTY_FRIEND"
+  | "REVOKE_TAILSCALE_DEVICE_SHARE"
+  | "REMOVE_TAILNET_MEMBER";
+export type RevocationState = "NO_LONGER_VISIBLE" | "STILL_SHARED" | "UNKNOWN";
+
+export type CapabilityRow = {
+  operation: AccessOperation;
+  verdict: AutomationVerdict;
+  requiredRole: string;
+  scope: string | null;
+  evidenceQuote: string;
+  evidenceUrl: string;
+  productResponse: string;
+};
+
+export type AccessMatrixView = {
+  rows: CapabilityRow[];
+  anyAutomatable: boolean;
+  sharedWithExternalUserNote: string;
+};
+
+export type SharePlan = {
+  deviceName: string;
+  tailnetSuffix: string | null;
+  recipient: string;
+  lifetimeDays: number;
+  role: ShareRoleVerdict;
+  consoleUrl: string;
+};
+
+export type SharePlanView = {
+  plan: SharePlan;
+  roleAllowed: boolean;
+  roleUnknown: boolean;
+  confirmation: string;
+  notPerformed: string;
+};
+
+export type RevocationView = {
+  peerKey: string;
+  state: RevocationState;
+  copy: string;
+  consoleUrl: string | null;
+};
+
+export async function tailscaleAccessMatrix(): Promise<AccessMatrixView> {
+  return invoke<AccessMatrixView>("tailscale_access_matrix");
+}
+
+export async function tailscaleSharePlan(
+  recipient: string,
+  lifetimeDays: number,
+): Promise<SharePlanView> {
+  return invoke<SharePlanView>("tailscale_share_plan", { recipient, lifetimeDays });
+}
+
+export async function tailscaleRevocationState(peerKey: string): Promise<RevocationView> {
+  return invoke<RevocationView>("tailscale_revocation_state", { peerKey });
+}
+
+/** Opens the admin page for one of the two console-only actions. */
+export async function tailscaleOpenConsole(action: DestructiveActionId): Promise<void> {
+  await invoke("tailscale_open_console", { action });
+}

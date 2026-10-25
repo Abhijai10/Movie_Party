@@ -20,6 +20,7 @@ pub mod scheduling;
 pub mod secure;
 pub mod storage;
 pub mod sync;
+pub mod tailscale_access;
 pub mod telemetry;
 
 pub const APP_NAME: &str = "Movie Party";
@@ -190,6 +191,8 @@ pub fn run() {
             onboarding_choose_method, onboarding_open_admin, onboarding_paste_share_link,
             onboarding_open_share_link, onboarding_report_link_expired, onboarding_refresh,
             onboarding_check_reachability, onboarding_invitation_package,
+            tailscale_access_matrix, tailscale_share_plan, tailscale_revocation_state,
+            tailscale_open_console,
             focus_provider_playback,
             reset_provider_session,
             create_schedule,
@@ -1103,6 +1106,51 @@ async fn onboarding_invitation_package(
     runtime: tauri::State<'_, app_runtime::AppRuntime>,
 ) -> Result<crate::onboarding::InvitationPackage, String> {
     runtime.onboarding_invitation_package().await
+}
+
+// ── Batch 10: what may be automated on Tailscale's control plane ────────
+
+/// The documented capability matrix. Every row quotes the page it came from,
+/// and no row claims automation without a named, narrow scope.
+#[tauri::command]
+fn tailscale_access_matrix(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> app_runtime::tailscale_access::AccessMatrixView {
+    runtime.tailscale_access_matrix()
+}
+
+/// Plans a share of **this** machine with exactly one person. Reads local status
+/// only; refuses an unreported role rather than guessing, and changes nothing.
+#[tauri::command]
+async fn tailscale_share_plan(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    recipient: String,
+    lifetime_days: u32,
+) -> Result<app_runtime::tailscale_access::SharePlanView, String> {
+    runtime
+        .tailscale_share_plan(&recipient, lifetime_days)
+        .await
+}
+
+/// Whether a share still looks live from here. "No longer visible" is only said
+/// when this device saw the node arrive through a share.
+#[tauri::command]
+async fn tailscale_revocation_state(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    peer_key: String,
+) -> Result<app_runtime::tailscale_access::RevocationView, String> {
+    runtime.tailscale_revocation_state(&peer_key).await
+}
+
+/// Opens the admin page for one of the two console actions, chosen by id so the
+/// UI cannot send this path to an arbitrary URL.
+#[tauri::command]
+fn tailscale_open_console(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    action: String,
+) -> Result<(), String> {
+    let url = runtime.tailscale_console_url(&action)?;
+    open_external_url(url)
 }
 
 /// The opt-in existing-browser companion. Starting it writes the loopback

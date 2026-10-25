@@ -141,6 +141,56 @@ const flows = [
   },
 ];
 
+const accessMatrix = {
+  rows: [
+    {
+      operation: "CREATE_DEVICE_SHARE" as const,
+      verdict: "CONSOLE_ONLY" as const,
+      requiredRole: "Owner, Admin or IT admin",
+      scope: null,
+      evidenceQuote: "A shared machine can receive incoming connections but cannot start connections.",
+      evidenceUrl: "https://tailscale.com/docs/features/sharing",
+      productResponse: "The wizard opens the Tailscale admin page.",
+    },
+    {
+      operation: "CREATE_AUTH_KEY" as const,
+      verdict: "FORBIDDEN_BY_POLICY" as const,
+      requiredRole: "Owner, Admin or IT admin",
+      scope: "auth_keys",
+      evidenceQuote: "Auth keys authenticate devices and can be reusable.",
+      evidenceUrl: "https://tailscale.com/docs/features/access-control/auth-keys",
+      productResponse: "Never created or embedded.",
+    },
+  ],
+  anyAutomatable: false,
+  sharedWithExternalUserNote:
+    "Sharing is one machine to one person. The recipient must sign in and accept with their own Tailscale account.",
+};
+
+const sharePlanView = {
+  plan: {
+    deviceName: "abhijai-mac.tailc930b7.ts.net",
+    tailnetSuffix: "tailc930b7.ts.net",
+    recipient: "priya@example.com",
+    lifetimeDays: 7,
+    role: "ALLOWED" as const,
+    consoleUrl: "https://login.tailscale.com/admin/machines",
+  },
+  roleAllowed: true,
+  roleUnknown: false,
+  confirmation:
+    "Share only this machine (abhijai-mac.tailc930b7.ts.net) with priya@example.com for 7 days. Tailscale's recipient must sign in and accept; nothing is shared until they do.",
+  notPerformed:
+    "Movie Party cannot create or revoke a Tailscale share: the documented API has no sharing endpoint or scope.",
+};
+
+const revocationView = {
+  peerKey: "priya-mac.tailc930b7.ts.net.",
+  state: "UNKNOWN" as const,
+  copy: "Movie Party never saw this machine as a share from here, so it cannot confirm a revocation either way. Check Tailscale's Machines page.",
+  consoleUrl: "https://login.tailscale.com/admin/machines",
+};
+
 const tailnet = {
   stableId: "TnSLAyoyHo11CNTRL",
   magicDnsSuffix: "tailc930b7.ts.net",
@@ -518,6 +568,25 @@ function Fixture(): JSX.Element {
         }}
         onCopyPackage={() => {
           log("package");
+        }}
+        access={{
+          matrix: accessMatrix,
+          plan: sharePlanView,
+          revocation: revocationView,
+          busy: null,
+          error: null,
+          onPlan: (recipient, days) => {
+            log(`plan ${recipient} ${String(days)}`);
+          },
+          onOpenConsole: (action) => {
+            log(`console ${action}`);
+          },
+          onCheckRevocation: () => {
+            log("revocation");
+          },
+          onRemoveFriend: () => {
+            log("remove friend");
+          },
         }}
         onFinish={() => {
           log("finish");
