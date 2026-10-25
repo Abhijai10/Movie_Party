@@ -6,6 +6,16 @@ use crate::providers::{
 
 impl AppRuntime {
     pub(super) async fn pause_provider_for_recovery(&self) {
+        let iframe_pause = {
+            let state = self.lock();
+            state.youtube.enabled
+                && (state.sync.strict_sync_paused || state.room_state == RoomState::Ended)
+        };
+        if iframe_pause {
+            let position = self.lock().sync.position_ms;
+            self.queue_youtube_command(Action::Pause, position, None);
+            return;
+        }
         let context = {
             let mut state = self.lock();
             if (!state.sync.strict_sync_paused && state.room_state != RoomState::Ended)
@@ -391,6 +401,24 @@ impl AppRuntime {
                 }),
             )
         };
+        if self.lock().youtube.enabled {
+            if action == Action::Play && !play_deadline_valid(deadline, Instant::now()) {
+                let _ = self.complete_provider_report(
+                    &selection,
+                    generation,
+                    Report {
+                        context: selection.context(),
+                        operation_id: id,
+                        action,
+                        outcome: Outcome::TimedOut,
+                        position_ms: target,
+                    },
+                );
+            } else {
+                self.queue_youtube_command(action, target, Some(id));
+            }
+            return;
+        }
         let runtime = self.clone();
         tauri::async_runtime::spawn_blocking(move || {
             // Other observers may temporarily own Chrome. Wait boundedly rather
@@ -467,13 +495,6 @@ impl AppRuntime {
             } else {
                 (Outcome::TimedOut, target)
             };
-            let mut state = runtime.lock();
-            if state.session_generation != generation
-                || Self::selected_provider(&state).as_ref() != Some(&selection)
-                || state.last_committed_operation_id.as_deref() != Some(&id)
-            {
-                return;
-            }
             let report = Report {
                 context: selection.context(),
                 operation_id: id,
@@ -481,48 +502,68 @@ impl AppRuntime {
                 outcome,
                 position_ms: position,
             };
-            crate::providers::playback::diagnostic(action, outcome, selection.content_revision);
-            if Self::is_host_role(&state) {
-                let solo = state
-                    .sync_coordinator
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .guest_is_abandoned();
-                if let Some(op) = state
-                    .provider_room
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .descriptor
-                    .playback
-                    .as_mut()
-                {
-                    op.record(report, true, solo);
-                }
-            } else {
-                state.guest_provider.playback_report = Some(report);
-                let content_state = if outcome == Outcome::Applied {
-                    state.guest_provider.state
-                } else {
-                    crate::providers::selection::ContentLoadingState::Error
-                };
-                let observed = if outcome == Outcome::Applied {
-                    state.guest_provider.observed.clone()
-                } else {
-                    None
-                };
-                state.guest_provider.observe(content_state, observed).ok();
-            }
-            if outcome != Outcome::Applied {
-                state.provider_gesture_required = outcome == Outcome::GestureRequired;
-                state.sync.strict_sync_paused = true;
-                state.room_state = RoomState::Buffering;
-                state.provider.readiness = crate::providers::sync::ProviderReadiness::Error;
-                state.error=Some(if outcome==Outcome::GestureRequired {"Click to enable playback. In managed Chrome, click the video play button once, then pause it and retry Ready."}else{"Provider playback was not verified. Playback remains paused; reopen the selected title and retry Ready."}.into());
-            }
-            drop(state);
-            runtime.settle_provider_playback();
-            runtime.inner.emit(runtime.snapshot());
+            let _ = runtime.complete_provider_report(&selection, generation, report);
         });
+    }
+
+    pub(super) fn complete_provider_report(
+        &self,
+        selection: &ProviderSelection,
+        generation: u64,
+        report: Report,
+    ) -> Result<AppSnapshot, String> {
+        let mut state = self.lock();
+        if report.context != selection.context()
+            || state.session_generation != generation
+            || Self::selected_provider(&state).as_ref() != Some(selection)
+            || state.last_committed_operation_id.as_deref() != Some(&report.operation_id)
+        {
+            return Err("Stale provider operation result".into());
+        }
+        let outcome = report.outcome;
+        crate::providers::playback::diagnostic(report.action, outcome, selection.content_revision);
+        if Self::is_host_role(&state) {
+            let solo = state
+                .sync_coordinator
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .guest_is_abandoned();
+            if let Some(op) = state
+                .provider_room
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .descriptor
+                .playback
+                .as_mut()
+            {
+                op.record(report, true, solo);
+            }
+        } else {
+            state.guest_provider.playback_report = Some(report);
+            let content_state = if outcome == Outcome::Applied {
+                state.guest_provider.state
+            } else {
+                crate::providers::selection::ContentLoadingState::Error
+            };
+            let observed = if outcome == Outcome::Applied {
+                state.guest_provider.observed.clone()
+            } else {
+                None
+            };
+            state.guest_provider.observe(content_state, observed).ok();
+        }
+        if outcome != Outcome::Applied {
+            state.provider_gesture_required = outcome == Outcome::GestureRequired;
+            state.sync.strict_sync_paused = true;
+            state.room_state = RoomState::Buffering;
+            state.provider.readiness = crate::providers::sync::ProviderReadiness::Error;
+            state.error=Some(if outcome==Outcome::GestureRequired {"Click to enable playback. In managed Chrome, click the video play button once, then pause it and retry Ready."}else{"Provider playback was not verified. Playback remains paused; reopen the selected title and retry Ready."}.into());
+        }
+        drop(state);
+        self.settle_provider_playback();
+        let snapshot = self.snapshot();
+        self.inner.emit(snapshot.clone());
+        Ok(snapshot)
     }
 
     pub(super) fn settle_provider_playback(&self) {

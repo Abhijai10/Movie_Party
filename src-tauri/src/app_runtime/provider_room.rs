@@ -126,6 +126,7 @@ impl AppRuntime {
 
     pub(super) fn invalidate_provider_content(state: &mut AppRuntimeState) {
         state.provider_verifying = None;
+        state.youtube.command = None;
         state.provider_prepare_started = None;
         if let Some(op) = state
             .provider_room
@@ -199,6 +200,8 @@ impl AppRuntime {
             (selection, changed)
         };
         if changed {
+            state.youtube.metadata = None;
+            state.youtube.error = None;
             if state.room_state == RoomState::Ended {
                 state.room_state = RoomState::ReadyCheck;
             }
@@ -448,6 +451,9 @@ impl AppRuntime {
     }
 
     async fn open_guest_provider_if_needed(&self, room_id: &str) {
+        if self.lock().youtube.enabled {
+            return;
+        }
         let context = {
             let mut state = self.lock();
             let Some(selection) = state.guest_provider.selection().cloned() else {
@@ -533,6 +539,10 @@ impl AppRuntime {
     }
 
     async fn observe_room_provider(&self, room_id: &str) {
+        if self.lock().youtube.enabled {
+            self.check_youtube_health();
+            return;
+        }
         let failed_without_session = {
             let state = self.lock();
             state.chrome_session.is_none()
@@ -749,7 +759,10 @@ impl AppRuntime {
         drop(stale);
     }
 
-    fn apply_guest_provider_observation(&self, tabs: Vec<ContentTab>) -> Option<ContentTab> {
+    pub(super) fn apply_guest_provider_observation(
+        &self,
+        tabs: Vec<ContentTab>,
+    ) -> Option<ContentTab> {
         let mut state = self.lock();
         let selection = state.guest_provider.selection()?.clone();
         let was_ready = state.guest_provider.state == ContentLoadingState::PlaybackReady;

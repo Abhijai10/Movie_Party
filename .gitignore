@@ -67,5 +67,6 @@ temp/
 
 # Local editor/agent scratch directories (never commit)
 .freebuff/
+.impeccable/
 .kilo/
 .workbuddy-ai/

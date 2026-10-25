@@ -1,3 +1,4 @@
+import { YoutubeRuntime } from "../youtube/YoutubeRuntime";
 import { validateProviderContent } from "../providers/contentChooser";
 import {
   BackendCommandError,
@@ -70,8 +71,22 @@ const developmentPreviewEnabled =
 
 export function AppShell() {
   const { snapshot, setSnapshot } = useAppSnapshot();
+  const [isCreating,setIsCreating]=useState(false);
+  return (
+    <>
+      <AppShellContent snapshot={snapshot} setSnapshot={setSnapshot} isCreating={isCreating} setIsCreating={setIsCreating} />
+      <YoutubeRuntime snapshot={snapshot} onSnapshot={setSnapshot} allowAutomatic={!isCreating} />
+    </>
+  );
+}
+
+function AppShellContent({ snapshot, setSnapshot, isCreating, setIsCreating }: {
+  snapshot: AppSnapshot | null;
+  setSnapshot: (next: AppSnapshot) => void;
+  isCreating: boolean;
+  setIsCreating: (next:boolean) => void;
+}) {
   const [localScreen, setLocalScreen] = useState<LocalScreen>(null);
-  const [isCreating, setIsCreating] = useState(false);
   const [isJoining, setIsJoining] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [joinError, setJoinError] = useState<string | null>(null);

@@ -1,14 +1,11 @@
+import { YoutubeSlot, YoutubePanel } from "../youtube/YoutubePanel";
 import { ProviderRoomStatus } from "../providers/ProviderRoomStatus";
 import { motion } from "framer-motion";
 import { ArrowLeft, ArrowRight, Film, MessageCircle, Users, Video } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type SyntheticEvent } from "react";
 import type { AppSnapshot } from "../backend/appRuntime";
 import { sendChatMessage } from "../backend/appRuntime";
-import {
-  enqueueChatBubble,
-  emptyBubbleQueue,
-  type ChatBubbleQueue,
-} from "../chat/bubbleQueue";
+import { enqueueChatBubble, emptyBubbleQueue, type ChatBubbleQueue } from "../chat/bubbleQueue";
 import { InviteCard } from "../components/mp/InviteCard";
 import { ChatCompose } from "../components/mp/ChatOverlay";
 import { CinemaButton } from "../components/mp/CinemaButton";
@@ -57,7 +54,11 @@ export function LobbyView({
   const encodedDraftLength = useMemo(() => new TextEncoder().encode(draft).length, [draft]);
   const isDraftTooLong = encodedDraftLength > 2_000;
 
-  const title = snapshot.media?.filename ?? snapshot.providerContent?.selection?.title ?? snapshot.provider.url ?? "A Private Cinema";
+  const title =
+    snapshot.media?.filename ??
+    snapshot.providerContent?.selection?.title ??
+    snapshot.provider.url ??
+    "A Private Cinema";
   const source =
     snapshot.media != null
       ? "Local file"
@@ -162,7 +163,9 @@ export function LobbyView({
         </div>
       </header>
 
-      <main className={`relative z-10 max-w-[1300px] mx-auto px-12 mt-6 h-[calc(100vh-120px)] grid grid-cols-12 gap-10 ${snapshot.providerContent ? "provider-room-lobby" : ""}`}>
+      <main
+        className={`relative z-10 max-w-[1300px] mx-auto px-12 mt-6 h-[calc(100vh-120px)] grid grid-cols-12 gap-10 ${snapshot.providerContent ? "provider-room-lobby" : ""}`}
+      >
         <motion.section
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -205,32 +208,35 @@ export function LobbyView({
             </div>
           </div>
 
-          <div
-            className="mt-10 relative rounded-2xl overflow-hidden h-[220px] w-full max-w-xl"
-            style={{
-              background: "linear-gradient(135deg, #1A0F2E 0%, #0A0616 100%)",
-              border: "1px solid rgba(159,122,234,0.15)",
-            }}
-          >
+          {snapshot.youtube?.enabled ? (
+            <YoutubeSlot />
+          ) : (
             <div
-              className="absolute inset-0"
+              className="mt-10 relative rounded-2xl overflow-hidden h-[220px] w-full max-w-xl"
               style={{
-                background:
-                  "radial-gradient(ellipse at 30% 40%, rgba(159,122,234,0.25) 0%, transparent 60%), radial-gradient(ellipse at 80% 70%, rgba(107,70,193,0.2) 0%, transparent 60%)",
+                background: "linear-gradient(135deg, #1A0F2E 0%, #0A0616 100%)",
+                border: "1px solid rgba(159,122,234,0.15)",
               }}
-            />
-            <div className="relative h-full flex items-end p-6">
-              <div>
-                <p className="text-[10px] tracking-[0.32em] uppercase text-white/40 mb-2">
-                  Ready to roll
-                </p>
-                <p className="font-serif-display text-white text-3xl leading-tight">
-                  Dim the lights.
-                </p>
+            >
+              <div
+                className="absolute inset-0"
+                style={{
+                  background:
+                    "radial-gradient(ellipse at 30% 40%, rgba(159,122,234,0.25) 0%, transparent 60%), radial-gradient(ellipse at 80% 70%, rgba(107,70,193,0.2) 0%, transparent 60%)",
+                }}
+              />
+              <div className="relative h-full flex items-end p-6">
+                <div>
+                  <p className="text-[10px] tracking-[0.32em] uppercase text-white/40 mb-2">
+                    Ready to roll
+                  </p>
+                  <p className="font-serif-display text-white text-3xl leading-tight">
+                    Dim the lights.
+                  </p>
+                </div>
               </div>
             </div>
-          </div>
-
+          )}
           <div className="mt-6 flex items-center gap-6 text-[11px] tracking-[0.2em] uppercase text-white/40">
             <span>{mediaState}</span>
             <span className="w-px h-3 bg-white/15" />
@@ -268,7 +274,10 @@ export function LobbyView({
             </div>
           </div>
 
-          <ProviderRoomStatus snapshot={snapshot} onSnapshot={onSnapshot} />
+          <YoutubePanel snapshot={snapshot} onSnapshot={onSnapshot} />
+          {!snapshot.youtube?.enabled && (
+            <ProviderRoomStatus snapshot={snapshot} onSnapshot={onSnapshot} />
+          )}
           <InviteCard inviteCode={inviteCode} />
 
           {isHost ? (

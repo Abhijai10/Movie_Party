@@ -6,7 +6,7 @@ type ProviderStatusOverlayProps = {
 };
 
 export function ProviderStatusOverlay({ snapshot }: ProviderStatusOverlayProps) {
-  if (snapshot.providerContent?.gestureRequired) {
+  if (snapshot.providerContent?.gestureRequired && !snapshot.youtube?.enabled) {
     return (
       <section className="presentation-overlay" aria-label="Enable provider playback">
         <h2>Enable playback in Chrome</h2>

@@ -93,6 +93,7 @@ export type ProviderCapability = {
 };
 
 export type AppSnapshot = {
+  youtube?: import("../youtube/types").YoutubeSnapshot | null;
   screen: string;
   room: {
     roomId: string | null;

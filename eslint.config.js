@@ -15,6 +15,7 @@ export default tseslint.config(
     ],
   },
   ...tseslint.configs.strictTypeChecked,
+  { ...tseslint.configs.disableTypeChecked, files: ["src/youtube/bridge.js"] },
   {
     files: ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"],
     languageOptions: {

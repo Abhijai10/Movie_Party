@@ -5307,3 +5307,158 @@ input[type=range].mp-range::-webkit-slider-thumb {
 .provider-room-lobby > section:first-child > div:last-child { flex-wrap: wrap; gap: 12px; overflow-wrap: anywhere; }
 .provider-room-lobby > section:first-child > div:last-child > span { min-width: 0; max-width: 100%; }
 .provider-room-lobby > section:last-child { padding-bottom: 100px; }
+
+/* The official player owns its full rectangle. Social UI stays beside it. */
+.youtube-owned-frame {
+  position: fixed;
+  z-index: 20;
+  border: 0;
+  background: #000;
+}
+.youtube-player-slot {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  min-height: 200px;
+  margin: 20px 0;
+  background: #09060e;
+  display: grid;
+  place-items: center;
+  color: #d5cce5;
+}
+.youtube-panel {
+  color: #e5dfee;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.youtube-panel h2 {
+  font-size: 20px;
+  line-height: 1.3;
+  margin: 12px 0 8px;
+}
+.youtube-panel p {
+  margin: 10px 0;
+}
+.youtube-panel img {
+  object-fit: cover;
+  border-radius: 6px;
+}
+.youtube-panel summary {
+  cursor: pointer;
+  padding: 14px 0;
+}
+.youtube-panel [role="alert"] {
+  color: #fecaca;
+}
+.youtube-cinema {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  grid-template-rows: minmax(0, 1fr) 130px;
+  gap: 16px;
+  padding: 24px;
+}
+.youtube-stage {
+  z-index: 1;
+  min-width: 0;
+  overflow: auto;
+}
+.youtube-cinema > .movie-surface {
+  position: relative;
+  inset: auto;
+  width: 100%;
+  height: 100%;
+  contain: paint;
+  overflow: auto;
+}
+.youtube-cinema .youtube-hidden-frame {
+  display: none;
+}
+.youtube-cinema .camera-card {
+  width: 260px !important;
+  max-width: 100%;
+  left: 12px !important;
+  right: auto !important;
+}
+.youtube-controls {
+  grid-column: 1 / -1;
+  position: relative;
+  z-index: 2;
+}
+.youtube-controls [data-testid="cinema-controls"] {
+  position: relative;
+  inset: auto;
+  transform: none;
+  width: 100%;
+}
+.youtube-ready {
+  overflow-y: auto;
+  justify-content: flex-start;
+  padding-top: 20px;
+  padding-bottom: 32px;
+}
+.youtube-ready .youtube-player-slot {
+  max-width: 480px;
+  flex-shrink: 0;
+}
+.youtube-runtime-error {
+  position: fixed;
+  bottom: 8px;
+  left: 24px;
+  z-index: 30;
+  color: #fecaca;
+  background: #171020;
+  padding: 12px;
+}
+
+.youtube-ready-screen .camera-card {
+  width: 190px !important;
+  left: auto !important;
+  right: 8px !important;
+  top: 100px !important;
+}
+.youtube-cinema {
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+}
+.youtube-stage {
+  min-height: 0;
+}
+.youtube-stage .youtube-player-slot {
+  height: min(calc(100vh - 240px), calc((100vw - 364px) * 0.5625));
+  aspect-ratio: auto;
+}
+.youtube-cinema > .movie-surface {
+  min-height: 0;
+}
+.youtube-cinema .buffer-overlay,
+.youtube-cinema .reconnect-overlay,
+.youtube-cinema .movie-finished-overlay,
+.youtube-cinema .presentation-overlay {
+  position: relative;
+  inset: auto;
+  transform: none;
+  width: 100%;
+  min-width: 0;
+  padding: 20px;
+}
+.youtube-cinema .buffer-overlay h1,
+.youtube-cinema .reconnect-overlay h1 {
+  font-size: 24px;
+  overflow-wrap: anywhere;
+}
+
+.youtube-controls [data-testid="cinema-controls"] > div:first-child { display: none; }
+.youtube-cinema .buffer-overlay, .youtube-cinema .reconnect-overlay, .youtube-cinema .movie-finished-overlay, .youtube-cinema .presentation-overlay { animation: none; }
+.youtube-cinema .cinema-chat-overlay { width: calc(100% - 24px); left: 12px; right: 12px; top: 12px; }
+.youtube-stage, .youtube-cinema > .movie-surface { scrollbar-color: #9f7aea #15101f; scrollbar-width: thin; }
+/* Keep the player and Start visible together; scrolling the player away pauses it. */
+.youtube-ready { display: grid; grid-template-columns: minmax(0, 1fr) 300px; grid-auto-rows: max-content; gap: 12px 24px; align-content: start; padding: 20px 32px 16px; }
+.youtube-ready > .youtube-player-slot { grid-column: 1; grid-row: 1 / span 8; max-width: none; margin: 0; align-self: start; }
+.youtube-ready > :not(.youtube-player-slot) { grid-column: 2; margin: 0; min-width: 0; }
+.youtube-ready > span { display: none; }
+.youtube-ready > h1 { font-size: 32px; line-height: 1.05; }
+.youtube-ready > .mt-12 { gap: 20px; justify-content: center; }
+.youtube-ready > .mt-12 > .w-24 { width: 24px; }
+.youtube-ready .text-xl { max-width: 250px; font-size: 16px; }
+.youtube-ready .mt-12 p { max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.youtube-ready-screen .camera-card { left: 32px !important; right: auto !important; top: auto !important; bottom: 16px !important; height: 150px !important; }

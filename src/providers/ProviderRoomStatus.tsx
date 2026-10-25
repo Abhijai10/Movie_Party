@@ -32,7 +32,7 @@ export function ProviderRoomStatus({
         Seek precision and synchronization depend on the provider. Provider playback is not yet
         verified across devices.
       </p>
-      {content.gestureRequired && <ProviderGestureControl />}
+      {content.gestureRequired && !snapshot.youtube?.enabled && <ProviderGestureControl />}
       <p>
         Use your own provider account in managed Chrome. Both players must match before playback.
       </p>

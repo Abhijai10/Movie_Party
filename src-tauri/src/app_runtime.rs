@@ -1,6 +1,7 @@
 mod provider_chooser;
 mod provider_playback;
 mod provider_room;
+pub mod youtube;
 use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
@@ -103,6 +104,8 @@ pub struct AppSnapshot {
     pub call_signals: Vec<CallSignalSnapshot>,
     pub provider: ProviderSnapshot,
     pub provider_content: Option<provider_room::ProviderContentSnapshot>,
+    #[serde(default)]
+    pub youtube: Option<youtube::YoutubeSnapshot>,
     pub chat: Vec<ChatSnapshot>,
     pub reactions: Vec<ReactionSnapshot>,
     pub ghost_mode: bool,
@@ -181,6 +184,7 @@ impl Default for AppSnapshot {
             },
             call_signals: vec![],
             provider_content: None,
+            youtube: None,
             provider: ProviderSnapshot {
                 mode: "LOCAL_PERFECT".to_string(),
                 provider_id: None,
@@ -539,6 +543,7 @@ struct AppRuntimeState {
     provider_chooser: crate::providers::content::ChooserSnapshot,
     provider_room: Arc<Mutex<crate::providers::selection::ProviderRoomAuthority>>,
     guest_provider: crate::providers::selection::GuestSelection,
+    youtube: youtube::YoutubeState,
     provider_verifying: Option<String>,
     provider_prepare_started: Option<Instant>,
     provider_gesture_required: bool,
@@ -874,6 +879,7 @@ impl AppRuntime {
                         crate::providers::selection::ProviderRoomAuthority::default(),
                     )),
                     guest_provider: crate::providers::selection::GuestSelection::default(),
+                    youtube: youtube::YoutubeState::default(),
                     provider_verifying: None,
                     provider_prepare_started: None,
                     provider_gesture_required: false,
@@ -2918,6 +2924,7 @@ impl AppRuntime {
                 task.abort();
             }
             state.guest_provider = crate::providers::selection::GuestSelection::default();
+            state.youtube = youtube::YoutubeState::default();
             state.provider_verifying = None;
             state.provider_prepare_started = None;
             state.provider_gesture_required = false;
@@ -3288,6 +3295,7 @@ impl AppRuntime {
                 task.abort();
             }
             state.guest_provider = crate::providers::selection::GuestSelection::default();
+            state.youtube = youtube::YoutubeState::default();
             state.provider_verifying = None;
             state.provider_prepare_started = None;
             state.provider_gesture_required = false;
@@ -6875,6 +6883,7 @@ impl AppRuntime {
             task.abort();
         }
         state.guest_provider = crate::providers::selection::GuestSelection::default();
+        state.youtube = youtube::YoutubeState::default();
         state.provider_verifying = None;
         state.provider_prepare_started = None;
         state.provider_gesture_required = false;
@@ -8143,6 +8152,7 @@ fn snapshot_from_state(state: &AppRuntimeState) -> AppSnapshot {
         network: state.network.clone(),
         call: state.call.clone(),
         provider_content: AppRuntime::provider_content_snapshot(state),
+        youtube: AppRuntime::youtube_snapshot(state),
         provider: state.provider.clone(),
         call_signals: state.call_signals.clone(),
         chat: state.chat.clone(),

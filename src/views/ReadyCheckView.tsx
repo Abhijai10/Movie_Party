@@ -1,3 +1,4 @@
+import { YoutubeSlot } from "../youtube/YoutubePanel";
 import { motion } from "framer-motion";
 import { ArrowLeft, ArrowRight, Film } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -43,11 +44,7 @@ export function ReadyCheckView({
   const executeAtWallMs = snapshot.sync.pendingOperation?.executeAtWallMs ?? null;
   const display = countdownDisplayFrom(executeAtWallMs, nowWallMs);
   const countdown =
-    display.phase === "running"
-      ? display.label
-      : display.phase === "done"
-        ? 0
-        : null;
+    display.phase === "running" ? display.label : display.phase === "done" ? 0 : null;
   const transitionActive = countdown !== null;
   const prefersReducedMotion = useReducedMotion();
 
@@ -108,7 +105,7 @@ export function ReadyCheckView({
 
   return (
     <div
-      className={`relative w-screen h-screen overflow-hidden ${
+      className={`relative w-screen h-screen overflow-hidden ${snapshot.youtube?.enabled ? "youtube-ready-screen" : ""} ${
         snapshot.ghostMode || snapshot.privacyMode ? "social-hidden" : ""
       }`}
     >
@@ -133,7 +130,10 @@ export function ReadyCheckView({
         <span className="text-[11px] tracking-[0.28em] uppercase text-white/50">Final check</span>
       </header>
 
-      <main className="relative z-10 max-w-[1300px] mx-auto px-12 h-[calc(100vh-100px)] flex flex-col items-center justify-center text-center">
+      <main
+        className={` ${snapshot.youtube?.enabled ? "youtube-ready" : ""} relative z-10 max-w-[1300px] mx-auto px-12 h-[calc(100vh-100px)] flex flex-col items-center justify-center text-center`}
+      >
+        {snapshot.youtube?.enabled && <YoutubeSlot />}
         {error ? (
           <p role="alert" className="mb-4 text-sm text-[#FCA5A5]">
             {error}
@@ -167,7 +167,10 @@ export function ReadyCheckView({
         >
           <Film className="w-4 h-4" strokeWidth={1.5} />
           <span className="font-serif-display text-xl italic max-w-2xl truncate">
-            {snapshot.media?.filename ?? snapshot.provider.url ?? "A Private Cinema"}
+            {snapshot.media?.filename ??
+              snapshot.providerContent?.selection?.title ??
+              snapshot.provider.url ??
+              "A Private Cinema"}
           </span>
         </motion.div>
 
@@ -240,9 +243,10 @@ export function ReadyCheckView({
         reservedBottomPx={150}
       />
 
-      {transitionActive && (
+      {transitionActive && !snapshot.youtube?.enabled && (
         <motion.div
-          className="ready-cinema-transition"          initial={{ opacity: 0 }}
+          className="ready-cinema-transition"
+          initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: prefersReducedMotion ? 0.01 : 0.24 }}
@@ -261,9 +265,7 @@ export function ReadyCheckView({
                 : { opacity: 0, scale: 0.86, filter: "blur(10px)" }
             }
             animate={
-              prefersReducedMotion
-                ? { opacity: 1 }
-                : { opacity: 1, scale: 1, filter: "blur(0px)" }
+              prefersReducedMotion ? { opacity: 1 } : { opacity: 1, scale: 1, filter: "blur(0px)" }
             }
             exit={
               prefersReducedMotion

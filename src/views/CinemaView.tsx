@@ -1,3 +1,4 @@
+import { YoutubeSlot, YoutubePanel } from "../youtube/YoutubePanel";
 import { useCallback, useEffect, useMemo, useState, type SyntheticEvent } from "react";
 import { runLocalPeerConnectionLoopback } from "../call/webrtc";
 import {
@@ -44,11 +45,7 @@ import {
   syncIndicatorFor,
 } from "./cinemaEndState";
 import { ChatCompose, ChatHistoryCard } from "../components/mp/ChatOverlay";
-import {
-  emptyBubbleQueue,
-  enqueueChatBubble,
-  type ChatBubbleQueue,
-} from "../chat/bubbleQueue";
+import { emptyBubbleQueue, enqueueChatBubble, type ChatBubbleQueue } from "../chat/bubbleQueue";
 import { ChatBubbles } from "../overlays/ChatBubbles";
 import { CinemaControls } from "../components/mp/CinemaControls";
 import { SilkBackground } from "../components/mp/SilkBackground";
@@ -63,7 +60,11 @@ import {
   openChatManually,
   type ChatOverlayVisibility,
 } from "../chat/overlayState";
-import { captureGhostUiSnapshot, restoreGhostUiSnapshot, type GhostUiSnapshot } from "../social/ghostUiState";
+import {
+  captureGhostUiSnapshot,
+  restoreGhostUiSnapshot,
+  type GhostUiSnapshot,
+} from "../social/ghostUiState";
 
 type CinemaViewProps = {
   snapshot: AppSnapshot;
@@ -235,9 +236,7 @@ export function CinemaView({
       if (!current.manualOpen) {
         return openChatManually();
       }
-      return current.historyDismissed
-        ? { ...current, historyDismissed: false }
-        : closedChatOverlay;
+      return current.historyDismissed ? { ...current, historyDismissed: false } : closedChatOverlay;
     },
     [],
   );
@@ -258,16 +257,16 @@ export function CinemaView({
       const rect = frame.getBoundingClientRect();
       setMovieHeightPx(rect.height);
       const bounds = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
-      const request = attached ? resizeNativeVideoSurface(bounds) : attachNativeVideoSurface(bounds);
+      const request = attached
+        ? resizeNativeVideoSurface(bounds)
+        : attachNativeVideoSurface(bounds);
       attached = true;
-      void request
-        .then(onSnapshot)
-        .catch((error: unknown) => {
-          // A failed surface update is retried on the next observer tick, so it
-          // is logged rather than surfaced — but it is no longer silently
-          // treated as "nothing happened".
-          console.error("native video surface update failed", error);
-        });
+      void request.then(onSnapshot).catch((error: unknown) => {
+        // A failed surface update is retried on the next observer tick, so it
+        // is logged rather than surfaced — but it is no longer silently
+        // treated as "nothing happened".
+        console.error("native video surface update failed", error);
+      });
     };
     updateSurface();
     const observer = new ResizeObserver(updateSurface);
@@ -598,12 +597,9 @@ export function CinemaView({
       return;
     }
 
-    const { pending, nextCursor } = nextPendingSignals(
-      signals,
-      cursor,
-      isHost ? "HOST" : "GUEST",
-      { ownMarkerId: session.markerId },
-    );
+    const { pending, nextCursor } = nextPendingSignals(signals, cursor, isHost ? "HOST" : "GUEST", {
+      ownMarkerId: session.markerId,
+    });
     callSignalCursorRef.current = nextCursor;
     if (pending.length > 0) {
       // Apply the coalesced batch SEQUENTIALLY: a marker poke must land on
@@ -634,10 +630,7 @@ export function CinemaView({
   // callSessionLive re-runs this at session start so the fresh session
   // immediately reflects any toggle made while it was starting.
   useEffect(() => {
-    callSessionRef.current?.setLocalTracksEnabled(
-      localCameraEnabled,
-      localMicrophoneEnabled,
-    );
+    callSessionRef.current?.setLocalTracksEnabled(localCameraEnabled, localMicrophoneEnabled);
   }, [localCameraEnabled, localMicrophoneEnabled, callSessionLive]);
 
   // (PRD §41 movie-first): the Rust ladder rewrites the camera
@@ -824,14 +817,125 @@ export function CinemaView({
   // Clearing it the moment the room leaves RECONNECTING gives the next
   // episode its own overlay, while holding it mid-episode prevents duplicates.
   useEffect(() => {
-    setReconnectDismissed((current) =>
-      reconnectLatchAfter(snapshot.sync.roomState, current),
-    );
+    setReconnectDismissed((current) => reconnectLatchAfter(snapshot.sync.roomState, current));
   }, [snapshot.sync.roomState]);
 
+  const youtube = snapshot.providerContent?.selection?.provider === "youtube";
+  const controls = (
+    <CinemaControls
+      visible={youtube || controlsVisible}
+      isPlaying={snapshot.sync.roomState === "PLAYING"}
+      // AUD-16: an ended room disables play/pause/seek rather than offering
+      // an action it would refuse. The dock's own `disabled` attribute is
+      // what stops the handler firing; the `playbackToggleAction` guard
+      // above is the second line of defence.
+      playbackDisabled={!playbackControlsEnabled(snapshot.sync.roomState)}
+      currentMs={snapshot.player.positionMs}
+      durationMs={snapshot.player.durationMs}
+      onSeekRelative={(deltaMs) => {
+        void seekRelative(deltaMs)
+          .then(onSnapshot)
+          .catch((error: unknown) => {
+            console.error("seek failed", error);
+            showControlNotice("Movie Party could not seek.");
+          });
+      }}
+      onTogglePlayback={() => {
+        // AUD-16: at ENDED there is no correct action. Returning here is
+        // what stops this control calling `resumePlayback` -> `host_play`
+        // on an ended room (the button is also `disabled`, so this is the
+        // second of two guards). No replay is invented.
+        const action = playbackToggleAction(snapshot.sync.roomState);
+        if (action === "NONE") {
+          return;
+        }
+        const command = action === "PAUSE" ? pausePlayback : resumePlayback;
+        void command()
+          .then(onSnapshot)
+          .catch((error: unknown) => {
+            console.error("playback toggle failed", error);
+            showControlNotice("Movie Party could not change playback.");
+          });
+      }}
+      microphoneEnabled={localMicrophoneEnabled}
+      onToggleMicrophone={() => {
+        const nextEnabled = !localMicrophoneEnabled;
+        setMicrophoneManuallyEnabled(nextEnabled);
+        if (snapshotMicrophoneEnabled === nextEnabled) {
+          return;
+        }
+        void setMicrophoneEnabled(nextEnabled)
+          .then(onSnapshot)
+          .catch((error: unknown) => {
+            console.error("set_microphone_enabled failed", error);
+            showControlNotice("Movie Party could not change the microphone.");
+          });
+      }}
+      cameraEnabled={localCameraEnabled}
+      onToggleCamera={() => {
+        const nextEnabled = !localCameraEnabled;
+        setCameraManuallyEnabled(nextEnabled);
+        if (snapshotCameraEnabled === nextEnabled) {
+          return;
+        }
+        void setCameraEnabled(nextEnabled)
+          .then(onSnapshot)
+          .catch((error: unknown) => {
+            console.error("set_camera_enabled failed", error);
+            showControlNotice("Movie Party could not change the camera.");
+          });
+      }}
+      chatOpen={isComposing || isHistoryOpen}
+      hasUnreadChat={hasUnreadChat}
+      onToggleChat={() => {
+        // If the composer is up but the history panel has
+        // auto-hidden, re-summon the panel instead of closing chat.
+        if (isComposing) {
+          setChatVisibility(toggleChatVisibility);
+          return;
+        }
+        setHasUnreadChat(false);
+        setChatVisibility(openChatManually());
+      }}
+      onSendReaction={() => {
+        // The dock emoji TOGGLES the tray (it no longer fires a
+        // blind 👏): open → pick a reaction, close → movie surface
+        // is clean. The tray auto-hides 5s after opening.
+        setReactionTrayOpen((current) => !current);
+      }}
+      reactionTrayOpen={reactionTrayOpen}
+      isHost={isHost}
+      socialControlsHidden={isGhostMode || isPrivacyMode}
+      callTileHidden={callTileSession.isHidden}
+      onShowCallTile={() => {
+        // Toggle: the floating video tile hides from the dock (the
+        // tile itself no longer carries a close button — see #4).
+        onCallTileSessionChange({
+          ...callTileSession,
+          isHidden: !callTileSession.isHidden,
+        });
+      }}
+      sharedControls={sharedControls}
+      onToggleSharedControls={() => {
+        void setSharedControls(!sharedControls)
+          .then(onSnapshot)
+          .catch((error: unknown) => {
+            console.error("set_shared_controls failed", error);
+            showControlNotice("Movie Party could not change who can control playback.");
+          });
+      }}
+      onLeave={onLeave}
+    />
+  );
   return (
-    <main className="cinema-shell" aria-label="Cinema mode">
+    <main className={`cinema-shell ${youtube ? "youtube-cinema" : ""}`} aria-label="Cinema mode">
       <SilkBackground variant="dim" />
+      {youtube && (
+        <div className="youtube-stage">
+          {snapshot.youtube?.enabled && <YoutubeSlot />}
+          <YoutubePanel snapshot={snapshot} onSnapshot={onSnapshot} />
+        </div>
+      )}
       <section
         className={[
           "movie-surface",
@@ -849,7 +953,7 @@ export function CinemaView({
         <div className="cinema-dot-grid" aria-hidden="true" />
         <div
           ref={movieFrameRef}
-          className={`movie-frame ${snapshot.player.presentation.mode === "EMBEDDED_NATIVE" ? "native-video-active" : ""}`}
+          className={`${youtube ? "youtube-hidden-frame" : ""} movie-frame ${snapshot.player.presentation.mode === "EMBEDDED_NATIVE" ? "native-video-active" : ""}`}
         >
           <div className="movie-light" />
           {/* AUD-16: once the film is over this block must not claim "Now
@@ -971,8 +1075,7 @@ export function CinemaView({
             }}
           />
         ) : null}
-        {snapshot.error != null &&
-        snapshot.error.startsWith("MP-MEDIA-002") ? (
+        {snapshot.error != null && snapshot.error.startsWith("MP-MEDIA-002") ? (
           <ErrorScreenView
             code={extractMpCode(snapshot.error)}
             message="The movie file moved or was renamed on this device."
@@ -1014,9 +1117,7 @@ export function CinemaView({
         ) : null}
         <ReconnectOverlay
           peerName={peerName}
-          isReconnecting={
-            snapshot.sync.roomState === "RECONNECTING" && !reconnectDismissed
-          }
+          isReconnecting={snapshot.sync.roomState === "RECONNECTING" && !reconnectDismissed}
           isHost={snapshot.room.role === "HOST"}
           onKeepWaiting={() => {
             setReconnectDismissed(true);
@@ -1042,111 +1143,9 @@ export function CinemaView({
         {reactionTrayOpen ? (
           <ReactionTray warning={reactionWarning} onSendReaction={sendReaction} />
         ) : null}
-        <CinemaControls
-          visible={controlsVisible}
-          isPlaying={snapshot.sync.roomState === "PLAYING"}
-          // AUD-16: an ended room disables play/pause/seek rather than offering
-          // an action it would refuse. The dock's own `disabled` attribute is
-          // what stops the handler firing; the `playbackToggleAction` guard
-          // above is the second line of defence.
-          playbackDisabled={!playbackControlsEnabled(snapshot.sync.roomState)}
-          currentMs={snapshot.player.positionMs}
-          durationMs={snapshot.player.durationMs}
-          onSeekRelative={(deltaMs) => {
-            void seekRelative(deltaMs)
-              .then(onSnapshot)
-              .catch((error: unknown) => {
-                console.error("seek failed", error);
-                showControlNotice("Movie Party could not seek.");
-              });
-          }}
-          onTogglePlayback={() => {
-            // AUD-16: at ENDED there is no correct action. Returning here is
-            // what stops this control calling `resumePlayback` -> `host_play`
-            // on an ended room (the button is also `disabled`, so this is the
-            // second of two guards). No replay is invented.
-            const action = playbackToggleAction(snapshot.sync.roomState);
-            if (action === "NONE") {
-              return;
-            }
-            const command = action === "PAUSE" ? pausePlayback : resumePlayback;
-            void command()
-              .then(onSnapshot)
-              .catch((error: unknown) => {
-                console.error("playback toggle failed", error);
-                showControlNotice("Movie Party could not change playback.");
-              });
-          }}
-          microphoneEnabled={localMicrophoneEnabled}
-          onToggleMicrophone={() => {
-            const nextEnabled = !localMicrophoneEnabled;
-            setMicrophoneManuallyEnabled(nextEnabled);
-            if (snapshotMicrophoneEnabled === nextEnabled) {
-              return;
-            }
-            void setMicrophoneEnabled(nextEnabled)
-              .then(onSnapshot)
-              .catch((error: unknown) => {
-                console.error("set_microphone_enabled failed", error);
-                showControlNotice("Movie Party could not change the microphone.");
-              });
-          }}
-          cameraEnabled={localCameraEnabled}
-          onToggleCamera={() => {
-            const nextEnabled = !localCameraEnabled;
-            setCameraManuallyEnabled(nextEnabled);
-            if (snapshotCameraEnabled === nextEnabled) {
-              return;
-            }
-            void setCameraEnabled(nextEnabled)
-              .then(onSnapshot)
-              .catch((error: unknown) => {
-                console.error("set_camera_enabled failed", error);
-                showControlNotice("Movie Party could not change the camera.");
-              });
-          }}
-          chatOpen={isComposing || isHistoryOpen}
-          hasUnreadChat={hasUnreadChat}
-          onToggleChat={() => {
-            // If the composer is up but the history panel has
-            // auto-hidden, re-summon the panel instead of closing chat.
-            if (isComposing) {
-              setChatVisibility(toggleChatVisibility);
-              return;
-            }
-            setHasUnreadChat(false);
-            setChatVisibility(openChatManually());
-          }}
-          onSendReaction={() => {
-            // The dock emoji TOGGLES the tray (it no longer fires a
-            // blind 👏): open → pick a reaction, close → movie surface
-            // is clean. The tray auto-hides 5s after opening.
-            setReactionTrayOpen((current) => !current);
-          }}
-          reactionTrayOpen={reactionTrayOpen}
-          isHost={isHost}
-          socialControlsHidden={isGhostMode || isPrivacyMode}
-          callTileHidden={callTileSession.isHidden}
-          onShowCallTile={() => {
-            // Toggle: the floating video tile hides from the dock (the
-            // tile itself no longer carries a close button — see #4).
-            onCallTileSessionChange({
-              ...callTileSession,
-              isHidden: !callTileSession.isHidden,
-            });
-          }}
-          sharedControls={sharedControls}
-          onToggleSharedControls={() => {
-            void setSharedControls(!sharedControls)
-              .then(onSnapshot)
-              .catch((error: unknown) => {
-                console.error("set_shared_controls failed", error);
-                showControlNotice("Movie Party could not change who can control playback.");
-              });
-          }}
-          onLeave={onLeave}
-        />
+        {!youtube && controls}
       </section>
+      {youtube && <footer className="youtube-controls">{controls}</footer>}
     </main>
   );
 }

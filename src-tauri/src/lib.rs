@@ -179,6 +179,7 @@ pub fn run() {
             browse_provider_content,
             validate_provider_content,
             retry_room_provider,
+            youtube_driver, youtube_attach, youtube_detach, youtube_event,
             focus_provider_playback,
             reset_provider_session,
             create_schedule,
@@ -898,6 +899,47 @@ fn navigate_provider_title(
 
     runtime.navigate_provider_to(&provider_id, &url)?;
     Ok(runtime.update_provider_readiness(crate::providers::sync::ProviderReadiness::Navigating))
+}
+
+#[tauri::command]
+async fn youtube_driver(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    enabled: bool,
+) -> Result<app_runtime::AppSnapshot, String> {
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if enabled {
+            let operations = app.state::<ChromeOperations>();
+            let _operation = operations.0.lock().unwrap_or_else(|e| e.into_inner());
+            runtime.youtube_driver(true)
+        } else {
+            runtime.youtube_driver(false)
+        }
+    })
+    .await
+    .map_err(|_| "Player handoff failed".to_string())?
+}
+#[tauri::command]
+fn youtube_attach(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+) -> Result<app_runtime::youtube::EmbedAttachment, String> {
+    runtime.youtube_attach()
+}
+#[tauri::command]
+fn youtube_detach(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    lease: String,
+) -> Result<(), String> {
+    runtime.youtube_detach(&lease)
+}
+#[tauri::command]
+fn youtube_event(
+    runtime: tauri::State<'_, app_runtime::AppRuntime>,
+    context: providers::selection::SelectionContext,
+    event: app_runtime::youtube::EmbedEvent,
+) -> Result<app_runtime::AppSnapshot, String> {
+    runtime.youtube_event(context, event)
 }
 
 #[tauri::command]

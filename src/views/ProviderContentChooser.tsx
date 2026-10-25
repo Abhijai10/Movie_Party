@@ -19,12 +19,14 @@ export function ProviderContentChooser({
   onOpenProvider,
   onCreateParty,
   isCreating,
+  inRoom = false,
 }: {
   capabilities: ProviderCapability[];
   providerId: string;
   onProviderChange: (id: string) => void;
   onOpenProvider: (id: string) => Promise<boolean>;
-  onCreateParty: (request: CreatePartyRequest) => Promise<boolean>;
+  onCreateParty?: (request: CreatePartyRequest) => Promise<boolean>;
+  inRoom?: boolean;
   isCreating: boolean;
 }) {
   const [snapshot, setSnapshot] = useState<ContentChooserSnapshot | null>(null);
@@ -121,7 +123,7 @@ export function ProviderContentChooser({
         id="provider-source-select"
         className="provider-select"
         value={providerId}
-        disabled={busy || isCreating || !capabilities.length}
+        disabled={inRoom || busy || isCreating || !capabilities.length}
         data-testid="provider-select"
         onChange={(event) => {
           onProviderChange(event.target.value);
@@ -174,6 +176,12 @@ export function ProviderContentChooser({
         {canCreate ? "Selected video ready" : "Content not ready for a party"}
       </p>
 
+      {providerId === "youtube" && (
+        <p>
+          No YouTube search API is configured. Search opens YouTube in your managed browser, or
+          paste a video URL.
+        </p>
+      )}
       <div role="group" aria-label="Find content" className="provider-chooser-find">
         <div className="provider-chooser-actions">
           <button
@@ -326,27 +334,29 @@ export function ProviderContentChooser({
           </div>
         </section>
       )}
-      <CinemaButton
-        disabled={busy || isCreating || !canCreate}
-        data-testid="create-room-btn"
-        onClick={() => {
-          if (!canCreate || !preview.identity || !snapshot?.confirmedKey) return;
-          const url = preview.identity.allowedUrl;
-          const selectionKey = snapshot.confirmedKey;
-          void run(async () => {
-            await onCreateParty({
-              source: "provider",
-              providerId,
-              url,
-              mode: "PROVIDER_SYNC",
-              selectionKey,
+      {!inRoom && (
+        <CinemaButton
+          disabled={busy || isCreating || !canCreate}
+          data-testid="create-room-btn"
+          onClick={() => {
+            if (!canCreate || !preview.identity || !snapshot?.confirmedKey) return;
+            const url = preview.identity.allowedUrl;
+            const selectionKey = snapshot.confirmedKey;
+            void run(async () => {
+              await onCreateParty?.({
+                source: "provider",
+                providerId,
+                url,
+                mode: "PROVIDER_SYNC",
+                selectionKey,
+              });
+              return null;
             });
-            return null;
-          });
-        }}
-      >
-        {isCreating ? "Creating party…" : "Create party"}
-      </CinemaButton>
+          }}
+        >
+          {isCreating ? "Creating party…" : "Create party"}
+        </CinemaButton>
+      )}
     </section>
   );
 }

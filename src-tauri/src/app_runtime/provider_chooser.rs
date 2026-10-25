@@ -144,8 +144,8 @@ impl AppRuntime {
         input: &str,
         direct: bool,
     ) -> Result<ChooserSnapshot, String> {
-        if self.lock().credentials.is_some() {
-            return Err("Leave the current party before browsing for different content.".into());
+        if !Self::is_host_role(&self.lock()) {
+            return Err("Only the host chooses content".into());
         }
         let id = crate::providers::sync::provider_id_from_str(provider)
             .ok_or("Unsupported provider.")?;

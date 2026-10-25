@@ -1,3 +1,4 @@
+pub mod embed;
 use serde_json::json;
 
 use super::{chrome::CdpCommand, generic::GenericProviderAdapter};
