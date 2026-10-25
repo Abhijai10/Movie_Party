@@ -418,39 +418,7 @@ export async function tailnetPeersOrThrow(): Promise<TailnetPeersView> {
   return invoke<TailnetPeersView>("tailnet_peers");
 }
 
-export async function addFriend(peerKey: string, displayName?: string): Promise<StoredFriend> {
-  return invoke<StoredFriend>("add_friend", {
-    peerKey,
-    displayName: displayName ?? null,
-  });
-}
 
-/** friend_invite_link payload — your shareable identity. */
-export type FriendInviteLink = {
-  /** movieparty://friend/… deep link to hand out. */
-  link: string;
-  /** Your tailnet peer key (carried inside the link payload). */
-  peerKey: string;
-  /** The display name carried in the link. */
-  displayName: string;
-};
-
-/** Your friend-invite link — the QR/link friends scan to add you.
- * The link is identity-only: it never carries a Tailscale auth key or
- * any credential. The friend joins your tailnet through Tailscale's own
- * external-user invitation with THEIR identity; Movie Party observes
- * and verifies the result. */
-export async function friendInviteLink(): Promise<FriendInviteLink> {
-  return invoke<FriendInviteLink>("friend_invite_link");
-}
-
-/** Accept a movieparty://friend/ invite — the receiving side of the
- * friend architecture. Saves the inviter as INVITED (or
- * TAILSCALE_JOINED when their device is already in the live tailnet
- * status); verification happens later via verifyFriend. */
-export async function acceptFriendInvite(inviteLink: string): Promise<StoredFriend> {
-  return invoke<StoredFriend>("accept_friend_invite", { inviteLink });
-}
 
 /** Refresh saved friends against the live tailnet status: INVITED
  * friends whose device has since joined the tailnet are promoted to
@@ -503,6 +471,30 @@ export function friendErrorCopy(error: unknown, fallback: string): string {
   }
   if (detail.includes("MP-FRIEND-001")) {
     return "That friend link or name isn't valid — check it and try again.";
+  }
+  if (detail.includes("MP-FRIEND-002")) {
+    return "That invitation is from an older Movie Party and carries no signature. Ask them for a new one.";
+  }
+  if (detail.includes("MP-FRIEND-003")) {
+    return "That invitation's signature doesn't check out, so it was refused. Ask them for a new link.";
+  }
+  if (detail.includes("MP-FRIEND-004")) {
+    return "That invitation has expired. Ask them for a new one.";
+  }
+  if (detail.includes("MP-FRIEND-005")) {
+    return "That invitation was already used or has been revoked. Ask them for a new one.";
+  }
+  if (detail.includes("MP-FRIEND-006")) {
+    return "That invitation is missing part of what it needs to be checked. Ask them to send it again.";
+  }
+  if (detail.includes("MP-FRIEND-008")) {
+    return "You blocked this identity. Unblock them from the list before accepting anything from them.";
+  }
+  if (detail.includes("MP-FRIEND-009")) {
+    return "That invitation was addressed to a different device than this one.";
+  }
+  if (detail.includes("MP-FRIEND-010")) {
+    return "That invitation's display name isn't usable. Ask them to set a different name and resend.";
   }
   return fallback;
 }

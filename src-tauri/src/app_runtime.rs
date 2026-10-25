@@ -1351,201 +1351,6 @@ impl AppRuntime {
         })
     }
 
-    /// Save (or refresh) a friend. Requires a current status so the cached
-    /// IP is real, and refuses peers with no usable Tailscale IPv4. The
-    /// optional display name overrides the tailnet-derived name (invites
-    /// carry a friendly name so the list never shows DNS jargon).
-    pub async fn add_friend(
-        &self,
-        peer_key: String,
-        display_name: Option<String>,
-    ) -> Result<crate::storage::sqlite::StoredFriend, String> {
-        let peer_key = peer_key.trim().trim_end_matches('.').to_string() + ".";
-        let status = crate::network::tailscale::detect_status()
-            .await
-            .map_err(|e| e.to_string())?;
-        let peer = status
-            .peers
-            .iter()
-            .find(|p| p.dns_name == peer_key)
-            .ok_or_else(|| {
-                "MP-NET-TS-008 that device is not in your Tailscale network right now".to_string()
-            })?;
-        let ip = peer
-            .usable_ipv4()
-            .ok_or_else(|| "MP-NET-TS-004 that device has no usable Tailscale address".to_string())?
-            .to_string();
-        let now_ms = wall_now_ms();
-        let friendly_name = display_name
-            .map(|name| name.trim().to_string())
-            .filter(|name| !name.is_empty() && name.chars().count() <= MAX_DISPLAY_NAME_CHARS)
-            .unwrap_or_else(|| crate::network::tailscale::peer_display_name(&peer.dns_name));
-        let friend = crate::storage::sqlite::StoredFriend {
-            peer_key: peer.dns_name.clone(),
-            display_name: friendly_name,
-            ip: Some(ip),
-            added_at_ms: now_ms,
-            last_verified_at_ms: None,
-            last_path: None,
-            last_latency_ms: None,
-            // Picked from the live tailnet status → the device IS joined.
-            // Verification still requires a real ping (verify_friend).
-            connection_state: crate::storage::sqlite::FriendConnectionState::TailscaleJoined,
-        };
-        let db = self
-            .lock()
-            .db
-            .clone()
-            .ok_or_else(|| "MP-STORE-001 no database".to_string())?;
-        db.upsert_friend(&friend)
-            .map_err(|e| format!("MP-STORE-001 failed to save friend: {e}"))?;
-        Ok(friend)
-    }
-
-    /// This device's friend-invite link: the shareable QR/link payload for
-    /// the Friends tab. Carries this device's tailnet identity (peer key)
-    /// plus a friendly name, so the receiving app adds the inviter directly
-    /// — no peer tables, no addresses, ever.
-    pub async fn friend_invite(
-        &self,
-    ) -> Result<crate::network::tailscale::FriendInviteLink, String> {
-        let status = crate::network::tailscale::detect_status()
-            .await
-            .map_err(|e| e.to_string())?;
-        let readiness = crate::network::tailscale::readiness_from_status(status.clone());
-        if !readiness.is_usable() && !crate::network::tailscale::dev_loopback_enabled() {
-            return Err(readiness
-                .stable_error()
-                .unwrap_or_else(|| "MP-NET-TS-003 Tailscale is not ready".to_string()));
-        }
-        // The Self MagicDNS name is this device's stable tailnet identity.
-        let peer_key = status
-            .device_name
-            .clone()
-            .filter(|name| name.contains('.'))
-            .ok_or_else(|| "MP-NET-TS-004 this device has no tailnet name yet".to_string())?;
-        let peer_key = format!("{}.", peer_key.trim_end_matches('.'));
-        // Friendly name: the user's identity display name, else the first
-        // label of the DNS name.
-        let display_name = {
-            let state = self.lock();
-            state
-                .db
-                .as_ref()
-                .and_then(|db| db.get_identity().ok().flatten())
-                .map(|identity| identity.display_name)
-                .filter(|name| !name.trim().is_empty())
-        }
-        .unwrap_or_else(|| crate::network::tailscale::peer_display_name(&peer_key));
-        let payload = format!(
-            "{{\"n\":{},\"pk\":{}}}",
-            serde_json::to_string(&display_name)
-                .map_err(|e| format!("MP-STORE-001 could not encode invite: {e}"))?,
-            serde_json::to_string(&peer_key)
-                .map_err(|e| format!("MP-STORE-001 could not encode invite: {e}"))?,
-        );
-        let link = format!(
-            "movieparty://friend/{}",
-            crate::network::tailscale::base64url_encode(payload.as_bytes()),
-        );
-        Ok(crate::network::tailscale::FriendInviteLink {
-            link,
-            peer_key,
-            display_name,
-        })
-    }
-
-    /// Accept a movieparty://friend/ invite — the receiving side of the
-    /// friend architecture. The link carries ONLY the inviter's identity
-    /// (peer key + name); it never contains a Tailscale auth key, and
-    /// this flow never authenticates the inviter's device as anyone.
-    ///
-    /// External-user flow implemented:
-    ///   1. Parse + validate the identity-only payload.
-    ///   2. Refresh the tailnet status (the friend's own device joined
-    ///      through Tailscale's external-user invitation with THEIR
-    ///      Tailscale identity — Movie Party only observes).
-    ///   3. If the expected peer is present with a usable address →
-    ///      save/refresh as TAILSCALE_JOINED. If not → still save as
-    ///      INVITED with the honest tailnet guidance (never a
-    ///      fabricated connection).
-    ///
-    /// The friend becomes MOVIE_PARTY_VERIFIED later via verify_friend
-    /// (a real ping), and ONLINE/OFFLINE stays a live observation.
-    pub async fn accept_friend_invite(
-        &self,
-        invite_link: String,
-    ) -> Result<crate::storage::sqlite::StoredFriend, String> {
-        let payload = crate::network::tailscale::parse_friend_invite(&invite_link)?;
-        let peer_key = format!("{}.", payload.peer_key.trim().trim_end_matches('.'));
-
-        let status = crate::network::tailscale::detect_status().await;
-        let observed = match &status {
-            Ok(status) => status
-                .peers
-                .iter()
-                .find(|p| p.dns_name == peer_key)
-                .and_then(|p| p.usable_ipv4())
-                .map(|ip| ip.to_string()),
-            Err(_) => None,
-        };
-
-        let now_ms = wall_now_ms();
-        let existing = self
-            .list_friends()
-            .into_iter()
-            .find(|f| f.peer_key == peer_key);
-
-        // Keep the user's chosen name when re-accepting — the invite may
-        // be an older share, and the saved name wins.
-        let display_name = existing
-            .as_ref()
-            .map(|f| f.display_name.clone())
-            .unwrap_or_else(|| payload.display_name.clone());
-
-        // F23: never demote an existing verification. Re-opening an old invite
-        // link is a normal way to re-share it, and it must not wipe a
-        // MOVIE_PARTY_VERIFIED record: the rest of the friend flow only ever
-        // promotes (see `update_friend_verification`). The cached verification
-        // observations are preserved exactly like the user's chosen name above.
-        let verified_at = existing.as_ref().and_then(|f| f.last_verified_at_ms);
-        let connection_state = if verified_at.is_some() {
-            crate::storage::sqlite::FriendConnectionState::MoviePartyVerified
-        } else if observed.is_some() {
-            crate::storage::sqlite::FriendConnectionState::TailscaleJoined
-        } else {
-            crate::storage::sqlite::FriendConnectionState::Invited
-        };
-
-        let friend = crate::storage::sqlite::StoredFriend {
-            peer_key: peer_key.clone(),
-            display_name,
-            // A fresh observation wins; otherwise keep the last cached address
-            // rather than forgetting it just because the peer was briefly
-            // absent from the tailnet status.
-            ip: observed
-                .clone()
-                .or_else(|| existing.as_ref().and_then(|f| f.ip.clone())),
-            added_at_ms: existing.as_ref().map(|f| f.added_at_ms).unwrap_or(now_ms),
-            // Never claim verification from a link alone — that stays
-            // verify_friend's job (a real ping through the tunnel). Only a
-            // PREVIOUSLY recorded verification is carried forward.
-            last_verified_at_ms: verified_at,
-            last_path: existing.as_ref().and_then(|f| f.last_path.clone()),
-            last_latency_ms: existing.as_ref().and_then(|f| f.last_latency_ms),
-            connection_state,
-        };
-
-        let db = self
-            .lock()
-            .db
-            .clone()
-            .ok_or_else(|| "MP-STORE-001 no database".to_string())?;
-        db.upsert_friend(&friend)
-            .map_err(|e| format!("MP-STORE-001 failed to save friend: {e}"))?;
-        Ok(friend)
-    }
-
     /// Refresh saved friends against the live tailnet status: any INVITED
     /// friend whose device has since joined the tailnet is promoted to
     /// TAILSCALE_JOINED (never demoting MOVIE_PARTY_VERIFIED). Returns
@@ -12291,6 +12096,10 @@ mod friends_tests {
         (runtime, dir)
     }
 
+    fn clean(dir: std::path::PathBuf) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// list/add/remove round-trip on the runtime layer. add_friend and
     /// verify_friend hit the real Tailscale CLI, so this test exercises the
     /// pure-persistence path (list + remove) and the add-path's rejection
@@ -12298,27 +12107,15 @@ mod friends_tests {
     /// without Tailscale is the deterministic MP-NET error, and on a real
     /// tailnet machine is a peer key that cannot exist.
     #[tokio::test]
-    async fn friends_list_remove_and_unknown_add() {
+    async fn friends_list_and_remove_round_trip() {
         let (runtime, dir) = runtime_with_db();
 
-        // Empty list on a fresh DB.
+        // Empty list on a fresh DB, and no trust position for a peer that was
+        // never invited or accepted. Batch 8 removed the "add a tailnet peer"
+        // command entirely: a device being visible on the tunnel is not a
+        // friendship, and only an accepted invitation creates one.
         assert!(runtime.list_friends().is_empty());
-
-        // Adding a peer that is not in the current tailnet status is a
-        // stable MP-NET error, never a panic and never a silent success.
-        // (On machines where the Tailscale CLI is absent, detect_status
-        // fails first with MP-NET-TS-001/003 — both accepted here since the
-        // invariant under test is "an unknown peer is never saved".)
-        let result = runtime
-            .add_friend("ghost.tailc930b7.ts.net.".to_string(), None)
-            .await;
-        match result {
-            Err(e) => assert!(e.starts_with("MP-NET-TS-"), "unexpected error: {e}"),
-            // If a machine genuinely has such a peer in its tailnet (it
-            // cannot — the key is test-fabricated), the add succeeds and
-            // the round-trip below still holds.
-            Ok(friend) => assert_eq!(friend.peer_key, "ghost.tailc930b7.ts.net."),
-        }
+        assert_eq!(runtime.friendship_state("ghost.tailc930b7.ts.net."), None);
 
         // Direct persistence sanity: a stored friend lists and removes.
         {
@@ -12427,172 +12224,116 @@ mod friends_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// friend_invite: on a tailnet-ready machine the link is a well-formed
-    /// movieparty://friend/<base64url> that carries the payload; on a
-    /// machine without Tailscale it is a stable MP-NET error, never a panic.
+    /// The invitation this device hands out is well formed and IDENTITY-ONLY:
+    /// a signed payload naming who issued it, and never a Tailscale auth key,
+    /// token, password or other credential. On a machine without Tailscale it is
+    /// a stable MP-NET error rather than a panic.
     #[tokio::test]
-    async fn friend_invite_link_is_well_formed_or_honest_error() {
+    async fn the_signed_invite_is_well_formed_and_carries_no_credentials() {
         let (runtime, dir) = runtime_with_db();
-        match runtime.friend_invite().await {
-            Ok(invite) => {
-                assert!(invite.link.starts_with("movieparty://friend/"));
-                let code = invite.link.trim_start_matches("movieparty://friend/");
+        match runtime.friend_invite_signed().await {
+            Ok(sent) => {
+                assert!(sent.link.starts_with("movieparty://friend/"));
+                assert!(sent.fingerprint.starts_with("MP-"));
+                assert!(sent.expires_at_ms > super::wall_now_ms());
+                let code = sent.link.trim_start_matches("movieparty://friend/");
                 assert!(!code.is_empty());
-                assert!(
-                    code.chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
-                    "code must be base64url: {code}"
-                );
-                assert!(invite.peer_key.ends_with('.'));
-                assert!(invite.peer_key.contains('.'));
-                assert!(!invite.display_name.is_empty());
+                let bytes = crate::network::tailscale::base64url_decode(code).expect("decode");
+                let decoded = String::from_utf8(bytes).expect("utf8");
+                let value: serde_json::Value = serde_json::from_str(&decoded).expect("json");
+                let object = value.as_object().expect("object");
+                for required in [
+                    "v",
+                    "fromDeviceId",
+                    "fromPublicKey",
+                    "fromDisplayName",
+                    "fromPeerKey",
+                    "nonce",
+                    "issuedAtMs",
+                    "expiresAtMs",
+                    "signature",
+                ] {
+                    assert!(
+                        object.contains_key(required),
+                        "missing {required}: {decoded}"
+                    );
+                }
+                let lowered = decoded.to_lowercase();
+                for banned in [
+                    "authkey",
+                    "auth_key",
+                    "apikey",
+                    "api_key",
+                    "token",
+                    "secret",
+                    "password",
+                    "credential",
+                ] {
+                    assert!(
+                        !lowered.contains(banned),
+                        "invite payload must never contain {banned}: {decoded}"
+                    );
+                }
             }
             Err(e) => assert!(
-                e.starts_with("MP-NET-TS-") || e.starts_with("MP-STORE-001"),
+                e.starts_with("MP-NET-TS-")
+                    || e.starts_with("MP-STORE-001")
+                    || e.starts_with("MP-FRIEND-"),
                 "unexpected error: {e}"
             ),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The invite payload is IDENTITY-ONLY: it must never carry a
-    /// Tailscale auth key, access token, or any credential. This is the
-    /// architectural guarantee the friend flow is built on — links are
-    /// safe to print on a QR and share anywhere.
+    /// An unacceptable link changes nothing: malformed ones are refused with a
+    /// stable MP-FRIEND code, and the previous build's unsigned payload is named
+    /// as too old instead of being imported.
     #[tokio::test]
-    async fn friend_invite_payload_is_identity_only_never_credentials() {
-        let (runtime, dir) = runtime_with_db();
-        if let Ok(invite) = runtime.friend_invite().await {
-            let parsed =
-                crate::network::tailscale::parse_friend_invite(&invite.link).expect("parse");
-            assert_eq!(parsed.peer_key, invite.peer_key);
-            assert_eq!(parsed.display_name, invite.display_name);
-            // The raw payload must contain exactly the identity fields.
-            let code = invite.link.trim_start_matches("movieparty://friend/");
-            let bytes = crate::network::tailscale::base64url_decode(code).expect("decode");
-            let decoded = String::from_utf8(bytes).expect("utf8");
-            let value: serde_json::Value = serde_json::from_str(&decoded).expect("json");
-            let keys: Vec<String> = value
-                .as_object()
-                .map(|o| o.keys().cloned().collect())
-                .unwrap_or_default();
-            assert_eq!(
-                keys,
-                vec!["n".to_string(), "pk".to_string()],
-                "invite payload must carry only n/pk, got: {decoded}"
-            );
-            let lowered = decoded.to_lowercase();
-            for banned in [
-                "authkey",
-                "auth_key",
-                "apikey",
-                "api_key",
-                "token",
-                "secret",
-                "password",
-                "credential",
-            ] {
-                assert!(
-                    !lowered.contains(banned),
-                    "invite payload must never contain {banned}: {decoded}"
-                );
-            }
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// accept_friend_invite: a valid link saves the inviter as INVITED
-    /// (device not yet in this tailnet) with NO fabricated verification;
-    /// a link naming a peer already in the live tailnet lands as
-    /// TAILSCALE_JOINED. Invalid links are stable MP-FRIEND-001 errors
-    /// and save nothing.
-    #[tokio::test]
-    async fn accept_friend_invite_saves_invited_or_joined_never_fake_connections() {
+    async fn an_unacceptable_link_saves_nothing_at_all() {
         let (runtime, dir) = runtime_with_db();
 
-        // 1) Malformed links refuse with MP-FRIEND-001 and save nothing.
+        // Malformed links refuse and save nothing.
         for bad in [
             "not-a-link",
             "movieparty://friend/",
             "movieparty://friend/!!!",
             "https://evil.example/friend",
         ] {
-            let err = runtime
-                .accept_friend_invite(bad.to_string())
-                .await
-                .unwrap_err();
-            assert!(err.starts_with("MP-FRIEND-001"), "for {bad}: {err}");
+            let err = runtime.preview_friend_invite(bad).expect_err("must refuse");
+            assert!(err.starts_with("MP-FRIEND-"), "for {bad}: {err}");
         }
         assert!(runtime.list_friends().is_empty(), "nothing was saved");
 
-        // 2) A well-formed link to an absent peer saves INVITED, honestly.
-        // Build the link the exact way the inviter's app does.
+        // The link shape the previous build handed out — an unsigned
+        // `{name, peer key}` payload — is named as too old rather than being
+        // imported quietly. This is the input the retired `accept_friend_invite`
+        // command used to trust without any verification at all.
         let payload = format!(
             "{{\"n\":{},\"pk\":{}}}",
             serde_json::to_string("Priya").unwrap(),
             serde_json::to_string("priya-mac.tailc930b7.ts.net").unwrap(),
         );
-        let link = format!(
+        let legacy = format!(
             "movieparty://friend/{}",
             crate::network::tailscale::base64url_encode(payload.as_bytes())
         );
-        let friend = runtime
-            .accept_friend_invite(link.clone())
-            .await
-            .expect("accept invite");
-        assert_eq!(friend.peer_key, "priya-mac.tailc930b7.ts.net.");
-        assert_eq!(friend.display_name, "Priya");
-        assert_eq!(
-            friend.last_verified_at_ms, None,
-            "no fabricated verification"
+        let error = runtime
+            .preview_friend_invite(&legacy)
+            .expect_err("an unsigned link cannot be trusted");
+        assert!(
+            error.contains("MP-FRIEND-002"),
+            "a legacy link must be identified as too old, got: {error}"
         );
-        // Without a live tailnet observation the honest state is INVITED;
-        // a machine whose real tailnet contains this peer would see
-        // TAILSCALE_JOINED — both are valid, never MOVIE_PARTY_VERIFIED
-        // from a link alone.
-        assert_ne!(
-            friend.connection_state,
-            FriendConnectionState::MoviePartyVerified,
-            "a link alone can never mark the friend verified"
-        );
-
-        // 3) Re-accepting the same link is idempotent and keeps the
-        // user's chosen name if they renamed the friend.
-        runtime
-            .rename_friend("priya-mac.tailc930b7.ts.net.", "Movie Night")
-            .expect("rename");
-        let again = runtime.accept_friend_invite(link).await.expect("re-accept");
-        assert_eq!(
-            again.display_name, "Movie Night",
-            "user's name wins over the link"
-        );
-        let friends = runtime.list_friends();
-        assert_eq!(friends.len(), 1, "no duplicate rows");
-
-        // 4) refresh_friend_states on an INVITED friend whose peer is
-        // still absent keeps the honest INVITED state (never invents a
-        // join) and never panics without Tailscale.
-        let refreshed = runtime.refresh_friend_states().await;
-        assert_eq!(refreshed.len(), 1);
-        assert_ne!(
-            refreshed[0].connection_state,
-            FriendConnectionState::MoviePartyVerified
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(runtime.list_friends().is_empty(), "reading refused nothing");
+        clean(dir);
     }
 
-    /// F23: re-accepting an invite must never demote a verified friend.
-    ///
-    /// Re-opening an old invite link is a normal way to re-share it. The accept
-    /// path used to write `last_verified_at_ms: None` plus a downgraded
-    /// connection state, wiping a MOVIE_PARTY_VERIFIED record — even though the
-    /// rest of the friend flow only ever promotes.
     #[tokio::test]
     async fn reaccepting_an_invite_never_demotes_a_verified_friend() {
-        let (runtime, dir) = runtime_with_db();
+        let (inviter, inviter_dir) = runtime_with_db();
+        let (verified_runtime, dir) = runtime_with_db();
         {
-            let state = runtime.lock();
+            let state = verified_runtime.lock();
             let db = state.db.as_ref().expect("db");
             db.upsert_friend(&StoredFriend {
                 peer_key: "verified.tailc930b7.ts.net.".to_string(),
@@ -12607,16 +12348,24 @@ mod friends_tests {
             .expect("seed verified");
         }
 
-        let payload = format!(
-            "{{\"n\":{},\"pk\":{}}}",
-            serde_json::to_string("Ignored Link Name").unwrap(),
-            serde_json::to_string("verified.tailc930b7.ts.net").unwrap(),
-        );
-        let link = format!(
-            "movieparty://friend/{}",
-            crate::network::tailscale::base64url_encode(payload.as_bytes())
-        );
-        let friend = runtime.accept_friend_invite(link).await.expect("re-accept");
+        // A fresh signed invitation from that same device, handed to us again.
+        let now_ms = super::wall_now_ms();
+        let invite = crate::friends::create_invite(
+            &inviter.device_identity_for_test(),
+            "Renamed By Link",
+            "verified.tailc930b7.ts.net",
+            now_ms,
+            crate::friends::FRIEND_INVITE_TTL_MS,
+        )
+        .expect("invite");
+        let link = crate::friends::encode_invite_link(&invite).expect("link");
+        let preview = verified_runtime
+            .preview_friend_invite(&link)
+            .expect("preview");
+        let friend = verified_runtime
+            .accept_friend_invitation(preview.nonce)
+            .await
+            .expect("accept");
 
         assert_eq!(
             friend.last_verified_at_ms,
@@ -12630,19 +12379,12 @@ mod friends_tests {
             FriendConnectionState::MoviePartyVerified,
             "a re-accept must not demote a verified friend"
         );
-        assert_eq!(
-            friend.display_name, "Verified",
-            "the saved name still wins over the link"
-        );
-        assert_eq!(runtime.list_friends().len(), 1, "no duplicate rows");
-
-        let _ = std::fs::remove_dir_all(&dir);
+        // The locally chosen name beats the label carried in the link.
+        assert_eq!(friend.display_name, "Verified");
+        clean(dir);
+        clean(inviter_dir);
     }
 
-    /// refresh_friend_states: an INVITED friend whose device has since
-    /// joined the tailnet (observed via detect_status) is promoted to
-    /// TAILSCALE_JOINED; a MOVIE_PARTY_VERIFIED friend is never demoted
-    /// by later observations.
     #[tokio::test]
     async fn refresh_friend_states_promotes_invited_never_demotes_verified() {
         let (runtime, dir) = runtime_with_db();

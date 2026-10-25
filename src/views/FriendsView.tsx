@@ -23,7 +23,7 @@ import {
   candidateOnlineFor,
   declineFriendInvitation,
   friendErrorCopy,
-  friendInviteLink,
+  requestSignedFriendInvite,
   friendStatusCopy,
   friendStatusFor,
   friendTrustStates,
@@ -36,13 +36,12 @@ import {
   tailnetPeers,
   unblockFriend,
   verifyFriend,
-  type FriendInviteLink,
+  type SentInvite,
   type FriendshipState,
   type IncomingInvite,
   type StoredFriend,
   type TailnetPeersView,
 } from "../backend/appRuntime";
-import { parseFriendInvite } from "../invites/deepLinks";
 import {
   FRIENDSHIP_LABELS,
   blockWarning,
@@ -53,19 +52,21 @@ import {
 } from "../invites/friendship";
 
 /**
- * Friends — the invite-link surface of the Tailscale friend architecture:
+ * Friends — the trust surface, kept separate from reachability:
  *
- *   Movie Party friend invite (identity-only link — NEVER an auth key)
- *   → friend accepts it here (INVITED)
- *   → their device joins the tailnet through Tailscale's own
- *     external-user invitation with THEIR Tailscale identity
- *   → Movie Party refreshes the tailnet status (TAILSCALE_JOINED)
- *   → Movie Party verifies the expected peer with a real ping
- *     (MOVIE_PARTY_VERIFIED → ONLINE/OFFLINE as a live observation).
+ *   This device issues a signed invitation (its own identity, its fingerprint,
+ *   an expiry, and a nonce that can be spent exactly once — never an auth key,
+ *   a password or a Tailscale credential).
+ *   → the other person opens it on their device and *decides*; a link arriving
+ *     from the OS is shown for review and commits nothing until they accept.
+ *   → acceptance binds their device identity and records ACCEPTED here.
+ *   → Tailscale reachability is a different question, answered by the guided
+ *     setup wizard (Batch 9), and a `tailscale ping` only ever proves the tunnel.
+ *   → "Connected" belongs to the wizard alone, and only after a real Movie Party
+ *     transport handshake for that device id.
  *
- * No tailnet jargon on the surface: share a link/QR, your friend opens
- * it, and they land in this list under an editable name with honest
- * states.
+ * Removal and blocking are recorded as positions on the identity, not as deleted
+ * rows, so a revoked friendship cannot be re-created by the link that started it.
  */
 type FriendsViewProps = {
   onBack: () => void;
@@ -73,7 +74,10 @@ type FriendsViewProps = {
   onOpenOnboarding?: () => void;
   friends: StoredFriend[];
   onFriendsChanged: (friends: StoredFriend[]) => void;
-  /** A friend invite that arrived via deep link — accepted on mount. */
+  /**
+   * A friend invitation that arrived via deep link. Shown for a decision on
+   * mount — never accepted by arriving.
+   */
   pendingInvite: string | null;
   onPendingInviteConsumed: () => void;
 };
@@ -86,7 +90,7 @@ export function FriendsView({
   pendingInvite,
   onPendingInviteConsumed,
 }: FriendsViewProps) {
-  const [invite, setInvite] = useState<FriendInviteLink | null>(null);
+  const [invite, setInvite] = useState<SentInvite | null>(null);
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [pasteValue, setPasteValue] = useState("");
   const [pasteError, setPasteError] = useState<string | null>(null);
@@ -154,7 +158,7 @@ export function FriendsView({
   useEffect(() => {
     if (invite != null || inviteError != null) return;
     let cancelled = false;
-    void friendInviteLink().then(
+    void requestSignedFriendInvite().then(
       (link) => {
         if (!cancelled) setInvite(link);
       },
@@ -192,15 +196,23 @@ export function FriendsView({
   };
 
   const previewInvite = useCallback(async (raw: string) => {
-    const parsed = parseFriendInvite(raw);
-    if (!parsed.ok) {
-      setPasteError(parsed.message);
+    const value = raw.trim();
+    if (!value) {
+      setPasteError("Paste a friend invitation link.");
+      return false;
+    }
+    // A shape check only. The signature, expiry, recipient and one-time nonce
+    // are the Rust verifier's job; the screen must not pre-empt it with its own
+    // parser, which is how the previous build ended up rejecting the signed
+    // links it now issues.
+    if (!value.toLowerCase().startsWith("movieparty://friend/")) {
+      setPasteError("Friend invitations start with movieparty://friend/.");
       return false;
     }
     setPasteError(null);
     setBusyAction("add");
     try {
-      setIncoming(await previewFriendInvite(raw));
+      setIncoming(await previewFriendInvite(value));
       setPasteValue("");
       return true;
     } catch (error) {
@@ -389,13 +401,21 @@ export function FriendsView({
                 <div className="space-y-3 min-w-0 friends-card" data-testid="friends-invite-block">
                   <InviteCard
                     inviteCode={invite.link}
-                    title="Your friend link"
-                    qrHint="Scan to add you"
+                    title="Your signed invitation"
+                    qrHint="Scan to accept"
                   />
                   <p className="text-xs text-white/45 leading-relaxed">
-                    The link carries only your name — never a network key. Your friend joins your
-                    Tailscale network on their device (Tailscale asks them to sign in with their own
-                    account), then Movie Party sees and verifies them here.
+                    This link is your device&apos;s invitation, signed by your Movie Party identity
+                    key — {fingerprintHelp(invite.fingerprint)} It holds no network key, no
+                    password and no Tailscale credential. Nothing becomes a friendship until they
+                    accept it on their own device, and one link can only be accepted once:{' '}
+                    {inviteExpiryCopy(invite.expiresAtMs, Date.now())}
+                  </p>
+                  <p
+                    className="text-xs font-mono-mp text-white/55"
+                    data-testid="friends-my-fingerprint"
+                  >
+                    Your fingerprint: {invite.fingerprint}
                   </p>
                 </div>
               ) : inviteError != null ? (

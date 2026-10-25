@@ -129,12 +129,9 @@ pub fn run() {
             get_tailscale_readiness,
             open_tailscale_setup,
             tailnet_peers,
-            add_friend,
             remove_friend,
             list_friends,
             verify_friend,
-            friend_invite_link,
-            accept_friend_invite,
             refresh_friend_states,
             rename_friend,
             show_home,
@@ -309,39 +306,6 @@ async fn tailnet_peers(
     runtime: tauri::State<'_, app_runtime::AppRuntime>,
 ) -> Result<crate::network::tailscale::TailnetPeersView, String> {
     runtime.tailnet_peers().await
-}
-
-/// Save (or refresh) a friend by their Tailscale peer key (MagicDNS name).
-/// The optional display name overrides the tailnet-derived name (invites).
-#[tauri::command]
-async fn add_friend(
-    runtime: tauri::State<'_, app_runtime::AppRuntime>,
-    peer_key: String,
-    display_name: Option<String>,
-) -> Result<crate::storage::sqlite::StoredFriend, String> {
-    runtime.add_friend(peer_key, display_name).await
-}
-
-/// This device's friend-invite link — the QR/link share for Add Friend.
-#[tauri::command]
-async fn friend_invite_link(
-    runtime: tauri::State<'_, app_runtime::AppRuntime>,
-) -> Result<crate::network::tailscale::FriendInviteLink, String> {
-    runtime.friend_invite().await
-}
-
-/// Accept a movieparty://friend/ invite (the receiving side of the
-/// friend architecture). The link carries ONLY the inviter's identity —
-/// never a Tailscale auth key; the friend's own device joins the tailnet
-/// through Tailscale's external-user invitation with their identity,
-/// and Movie Party observes + verifies the result (INVITED →
-/// TAILSCALE_JOINED → MOVIE_PARTY_VERIFIED).
-#[tauri::command]
-async fn accept_friend_invite(
-    runtime: tauri::State<'_, app_runtime::AppRuntime>,
-    invite_link: String,
-) -> Result<crate::storage::sqlite::StoredFriend, String> {
-    runtime.accept_friend_invite(invite_link).await
 }
 
 /// Refresh saved friends against the live tailnet status: INVITED
