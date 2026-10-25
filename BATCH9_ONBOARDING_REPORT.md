@@ -179,9 +179,12 @@ below, not an omission in the table.
 
 1. Run rows O17–O29 on two machines and fill in the direction/media verdicts —
    that is what turns requirement 13 from "reasoned" into "verified".
-2. Give the wizard a way to see the *invite* it already sent for this peer, so
-   `MP-ONB-010` can be reported from storage instead of from the trust state.
-3. Revisit the legacy `accept_friend_invite` IPC command still registered from
-   before Batch 8 (it auto-commits a friendship; the wizard never calls it).
+2. ~~Give the wizard a way to see the *invite* it already sent for this peer~~
+   **Done (2026-10-26):** schema v7 records the recipient on the invite row, so
+   `MP-ONB-010` is read from storage. See `BATCH5_9_CLOSURE_REPORT.md` §3.
+3. ~~Revisit the legacy `accept_friend_invite` IPC command~~
+   **Done (2026-10-26):** `accept_friend_invite`, `add_friend` and
+   `friend_invite_link` are removed, and the Friends screen now hands out the
+   signed invitation. See §1–2 of the closure report.
 4. If O24 shows media cannot cross a one-way share, make the wizard recommend
    tailnet membership for calls specifically, rather than as a general fallback.

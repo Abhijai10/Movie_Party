@@ -18,7 +18,7 @@ Evidence tiers used by the code and the UI:
 
 | # | Step | Expected | Tier today | Result |
 | --- | --- | --- | --- | --- |
-| O1 | Launch with Tailscale installed, signed in, connected | Wizard shows tailnet suffix, your role, and a valid node key | LIVE (single device, macOS) | |
+| O1 | Launch with Tailscale installed, signed in, connected | Wizard shows tailnet suffix, your role, and a valid node key | LIVE (single device, macOS) | **PASS 2026-10-26** — `tests/tailscale_probe.rs` read the live CLI: stable id `TnSLAyoyHo11CNTRL`, suffix `tailc930b7.ts.net`, role `Owner`, key expiry `2027-02-20`, self DNS name under that suffix |
 | O2 | Quit the Tailscale app, reopen the wizard | "Tailscale isn't answering", not "install Tailscale" | AUTOMATED | |
 | O3 | Log out of Tailscale, reopen | "Tailscale needs you to sign in" | UNVERIFIED | |
 | O4 | Uninstall Tailscale, reopen | "Tailscale isn't installed here" + it never offers to install it | UNVERIFIED | |
@@ -102,6 +102,17 @@ account shared what.
 | O49 | Wrong share direction | MP-ONB-012 | REASONED | |
 | O50 | Tunnel fine, no Movie Party handshake | MP-ONB-013 | AUTOMATED | |
 | O51 | Blocked identity | MP-ONB-014 | AUTOMATED | |
+
+## Run log
+
+| Date | What ran | Result |
+|---|---|---|
+| 2026-10-26 | `cargo test --test tailscale_probe` | PASS — status, ping shape, and the real tailnet-identity assertions (O1). |
+| 2026-10-26 | `onboarding` reducer + runtime suites (54 tests) | PASS — all six stages, all fourteen `MP-ONB` states, the connectedness gate, and the bearer-link scans. |
+| 2026-10-26 | Wizard fixture in a real browser, 12 states | PASS — each state showed only its own codes; "Connected" appeared only with a handshake proof; "Tunnel only" only in the ping-only state; no token echoed; all controls the same pill radius. |
+| 2026-10-26 | Invitation hand-out | FIXED — the Friends screen now issues the *signed* invitation. Before this, it handed out the pre-Batch-8 unsigned identity card and pre-validated pasted links with a local parser, so the only acceptance path in the UI refused the only valid link format. |
+| — | Rows O17–O29 (two devices) | Not run — one machine, one tailnet. |
+| — | O19–O24 media/call across a share | Not run — same. These are what turn requirement 13 from "reasoned" into "verified". |
 
 ## 8. Two-device and other-platform gaps carried forward
 

@@ -109,21 +109,29 @@ uninstaller is not something this app does.
 
 ## Manual verification rows
 
-Not yet performed. Fill these in before trusting any claim about the companion;
-they belong with `PROVIDER_VERIFICATION_CHECKLIST.md`'s tiers
-(`LIVE-VERIFIED` / `AUTOMATED-ONLY` / `UNVERIFIED`).
+Tiers follow `PROVIDER_VERIFICATION_CHECKLIST.md`. `AUTOMATED` means a test in
+this repo drives the real code path; `LIVE` means it was watched through a real
+browser; `BLOCKED` names what has to exist before the row can be answered.
 
 | # | Check | Chrome macOS | Chrome Windows | Edge macOS | Edge Windows |
 |---|---|---|---|---|---|
-| C1 | Load unpacked, host installed, pairing succeeds | | | | |
-| C2 | A provider tab is recognised and reported | | | | |
-| C3 | A non-provider tab is refused and nothing is sent | | | | |
-| C4 | Play/pause/seek stay switched off with their reason | | | | |
-| C5 | Extension absent → `ExtensionMissing` wording, not a hang | | | | |
-| C6 | Permission prompt declined → `PermissionDenied` recovery | | | | |
-| C7 | Tab closed or navigated → `TabChanged`, session ends cleanly | | | | |
-| C8 | Wrong extension version → `VersionMismatch` | | | | |
-| C9 | Six bad pairing codes → locked out, new code required | | | | |
-| C10 | Movie Party closed → ordinary browsing unaffected | | | | |
-| C11 | Removal leaves no host manifest and no access | | | | |
-| C12 | Selected content reaches the guest over the existing sync path | | | | |
+| C1 | Load unpacked, host installed, pairing succeeds | BLOCKED — needs the packaged app plus a loaded unpacked extension (never attempted end-to-end) | — | — | — |
+| C2 | A provider tab is recognised and reported | AUTOMATED (`a_reported_provider_tab_becomes_a_real_selection`) — not yet driven from a real extension page | — | — | — |
+| C3 | A non-provider tab is refused and nothing is sent | PASS, AUTOMATED (`off_allowlist_tabs_and_unsupported_providers_are_refused_nothing_stored`, `content_reports_are_limited_to_supported_provider_hosts`) | — | — | — |
+| C4 | Play/pause/seek stay switched off with their reason | PASS, AUTOMATED (`a_capability_the_user_never_granted_stays_switched_off`, `capabilities_that_were_never_observed_stay_switched_off`) | — | — | — |
+| C5 | Extension absent → `ExtensionMissing` wording, not a hang | PARTIAL — the code and its guidance exist and are unit-tested; the in-app wording path (`companionState.test.ts`) has not been seen with the extension genuinely missing | — | — | — |
+| C6 | Permission prompt declined → `PermissionDenied` recovery | BLOCKED — needs a live browser permission prompt | — | — | — |
+| C7 | Tab closed or navigated → `TabChanged`, session ends cleanly | PASS, LIVE (macOS, 2026-10-26, real Chrome: `real_chrome_follows_active_tabs_and_detects_closed_targets`) | — | — | — |
+| C8 | Wrong extension version → `VersionMismatch` | PASS, AUTOMATED (`a_version_disagreement_fails_closed`, `version_negotiation_fails_closed`) | — | — | — |
+| C9 | Six bad pairing codes → locked out, new code required | PASS, AUTOMATED (`a_guessed_code_is_cut_off_rather_than_offered_forever`) | — | — | — |
+| C10 | Movie Party closed → ordinary browsing unaffected | BLOCKED — needs a real managed-Chrome session to close under | — | — | — |
+| C11 | Removal leaves no host manifest and no access | PARTIAL — manifest shape and per-browser registration are tested (`the_host_manifest_never_trusts_more_than_one_extension_id`, `the_host_is_registered_for_every_supported_browser_not_just_one`, `unlinking_stops_a_left_behind_extension_from_keep_reporting`); removal from the real profile directories was not inspected | — | — | — |
+| C12 | Selected content reaches the guest over the existing sync path | BLOCKED — needs two devices and a running party | — | — | — |
+
+## Run log
+
+| Date | What ran | Result |
+|---|---|---|
+| 2026-10-26 | `MOVIE_PARTY_ALLOW_VISIBLE_CHROME=1 cargo test --lib providers::chrome -- --include-ignored` | Real Chrome launched and driven over CDP on a managed profile: launch/evaluate, active-tab following, closed-target detection, profile persistence across close/relaunch, launch-timeout tree reaping. 40/40 after the YouTube player-wait fix. |
+| 2026-10-26 | Companion unit + loopback integration suites (`companion::*`, `app_runtime::companion::*`) | All green; the loopback handshake test opens a real TCP listener and refuses off-origin/off-allowlist frames. |
+| — | Anything requiring the extension UI in a real browser profile | Not performed. C1, C6, C10, C12 stay blocked. |
