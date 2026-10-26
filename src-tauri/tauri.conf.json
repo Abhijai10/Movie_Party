@@ -3,6 +3,7 @@
   "productName": "Movie Party",
   "version": "0.9.9",
   "identifier": "app.movieparty.desktop",
+  "mainBinaryName": "movie-party",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
