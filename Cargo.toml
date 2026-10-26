@@ -1,5 +1,5 @@
 [workspace]
-members = ["src-tauri"]
+members = ["src-tauri", "companion-host"]
 resolver = "2"
 
 # Release profile — small, fast binaries with debug

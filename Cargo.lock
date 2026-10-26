@@ -2518,6 +2518,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "movie-party-companion-host"
+version = "0.9.9"
+dependencies = [
+ "movie-party",
+ "serde_json",
+]
+
+[[package]]
 name = "muda"
 version = "0.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

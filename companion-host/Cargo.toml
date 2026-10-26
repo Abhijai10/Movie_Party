@@ -1,0 +1,29 @@
+[package]
+name = "movie-party-companion-host"
+version = "0.9.9"
+description = "Movie Party native messaging host for the existing-browser companion"
+authors = ["Movie Party"]
+edition = "2021"
+license = "LicenseRef-Proprietary"
+publish = false
+
+# Deliberately a SEPARATE package from `src-tauri`.
+#
+# It used to be `src-tauri/src/bin/movie-party-companion-host.rs`, which gave the
+# `movie-party` package TWO bin targets. Tauri's bundler then picked the wrong
+# one and every installer — macOS DMG and Windows NSIS alike — shipped
+# `movie-party-companion-host` as the application binary, so the installed app
+# did nothing. Their CI log says it plainly:
+#
+#   Built application at: ...\target\release\movie-party-companion-host.exe
+#
+# `mainBinaryName` fixed the name Tauri looked for but not the choice, so the
+# only durable fix is to leave `movie-party` with exactly one bin target.
+
+[[bin]]
+name = "movie-party-companion-host"
+path = "src/main.rs"
+
+[dependencies]
+movie-party = { path = "../src-tauri" }
+serde_json = "1"

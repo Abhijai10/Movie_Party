@@ -114,6 +114,23 @@ jobs:
 
       - run: pnpm tauri build
 
+      # A green build is not a working app. `movie-party` used to carry two bin
+      # targets, and Tauri bundled the COMPANION HOST as the application binary —
+      # every installer shipped a ~420 KB stub that did nothing. This asserts the
+      # real application was built, so that failure can never pass silently again.
+      - name: Verify the app binary is real
+        shell: pwsh
+        run: |
+          $app = Get-ChildItem -Path target -Recurse -Filter 'movie-party.exe' -File |
+            Where-Object { $_.Name -eq 'movie-party.exe' } |
+            Select-Object -First 1
+          if (-not $app) { throw "no movie-party.exe was produced" }
+          $mb = [math]::Round($app.Length / 1MB, 2)
+          "app binary: $($app.FullName) ($mb MB)"
+          if ($app.Length -lt 5MB) {
+            throw "movie-party.exe is only $mb MB — that is the companion-host stub, not the application"
+          }
+
       # Discover the installer rather than hardcoding a path, and fail loudly
       # if the build produced nothing — `if-no-files-found: error` would
       # otherwise be the first thing to notice.
@@ -203,6 +220,25 @@ jobs:
 
       # Explicit target, matching release.yml: the project ships Apple Silicon.
       - run: pnpm tauri build --target aarch64-apple-darwin
+
+      # Same guard as Windows. The macOS DMG in run 40236368933 contained only
+      # `movie-party-companion-host` and no application binary, so it installed
+      # an app that did nothing — while CI reported success.
+      - name: Verify the app binary is real
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$(find target -type f -path '*bundle/macos/Movie Party.app/Contents/MacOS/movie-party' | head -n 1)"
+          if [ -z "$app" ]; then
+            echo "::error title=No app binary::the bundle has no Contents/MacOS/movie-party"
+            exit 1
+          fi
+          size=$(stat -f%z "$app")
+          echo "app binary: $app ($size bytes)"
+          if [ "$size" -lt 5000000 ]; then
+            echo "::error title=Companion host bundled::the bundled binary is $size bytes — that is the companion-host stub, not the application"
+            exit 1
+          fi
 
       - name: Locate the DMG
         id: bundle
