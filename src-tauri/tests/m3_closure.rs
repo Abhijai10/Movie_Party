@@ -124,6 +124,7 @@ async fn uncached_http_range_triggers_real_quic_fetch_and_serves() {
         chunk_wake: chunk_wake.clone(),
         demand: demand.clone(),
         wait_timeout_ms: 5_000,
+        connection_timeout_ms: 5_000,
     })
     .await
     .expect("range server");
@@ -227,6 +228,7 @@ async fn cache_write_contention_eventually_persists_chunk() {
         chunk_wake: chunk_wake.clone(),
         demand: demand.clone(),
         wait_timeout_ms: 5_000,
+        connection_timeout_ms: 5_000,
     })
     .await
     .expect("range server");

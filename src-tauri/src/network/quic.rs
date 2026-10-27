@@ -642,7 +642,6 @@ pub struct QuicServer {
     pub event_callback: Option<std::sync::Arc<dyn Fn(QuicHostEvent) + Send + Sync>>,
     pub local_media: Option<String>,
     event_tx: Option<std::sync::Arc<broadcast::Sender<EventEnvelope>>>,
-    next_event_seq: AtomicU64,
     shared_controls: Option<std::sync::Arc<AtomicBool>>,
     /// MP-16: the expiry (epoch ms) of the invite this host issued, if it
     /// issued one. `None` means "no invite to expire" — the loopback and
@@ -674,7 +673,6 @@ impl QuicServer {
             event_callback: None,
             local_media: None,
             event_tx: None,
-            next_event_seq: AtomicU64::new(1),
             shared_controls: None,
             invite_expires_at_ms: None,
             peers: AuthenticatedPeers::default(),
@@ -735,94 +733,6 @@ impl QuicServer {
     pub fn with_invite_expiry(mut self, expires_at_ms: i64) -> Self {
         self.invite_expires_at_ms = Some(expires_at_ms);
         self
-    }
-
-    /// Broadcast a [`ServerEvent`] to all subscribers. The event is wrapped in
-    /// an [`EventEnvelope`] carrying a strictly-increasing sequence number
-    /// (drawn from `next_event_seq`), the host's device id as `sender`, and the
-    /// typed broadcast helpers for the scheduling wire events
-    /// (§55–§57). Every one goes through `broadcast` so the envelope carries
-    /// the host's canonical seq — a guest can never see a stale/duplicate
-    /// ordering (§10).
-    pub fn broadcast_schedule_created(
-        &self,
-        schedule_id: String,
-        scheduled_start_utc_ms: i64,
-        media_id: String,
-        call_mode: String,
-        planned_preload_utc_ms: i64,
-    ) {
-        self.broadcast(ServerEvent::ScheduleCreate {
-            schedule_id,
-            scheduled_start_utc_ms,
-            media_id,
-            call_mode,
-            planned_preload_utc_ms,
-        });
-    }
-
-    pub fn broadcast_schedule_updated(
-        &self,
-        schedule_id: String,
-        media_id: String,
-        planned_preload_utc_ms: i64,
-        scheduled_start_utc_ms: i64,
-    ) {
-        self.broadcast(ServerEvent::ScheduleUpdate {
-            schedule_id,
-            media_id,
-            planned_preload_utc_ms,
-            scheduled_start_utc_ms,
-        });
-    }
-
-    pub fn broadcast_schedule_cancelled(&self, schedule_id: String) {
-        self.broadcast(ServerEvent::ScheduleCancel { schedule_id });
-    }
-
-    /// §57: preload progress. `progress` is clamped to 0.0..=1.0 on the wire
-    /// so a malformed peer reading can never imply >100 %.
-    pub fn broadcast_preload_state(
-        &self,
-        schedule_id: String,
-        state: String,
-        progress: f64,
-        estimated_ready_utc_ms: i64,
-    ) {
-        self.broadcast(ServerEvent::PreloadState {
-            schedule_id,
-            state,
-            progress: progress.clamp(0.0, 1.0),
-            estimated_ready_utc_ms,
-        });
-    }
-
-    /// current monotonic timestamp.
-    ///
-    /// Sequence numbers are assigned *here*, on the QuicServer, because there
-    /// is a single canonical source per host: this guarantees that the
-    /// dispatcher task and any AppRuntime-level callers share one ordering.
-    pub fn broadcast(&self, event: ServerEvent) {
-        if let Some(ref tx) = self.event_tx {
-            let seq = self.next_event_seq.fetch_add(1, Ordering::SeqCst);
-            let envelope = EventEnvelope {
-                v_major: ENVELOPE_V_MAJOR,
-                v_minor: ENVELOPE_V_MINOR,
-                room_id: self.credentials.room_id.clone(),
-                seq,
-                sender: self.host_device_id.clone(),
-                sent_mono_us: monotonic_us(),
-                event,
-            };
-            let _ = tx.send(envelope);
-        }
-    }
-
-    /// The host's canonical room id, for envelopes built outside
-    /// [`QuicServer::broadcast`] (e.g. the coordinator callback in
-    /// AppRuntime, which only holds the broadcast channel).
-    pub fn room_id(&self) -> &str {
-        &self.credentials.room_id
     }
 
     pub fn certificate(&self) -> &rustls::pki_types::CertificateDer<'static> {
@@ -1765,12 +1675,27 @@ async fn handle_connection(
             let mut rx = tx_for_events.subscribe();
             let session = session_for_events;
             loop {
-                let Ok(envelope) = rx.recv().await else { break };
-                if matches!(
-                    envelope.event,
-                    ServerEvent::ProviderSelection { .. } | ServerEvent::ProviderPlayback { .. }
-                ) && lock_session(&session).authenticated_device_id.is_none()
-                {
+                let envelope = match classify_event_poll(rx.recv().await) {
+                    EventPoll::Item(envelope) => envelope,
+                    // Falling behind is not the channel closing. Breaking here
+                    // used to end the guest's event stream for the rest of the
+                    // session — no commits, no chat — while heartbeats kept the
+                    // room looking connected in both directions.
+                    EventPoll::Lagged(skipped) => {
+                        tracing::warn!(
+                            skipped,
+                            "host event forwarder fell behind; continuing to deliver"
+                        );
+                        continue;
+                    }
+                    EventPoll::Closed => break,
+                };
+                // Nothing leaves this connection before `HelloAuth` has been
+                // accepted. A completed QUIC handshake proves the *host* to the
+                // guest; it proves nothing about the guest to the host, and the
+                // room's chat, playback commits, schedule metadata and call
+                // signals are not public to whoever can reach the port.
+                if lock_session(&session).authenticated_device_id.is_none() {
                     continue;
                 }
                 let Ok((mut send, _)) = connection_for_events.open_bi().await else {
@@ -1828,6 +1753,30 @@ async fn handle_connection(
             )
             .await;
         });
+    }
+}
+
+/// One step of a `broadcast` delivery loop.
+///
+/// `Lagged` means "you missed N messages; keep reading". Treating it as
+/// terminal — which both delivery loops used to do — silently ended an event
+/// stream that was still perfectly healthy: the QUIC connection stayed up, so
+/// the peer saw a connected room and simply never received another commit.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum EventPoll<T> {
+    Item(T),
+    /// `n` messages were dropped because this reader fell behind.
+    Lagged(u64),
+    Closed,
+}
+
+pub(crate) fn classify_event_poll<T>(
+    result: Result<T, broadcast::error::RecvError>,
+) -> EventPoll<T> {
+    match result {
+        Ok(item) => EventPoll::Item(item),
+        Err(broadcast::error::RecvError::Lagged(skipped)) => EventPoll::Lagged(skipped),
+        Err(broadcast::error::RecvError::Closed) => EventPoll::Closed,
     }
 }
 
@@ -2487,13 +2436,14 @@ async fn handle_request(
             chunk_index,
         } => match validate_authenticated_sequence(&session, &sender, seq) {
             Ok(()) => {
-                if let Some(ref media_path) = _local_media {
+                let index = u32::try_from(chunk_index).ok();
+                if let (Some(media_path), Some(index)) = (_local_media.as_ref(), index) {
                     let path = std::path::Path::new(media_path);
                     match read_chunk_from_file(path, chunk_index) {
                         Ok((hash, payload)) => {
                             let packet = crate::media::transfer::ChunkPacket {
                                 media_id: media_id.clone(),
-                                chunk_index: u32::try_from(chunk_index).unwrap_or(u32::MAX),
+                                chunk_index: index,
                                 hash,
                                 payload,
                             };
@@ -2859,14 +2809,30 @@ fn mono_start() -> std::time::Instant {
     *MONO_START.get_or_init(std::time::Instant::now)
 }
 
+/// Longest lead over "now" a peer-supplied deadline may claim.
+///
+/// A commit is "start at this moment": the host computes it as
+/// `now + play_lead_us()`, which is clamped to 3 s. A much larger value is a
+/// broken or hostile peer, and honouring it used to park the guest's delayed
+/// commit task forever — while `commit_scheduled_for` stayed set, which is
+/// itself the condition that makes provider rooms refuse every later commit.
+pub const MAX_HOST_DEADLINE_AHEAD_US: u64 = 30_000_000;
+
 /// Convert a HOST-monotonic microsecond deadline into this process's
 /// [`std::time::Instant`], applying the guest↔host clock offset.
 ///
 /// Hosts call with `offset_to_host_us = 0`. Guests pass their calibrated
 /// `offset_to_host_us` (host time = guest time + offset).
 pub fn instant_for_host_mono(host_mono_us: u64, offset_to_host_us: i64) -> std::time::Instant {
-    let guest_mono_us = (host_mono_us as i64).saturating_sub(offset_to_host_us);
-    mono_start() + std::time::Duration::from_micros(guest_mono_us.max(0) as u64)
+    // `as i64` wrapped any value above i64::MAX to a negative number, i.e. a
+    // nonsense deadline silently became "the past". Saturate instead, then
+    // clamp the result to a sane lead.
+    let host_mono_us = i64::try_from(host_mono_us).unwrap_or(i64::MAX);
+    let guest_mono_us = host_mono_us.saturating_sub(offset_to_host_us).max(0) as u64;
+    // A clock estimate that went badly wrong, or a peer that simply sent
+    // nonsense, must not be able to schedule a commit decades out.
+    let bounded_us = guest_mono_us.min(monotonic_us().saturating_add(MAX_HOST_DEADLINE_AHEAD_US));
+    mono_start() + std::time::Duration::from_micros(bounded_us)
 }
 
 /// M3: Read a single chunk from the host's local media file.
@@ -2881,7 +2847,11 @@ fn read_chunk_from_file(
 
     let mut file = std::fs::File::open(path)?;
     let file_size = file.metadata()?.len();
-    let offset = chunk_index * CHUNK_SIZE;
+    // `chunk_index` is peer-controlled and unbounded; a plain `*` overflowed
+    // (a panic in a debug build, a silently wrapped offset in release).
+    let offset = chunk_index.checked_mul(CHUNK_SIZE).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "chunk index out of range")
+    })?;
     if offset >= file_size {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -5008,6 +4978,176 @@ mod tests {
         assert_eq!(data.protocol.as_deref(), Some(&b"movieparty-v1"[..]));
 
         client.wait_idle().await;
+        server_task.abort();
+    }
+
+    /// A commit deadline arrives from the peer. It must not be able to schedule
+    /// work decades out: a parked commit task also leaves
+    /// `commit_scheduled_for` set, which is the condition that makes a provider
+    /// room refuse every later commit.
+    #[test]
+    fn a_peer_cannot_park_a_commit_beyond_the_deadline_ceiling() {
+        let now = monotonic_us();
+        let soon = super::instant_for_host_mono(now.saturating_add(500_000), 0);
+        let latest_allowed = std::time::Instant::now()
+            + std::time::Duration::from_micros(super::MAX_HOST_DEADLINE_AHEAD_US);
+
+        // Both a value that overflows i64 and one that would previously have
+        // wrapped to a negative (i.e. "the past") are clamped to the ceiling.
+        for absurd in [i64::MAX as u64, u64::MAX] {
+            let deadline = super::instant_for_host_mono(absurd, 0);
+            // Measured after the call, so the bound can only be more generous
+            // than the clamp the call applied.
+            let ceiling = std::time::Instant::now()
+                + std::time::Duration::from_micros(super::MAX_HOST_DEADLINE_AHEAD_US);
+            assert!(
+                deadline <= ceiling,
+                "a peer deadline was scheduled further than the ceiling"
+            );
+        }
+        assert!(soon <= latest_allowed, "an ordinary deadline is untouched");
+
+        // A deadline already in the past still fires immediately.
+        let past = super::instant_for_host_mono(0, 0);
+        assert!(past <= std::time::Instant::now());
+    }
+
+    /// `chunk_index` is peer-controlled and unbounded. Multiplying it by the
+    /// chunk size panicked in a debug build and wrapped silently in release.
+    #[test]
+    fn a_chunk_index_that_cannot_be_multiplied_is_an_error_not_a_panic() {
+        let path = std::env::temp_dir().join(format!("mp-chunk-{}.bin", std::process::id()));
+        std::fs::write(&path, b"0123456789abcdef").expect("fixture");
+        assert!(super::read_chunk_from_file(&path, 0).is_ok());
+        // 2^44 * 1 MiB is exactly 2^64: the first index that cannot be
+        // multiplied without overflowing.
+        assert!(super::read_chunk_from_file(&path, 1u64 << 44).is_err());
+        assert!(super::read_chunk_from_file(&path, u64::MAX).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A reader that falls behind must keep reading. Both delivery loops used
+    /// to treat `Lagged` as terminal, which silently ended an event stream whose
+    /// connection was still healthy.
+    #[test]
+    fn a_lagged_reader_is_told_to_keep_going_not_to_stop() {
+        assert_eq!(
+            super::classify_event_poll::<u8>(Err(
+                tokio::sync::broadcast::error::RecvError::Lagged(7)
+            )),
+            super::EventPoll::Lagged(7)
+        );
+        assert_eq!(
+            super::classify_event_poll::<u8>(Err(tokio::sync::broadcast::error::RecvError::Closed)),
+            super::EventPoll::Closed
+        );
+        assert_eq!(
+            super::classify_event_poll(Ok(3u8)),
+            super::EventPoll::Item(3)
+        );
+    }
+
+    /// The room's events are not public to anyone who can reach the port. A
+    /// completed QUIC handshake authenticates the *host* to the guest; the
+    /// reverse direction is `HelloAuth`, and until that succeeds no envelope
+    /// may leave the connection.
+    #[tokio::test]
+    async fn an_unauthenticated_peer_never_receives_room_events() {
+        let credentials = RoomCredentials::new_for_tests();
+        let (tx, _keepalive) = tokio::sync::broadcast::channel(16);
+        let server = QuicServer::bind(
+            loopback_bind_addr(),
+            credentials.clone(),
+            "Host".to_string(),
+            TEST_DEVICE_ID.to_string(),
+        )
+        .expect("server")
+        .with_event_broadcast(Arc::new(tx.clone()));
+        let addr = server.local_addr().expect("addr");
+        let fingerprint = server.certificate_fingerprint();
+        let server_task = tokio::spawn(server.run(None));
+
+        let endpoint = super::make_client_endpoint(fingerprint.clone()).expect("client endpoint");
+        let stranger = endpoint
+            .connect(addr, "localhost")
+            .expect("connect")
+            .await
+            .expect("handshake");
+
+        // Prove the server is really serving this connection before deciding
+        // that silence means "nothing was sent": an unauthenticated request is
+        // answered with an auth rejection, so the per-connection dispatcher —
+        // and therefore its event forwarder — is running.
+        let (mut send, mut recv) = stranger.open_bi().await.expect("open");
+        super::write_request(
+            &mut send,
+            &ClientRequest::ProviderSelectionGet {
+                seq: 1,
+                sender: TEST_GUEST_DEVICE_ID.to_string(),
+            },
+        )
+        .await
+        .expect("write");
+        send.finish().expect("finish");
+        match super::read_response(&mut recv).await.expect("response") {
+            ServerResponse::AuthReject { code } => assert_eq!(code, "AUTH_REQUIRED"),
+            other => panic!("expected an auth rejection, got {other:?}"),
+        }
+
+        for index in 0..4u64 {
+            let _ = tx.send(EventEnvelope {
+                v_major: crate::protocol::ENVELOPE_V_MAJOR,
+                v_minor: crate::protocol::ENVELOPE_V_MINOR,
+                room_id: credentials.room_id.clone(),
+                seq: index + 1,
+                sender: TEST_DEVICE_ID.to_string(),
+                sent_mono_us: monotonic_us(),
+                event: ServerEvent::BufferLow {
+                    position_ms: index * 1_000,
+                    buffer_ahead_ms: 0,
+                },
+            });
+        }
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(500), stranger.accept_bi())
+                .await
+                .is_err(),
+            "an unauthenticated peer received a room event"
+        );
+
+        // ... while a peer that authenticated receives the very next one.
+        let (guest, _) = QuicClient::connect(
+            addr,
+            fingerprint,
+            credentials.clone(),
+            test_identity(),
+            "Guest".to_string(),
+        )
+        .await
+        .expect("guest");
+        let _ = tx.send(EventEnvelope {
+            v_major: crate::protocol::ENVELOPE_V_MAJOR,
+            v_minor: crate::protocol::ENVELOPE_V_MINOR,
+            room_id: credentials.room_id.clone(),
+            seq: 99,
+            sender: TEST_DEVICE_ID.to_string(),
+            sent_mono_us: monotonic_us(),
+            event: ServerEvent::BufferLow {
+                position_ms: 9_000,
+                buffer_ahead_ms: 0,
+            },
+        });
+        let delivered = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            guest.listen_for_server_event(),
+        )
+        .await
+        .expect("an authenticated peer timed out")
+        .expect("event");
+        assert_eq!(delivered.seq, 99);
+
+        stranger.close(0u32.into(), b"done");
+        guest.wait_idle().await;
         server_task.abort();
     }
 }

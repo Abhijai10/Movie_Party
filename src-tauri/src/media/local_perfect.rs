@@ -191,7 +191,11 @@ pub async fn run_loopback_local_perfect_with_player<P: LocalPlayer>(
         cache.write_chunk(u64::from(packet.chunk_index), &packet.payload)?;
     }
     sync.begin_seek(target_seek_position_ms);
-    let _seek = sync.prepare_seek(target_seek_position_ms, 2_000)?;
+    let _seek = sync.prepare_seek(
+        target_seek_position_ms,
+        crate::network::quic::monotonic_us(),
+        2_000,
+    )?;
     sync.commit_seek(target_seek_position_ms, true);
     player.seek(target_seek_position_ms)?;
     player.play()?;

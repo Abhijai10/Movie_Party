@@ -37,6 +37,9 @@ struct MpvFns {
     mpv_render_context_create:
         unsafe extern "C" fn(*mut *mut c_void, MpvHandle, *const MpvRenderParam) -> c_int,
     mpv_render_context_render: unsafe extern "C" fn(*mut c_void, *const MpvRenderParam) -> c_int,
+    /// Optional: present since mpv 0.29. Without it the renderer always
+    /// renders, exactly as before this was introduced.
+    mpv_render_context_update: Option<unsafe extern "C" fn(*mut c_void) -> u64>,
     mpv_render_context_free: unsafe extern "C" fn(*mut c_void),
 }
 
@@ -275,6 +278,11 @@ impl MpvPlayer {
                     reason: format!("mpv_render_context_render symbol: {e}"),
                 })?
             },
+            mpv_render_context_update: unsafe {
+                lib.get::<unsafe extern "C" fn(*mut c_void) -> u64>(b"mpv_render_context_update\0")
+                    .ok()
+                    .map(|symbol| *symbol)
+            },
             mpv_render_context_free: unsafe {
                 *lib.get::<unsafe extern "C" fn(*mut c_void)>(b"mpv_render_context_free\0")
                     .map_err(|e| PlayerError::InitFailed {
@@ -288,9 +296,12 @@ impl MpvPlayer {
                 reason: "mpv_create returned null".to_string(),
             });
         }
-        unsafe {
-            for (name, value) in player_init_options() {
-                mpv_set_option(mpv, &fns, name, value)?;
+        // Every early return below destroys the handle it created. This loop
+        // used to `?` straight out of the function and leak it.
+        for (name, value) in player_init_options() {
+            if let Err(error) = unsafe { mpv_set_option(mpv, &fns, name, value) } {
+                unsafe { (fns.mpv_terminate_destroy)(mpv) };
+                return Err(error);
             }
         }
         let result = unsafe { (fns.mpv_initialize)(mpv) };
@@ -413,17 +424,26 @@ impl MpvPlayer {
         Ok(())
     }
 
+    /// Size the software render buffer from the *live* video parameters.
+    ///
+    /// This used to run only when the buffer was empty, so a resolution change
+    /// (or the first parameters arriving after a file open) left a buffer that
+    /// no longer matched `video-params`. Reading it every frame costs two
+    /// property lookups and keeps the buffer the same size the renderer is told
+    /// to write.
     fn ensure_render_buf(&mut self, handle: MpvHandle, fns: &MpvFns) {
         unsafe {
             let w = mpv_get_int64(handle, fns, "video-params/w").unwrap_or(self.render_w as i64);
             let h = mpv_get_int64(handle, fns, "video-params/h").unwrap_or(self.render_h as i64);
             let w = w.max(16) as usize;
             let h = h.max(16) as usize;
-            self.render_w = w;
-            self.render_h = h;
             let stride = (w * 4).div_ceil(64) * 64;
-            self.render_stride = stride;
-            self.render_buf.resize(stride * h, 0);
+            if w != self.render_w || h != self.render_h || stride * h != self.render_buf.len() {
+                self.render_w = w;
+                self.render_h = h;
+                self.render_stride = stride;
+                self.render_buf.resize(stride * h, 0);
+            }
         }
     }
 }
@@ -776,16 +796,24 @@ impl LocalPlayer for MpvPlayer {
             _ => return None,
         };
         let ctx = self.render_ctx?;
-        if self.render_buf.is_empty() {
-            self.ensure_render_buf(handle, &fns);
-        }
         // Pump events to keep the mpv core alive during playback. A short
         // timeout prevents blocking the player lock for too long.
         unsafe { (fns.mpv_wait_event)(handle, 0.01) };
+        self.ensure_render_buf(handle, &fns);
+        // Ask mpv whether there is anything new to draw before copying a frame.
+        // The render loop calls this ~33 times a second, and a paused or idle
+        // film has no new frame at all: without this check every tick allocated
+        // and copied a full RGBA buffer (8 MB at 1080p) for identical pixels.
+        if let Some(update) = fns.mpv_render_context_update {
+            // MPV_RENDER_UPDATE_FRAME = 1: "a new frame should be rendered".
+            if unsafe { update(ctx) } & 1 == 0 {
+                return None;
+            }
+        }
         let w = self.render_w;
         let h = self.render_h;
         let stride = self.render_stride;
-        if stride == 0 || w == 0 || h == 0 {
+        if stride == 0 || w == 0 || h == 0 || self.render_buf.is_empty() {
             return None;
         }
         let sw_fmt = CString::new("bgr0").unwrap();
@@ -819,13 +847,24 @@ impl LocalPlayer for MpvPlayer {
             },
         ];
         let rc = unsafe { (fns.mpv_render_context_render)(ctx, params.as_ptr()) };
-        if rc == 0 {
-            let surface = self.surface_handle.unwrap_or(0);
-            let data = self.render_buf.clone();
-            Some((surface, data, w, h, stride))
-        } else {
-            None
+        if rc != 0 {
+            return None;
         }
+        // SW_SIZE/SW_STRIDE are in/out: the renderer may only shrink them, and
+        // this code asks for exactly what the live `video-params` say the
+        // buffer holds. Verify that rather than trust it — a renderer that
+        // reported a larger surface than it was given would have written out of
+        // bounds, and the correct response is to discard the frame and resize
+        // instead of copying from an unknown region.
+        let (reported_w, reported_stride) = (sw_size[0].max(0) as usize, stride_val);
+        if reported_w > w || reported_stride > stride {
+            self.render_buf.clear();
+            self.render_stride = 0;
+            return None;
+        }
+        let surface = self.surface_handle.unwrap_or(0);
+        let data = self.render_buf.clone();
+        Some((surface, data, w, h, stride))
     }
 }
 

@@ -3037,8 +3037,23 @@ impl AppRuntime {
             let inner_for_listener = Arc::clone(&self.inner);
             let tx_for_listener = event_tx_arc.clone();
             let task = tokio::spawn(async move {
+                use crate::network::quic::{classify_event_poll, EventPoll};
                 let mut rx = tx_for_listener.subscribe();
-                while let Ok(envelope) = rx.recv().await {
+                loop {
+                    let envelope = match classify_event_poll(rx.recv().await) {
+                        EventPoll::Item(envelope) => envelope,
+                        // A lagged reader must keep reading: stopping here froze
+                        // the host's view of the room forever while the guest
+                        // still saw a live connection.
+                        EventPoll::Lagged(skipped) => {
+                            tracing::warn!(
+                                skipped,
+                                "host event listener fell behind; continuing to apply"
+                            );
+                            continue;
+                        }
+                        EventPoll::Closed => break,
+                    };
                     Self::apply_peer_event(&inner_for_listener, &envelope, envelope.event.clone());
                 }
             });
@@ -4920,31 +4935,15 @@ impl AppRuntime {
     // For guest-initiated operations under Shared Controls, see
     // guest_playback_request.
 
-    #[allow(dead_code)]
-    fn host_broadcast(state: &AppRuntimeState, event: QuicServerEvent) {
-        if let Some(tx) = state.host_event_tx.as_ref() {
-            // The QuicServer.broadcast assigns the canonical seq + sender.
-            // AppRuntime-level direct send bypasses the QuicServer's seq
-            // counter, so we go through QuicServer.broadcast by NOT using tx
-            // here. Instead use the helper below.
-            let _ = tx;
-        }
-        // We don't push directly: seq/sender must come from QuicServer's
-        // canonical counter. The runtime stores an Arc<broadcast::Sender>
-        // though, and QuicServer.broadcast also uses the *same* channel.
-        // Since seq is assigned at QuicServer.broadcast() time and we don't
-        // have a QuicServer handle here, we'll assign seq locally using the
-        // coordinator's last_peer_seq_received + next local counter.
-        //
-        // Actually, the simplest approach: send through the channel with a
-        // locally-computed envelope. The host's sender id is
-        // host_device_id / local_participant.id.
-        let _ = event;
-    }
-
     /// Build and fire `CoordinatorStateUpdate` for the current advisor state.
     /// Called from the coordinator callback (the fn pointer stored on
     /// `LocalSyncCoordinator::on_coordinator_state_changed`).
+    ///
+    /// This is the **only** producer of host event envelopes. Sequence numbers
+    /// come solely from `coordinator_event_seq`, because the guest rejects any
+    /// envelope whose `seq` does not advance; a second counter (which
+    /// `QuicServer::broadcast` used to offer) would silently drop legitimate
+    /// commits as stale.
     fn send_host_event(state: &mut AppRuntimeState, event: QuicServerEvent) {
         Self::begin_provider_operation(state, &event);
         let event = if event.is_playback() {
@@ -7384,6 +7383,8 @@ impl AppRuntime {
             chunk_wake: chunk_wake.clone(),
             demand: demand.clone(),
             wait_timeout_ms: 5_000,
+            connection_timeout_ms:
+                crate::media::stream::range_server::DEFAULT_CONNECTION_TIMEOUT_MS,
         };
         let range_handle = start_range_server(range_config)
             .await
@@ -7500,6 +7501,7 @@ impl AppRuntime {
             let chunk_wake_worker = chunk_wake.clone();
             let demand_worker = demand.clone();
             tokio::spawn(async move {
+                let mut write_failures: u32 = 0;
                 loop {
                     let Some(request) = demand_worker.pop_next() else {
                         demand_worker.notified().await;
@@ -7538,6 +7540,7 @@ impl AppRuntime {
                             };
                             match write_result {
                                 Ok(bytes_available) => {
+                                    write_failures = 0;
                                     {
                                         let mut state = inner.lock();
                                         let elapsed_ms =
@@ -7567,12 +7570,32 @@ impl AppRuntime {
                                             .request(request.index + 1, ChunkPriority::Background);
                                     }
                                 }
-                                Err(_) => {
-                                    // Write failed (disk/IO): requeue the
-                                    // chunk for a later retry rather than
-                                    // silently losing it.
+                                Err(error) => {
+                                    // Write failed (disk/IO). Requeue, but with a
+                                    // bounded, backed-off retry: requeueing at
+                                    // Critical with no delay turned a full disk
+                                    // into an endless loop that re-fetched a
+                                    // megabyte from the host per iteration.
+                                    write_failures = write_failures.saturating_add(1);
                                     demand_worker.finish_fetch(request.index);
+                                    let Some(delay) = write_retry_delay(write_failures) else {
+                                        let mut state = inner.lock();
+                                        let plan = recovery_plan(FailureEvent::TransferInterrupted);
+                                        apply_recovery_to_state(
+                                            &mut state,
+                                            FailureEvent::TransferInterrupted,
+                                            plan,
+                                        );
+                                        state.error = Some(format!(
+                                            "MP-MEDIA-002 could not store the movie on this device: {error}"
+                                        ));
+                                        let out = snapshot_from_state(&state);
+                                        drop(state);
+                                        inner.emit(out);
+                                        break;
+                                    };
                                     demand_worker.request(request.index, ChunkPriority::Critical);
+                                    tokio::time::sleep(delay).await;
                                     continue;
                                 }
                             }
@@ -8065,6 +8088,39 @@ fn should_notify_preload_wait(
                 .insert(schedule_id.to_string(), now);
             true
         }
+    }
+}
+
+/// How long to wait before retrying a sparse-cache write that just failed.
+///
+/// Returns `None` once the budget is spent. A persistent failure — full disk,
+/// read-only cache directory, quota — must end the transfer through the
+/// existing `TransferInterrupted` recovery instead of looping: the retry path
+/// re-fetches the chunk over QUIC, so an unbounded retry spends the host's
+/// bandwidth forever and never admits that the device cannot store the movie.
+fn write_retry_delay(consecutive_failures: u32) -> Option<std::time::Duration> {
+    const MAX_WRITE_RETRIES: u32 = 5;
+    if consecutive_failures > MAX_WRITE_RETRIES {
+        return None;
+    }
+    let step = u64::from(consecutive_failures.clamp(1, 4));
+    Some(std::time::Duration::from_millis(250 * step))
+}
+
+#[cfg(test)]
+mod write_retry_tests {
+    use super::write_retry_delay;
+    use std::time::Duration;
+
+    #[test]
+    fn write_retries_back_off_and_then_give_up() {
+        assert_eq!(write_retry_delay(1), Some(Duration::from_millis(250)));
+        assert_eq!(write_retry_delay(2), Some(Duration::from_millis(500)));
+        assert_eq!(write_retry_delay(4), Some(Duration::from_millis(1_000)));
+        assert_eq!(write_retry_delay(5), Some(Duration::from_millis(1_000)));
+        // The sixth consecutive failure stops the transfer instead of looping.
+        assert_eq!(write_retry_delay(6), None);
+        assert_eq!(write_retry_delay(u32::MAX), None);
     }
 }
 

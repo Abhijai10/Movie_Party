@@ -75,8 +75,13 @@ impl LocalSyncCoordinator {
             room_state: RoomState::Lobby,
             host_position_ms: 0,
             guest_position_ms: 0,
-            host_ready: ParticipantReadiness::ready(0),
-            guest_ready: ParticipantReadiness::ready(0),
+            // Nobody has opened any media yet. The old default was
+            // `ready(0)`, which claimed both participants were ready with an
+            // empty buffer — inert only as long as every caller passes a
+            // non-zero minimum, which is not something the type should depend
+            // on.
+            host_ready: ParticipantReadiness::not_ready("initial"),
+            guest_ready: ParticipantReadiness::not_ready("initial"),
             paused_by_strict_sync: false,
             guest_abandoned: false,
             pending_scheduled: None,
@@ -385,17 +390,24 @@ impl LocalSyncCoordinator {
         self.paused_by_strict_sync = !resume_after_seek;
     }
 
+    /// Prepare a seek under the same readiness rule as play.
+    ///
+    /// The readiness check comes first: moving the coordinator into `Seeking`
+    /// for a prepare that is then refused left the room claiming a seek that
+    /// never happened. The deadline also comes from the caller now — the old
+    /// fixed `0` produced `execute_at_host_mono_us = 750_000`, which is 0.75 s
+    /// after process start, i.e. an absolute deadline in the past.
     pub fn prepare_seek(
         &mut self,
         target_position_ms: u64,
+        now_host_mono_us: u64,
         minimum_buffer_ms: u64,
     ) -> Result<ScheduledPlayback, LocalSyncError> {
-        self.fire_coordinator_cb(RoomState::Seeking);
         if !self.all_ready(minimum_buffer_ms) {
             return Err(LocalSyncError::NotReady);
         }
-        self.fire_coordinator_cb(RoomState::ReadyCheck);
-        self.prepare_play(target_position_ms, 0, minimum_buffer_ms)
+        self.fire_coordinator_cb(RoomState::Seeking);
+        self.prepare_play(target_position_ms, now_host_mono_us, minimum_buffer_ms)
     }
 }
 
@@ -430,9 +442,44 @@ mod tests {
     fn play_requires_ready_consensus() {
         let mut coordinator = LocalSyncCoordinator::new();
         coordinator.host_ready(ParticipantReadiness::ready(5_000));
-        // guest left as NotReady default -> all_ready is false
+        // Guest left as the initial NotReady default -> all_ready is false,
+        // because nobody has opened media, not merely because the buffer is 0.
 
         assert!(coordinator.prepare_play(0, 0, 5_000).is_err());
+        assert!(!coordinator.guest_ready.player_ready);
+    }
+
+    #[test]
+    fn a_refused_seek_prepare_does_not_move_the_room() {
+        let mut coordinator = LocalSyncCoordinator::new();
+        coordinator.room_state = RoomState::Playing;
+        coordinator.host_ready(ParticipantReadiness::ready(5_000));
+
+        assert!(coordinator.prepare_seek(1_000, 0, 5_000).is_err());
+        assert_eq!(
+            coordinator.room_state,
+            RoomState::Playing,
+            "a refused prepare must not claim a seek is under way"
+        );
+        assert!(coordinator.pending_scheduled.is_none());
+    }
+
+    #[test]
+    fn a_ready_seek_prepare_uses_the_supplied_clock() {
+        let mut coordinator = LocalSyncCoordinator::new();
+        coordinator.room_state = RoomState::Playing;
+        coordinator.host_ready(ParticipantReadiness::ready(5_000));
+        coordinator.guest_ready(ParticipantReadiness::ready(5_000));
+
+        let scheduled = coordinator
+            .prepare_seek(8_000, 42_000_000, 5_000)
+            .expect("scheduled");
+        assert_eq!(scheduled.target_position_ms, 8_000);
+        assert_eq!(
+            scheduled.execute_at_host_mono_us,
+            42_000_000 + 750_000,
+            "the deadline must be derived from the caller's clock, not 0"
+        );
     }
 
     #[test]

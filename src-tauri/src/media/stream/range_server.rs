@@ -26,6 +26,23 @@ use crate::media::transfer::{ChunkDemandHandle, ChunkPriority};
 /// that into unbounded blocking tasks.
 pub const MAX_RANGE_CONNECTIONS: usize = 8;
 
+/// Hard ceiling on one response body.
+///
+/// The cache can serve any byte range the client asks for, and a player that
+/// asks for the whole film (`bytes=0-`, or no `Range` header at all) used to get
+/// it as a single `Vec<u8>` — the entire movie in memory, then a second copy on
+/// the socket. Every response is therefore truncated to this many bytes and
+/// carries a truthful `Content-Range` so a range-capable client simply asks for
+/// the next window.
+pub const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// How long one loopback connection may sit without a complete request.
+///
+/// Without this a client that connects and says nothing holds one of the
+/// `MAX_RANGE_CONNECTIONS` permits — and one blocking thread — for as long as it
+/// likes; after eight of them the accept loop parks and playback stalls.
+pub const DEFAULT_CONNECTION_TIMEOUT_MS: u64 = 5_000;
+
 /// Bounded condition variable shared between the transfer worker (writer) and
 /// waiting HTTP range requests (readers). The worker bumps a generation
 /// counter and notifies all waiters after persisting a chunk; waiters wake,
@@ -105,6 +122,8 @@ pub struct RangeServerConfig {
     pub demand: ChunkDemandHandle,
     /// Bounded wait for demanded chunks before serving what is available.
     pub wait_timeout_ms: u64,
+    /// Read/write deadline for a single loopback connection.
+    pub connection_timeout_ms: u64,
 }
 
 pub struct RangeServerHandle {
@@ -146,6 +165,7 @@ pub async fn start_range_server(
     let demand = config.demand;
     let chunk_wake = config.chunk_wake;
     let wait_timeout_ms = config.wait_timeout_ms;
+    let connection_timeout_ms = config.connection_timeout_ms;
     let chunk_wake_for_task = chunk_wake.clone();
     let connection_limit = Arc::new(tokio::sync::Semaphore::new(MAX_RANGE_CONNECTIONS));
     let media_url = format!(
@@ -177,6 +197,10 @@ pub async fn start_range_server(
                                 let _permit = permit;
                                 if let Ok(std_stream) = tokio_stream.into_std() {
                                     let _ = std_stream.set_nonblocking(false);
+                                    let timeout =
+                                        Some(std::time::Duration::from_millis(connection_timeout_ms));
+                                    let _ = std_stream.set_read_timeout(timeout);
+                                    let _ = std_stream.set_write_timeout(timeout);
                                     handle_connection(std_stream, peer_addr, &manifest, &cache, &token, &demand, &chunk_wake, wait_timeout_ms);
                                 }
                             });
@@ -264,11 +288,15 @@ fn handle_connection(
     match headers.get("range").cloned() {
         Some(range_value) => match parse_http_range(&range_value, manifest.file_size) {
             Ok(range_request) => {
+                // Bound the response, not the request: `bytes=0-` is a legal
+                // way to ask for the whole film and a player that sends it
+                // (mpv does) must not get the film allocated in one buffer.
+                let len = range_request.len().min(MAX_RESPONSE_BYTES);
                 let serve = wait_for_range(
                     cache,
                     manifest,
                     range_request.start,
-                    range_request.len(),
+                    len,
                     demand,
                     chunk_wake,
                     wait_timeout_ms,
@@ -277,17 +305,7 @@ fn handle_connection(
                     RangeServe::Available(bytes) | RangeServe::Partial(bytes) => {
                         // Never computed on an empty body: an empty result is
                         // served as a retriable 503, not a bogus 206.
-                        let end = range_request.start + bytes.len() as u64 - 1;
-                        let content_range = format!(
-                            "bytes {}-{}/{}",
-                            range_request.start, end, manifest.file_size
-                        );
-                        let response = format!(
-                            "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nContent-Range: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
-                            bytes.len(), content_range
-                        );
-                        let _ = stream.write_all(response.as_bytes());
-                        let _ = stream.write_all(&bytes);
+                        write_partial(&mut stream, range_request.start, &bytes, manifest.file_size);
                     }
                     RangeServe::Unavailable => {
                         // Requested bytes could not be produced within the
@@ -307,29 +325,52 @@ fn handle_connection(
             // A full-file GET without Range header must only serve 200 OK
             // when the complete file is available.  Serving a partial file
             // as 200 would fabricate a shorter-than-real EOF, causing the
-            // player to see a truncated movie.
-            let serve = wait_for_range(
-                cache,
-                manifest,
-                0,
-                manifest.file_size,
-                demand,
-                chunk_wake,
-                wait_timeout_ms,
-            );
-            if let RangeServe::Available(bytes) = serve {
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
-                    bytes.len()
-                );
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.write_all(&bytes);
-            } else {
-                let response = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                let _ = stream.write_all(response.as_bytes());
+            // player to see a truncated movie — and serving the complete file
+            // of any size would put it in memory twice. A film larger than one
+            // response is therefore answered with a truthful 206 the client
+            // continues from.
+            let whole_file_fits = manifest.file_size <= MAX_RESPONSE_BYTES;
+            let len = manifest.file_size.min(MAX_RESPONSE_BYTES);
+            let serve =
+                wait_for_range(cache, manifest, 0, len, demand, chunk_wake, wait_timeout_ms);
+            match serve {
+                RangeServe::Available(bytes) if whole_file_fits => {
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        bytes.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.write_all(&bytes);
+                }
+                RangeServe::Available(bytes) | RangeServe::Partial(bytes) if !bytes.is_empty() => {
+                    write_partial(&mut stream, 0, &bytes, manifest.file_size);
+                }
+                _ => {
+                    let response = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(response.as_bytes());
+                }
             }
         }
     }
+}
+
+/// One 206 whose `Content-Range` describes exactly the bytes actually sent.
+fn write_partial(stream: &mut std::net::TcpStream, start: u64, bytes: &[u8], file_size: u64) {
+    if bytes.is_empty() {
+        let _ = stream.write_all(
+            b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        return;
+    }
+    let end = start + bytes.len() as u64 - 1;
+    let content_range = format!("bytes {}-{}/{}", start, end, file_size);
+    let response = format!(
+        "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nContent-Range: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+        bytes.len(),
+        content_range
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.write_all(bytes);
 }
 
 fn parse_path_and_token(path: &str) -> (String, Option<String>) {
@@ -521,6 +562,7 @@ mod tests {
             chunk_wake: Arc::new(ChunkWake::new()),
             demand: ChunkDemandHandle::new(),
             wait_timeout_ms: 500,
+            connection_timeout_ms: DEFAULT_CONNECTION_TIMEOUT_MS,
         }
     }
 
@@ -751,6 +793,7 @@ mod tests {
         let cache = Arc::new(Mutex::new(
             SparseCache::open(&root, m.clone()).expect("cache"),
         ));
+        let cache_for_prefix = cache.clone();
         let mut config = make_config(m, cache, "tok");
         config.wait_timeout_ms = 150;
         let h = start_range_server(config).await.expect("server");
@@ -767,6 +810,27 @@ mod tests {
             !r.contains("200 OK"),
             "partial file must not be served as a complete 200"
         );
+
+        // With a contiguous prefix on disk the same request is answered with a
+        // truthful 206 naming exactly the bytes sent — never a 200 claiming the
+        // file ended early, and never the whole file in memory.
+        {
+            let cache = cache_for_prefix.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut cache = cache.blocking_lock();
+                cache.write_chunk(0, b"abcd").expect("write");
+            })
+            .await
+            .expect("write task");
+        }
+        let (head, body) = http_get_raw(h.addr, "/media/range-test?token=tok", None);
+        assert!(
+            head.contains("206 Partial Content"),
+            "a partial prefix must be a truthful 206: {head}"
+        );
+        assert!(head.contains("Content-Range: bytes 0-3/16"), "{head}");
+        assert_eq!(body, b"abcd");
+
         h.shutdown();
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -866,6 +930,147 @@ mod tests {
             elapsed < std::time::Duration::from_millis(1_500),
             "wake must be a real notification, not a long timeout ({elapsed:?})"
         );
+        h.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Split one raw HTTP response into (head, body) so a body of arbitrary
+    /// bytes can be measured instead of being coerced to text.
+    fn http_get_raw(addr: SocketAddr, path: &str, range: Option<&str>) -> (String, Vec<u8>) {
+        let mut s = blocking_connect(addr);
+        let mut request =
+            format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n");
+        if let Some(range) = range {
+            request.push_str(&format!("Range: {range}\r\n"));
+        }
+        request.push_str("\r\n");
+        s.write_all(request.as_bytes()).expect("write");
+        let mut response = Vec::new();
+        s.read_to_end(&mut response).expect("read");
+        let split = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("a header terminator");
+        (
+            String::from_utf8_lossy(&response[..split]).into_owned(),
+            response[split + 4..].to_vec(),
+        )
+    }
+
+    fn big_manifest(file_size: u64) -> MediaManifest {
+        let chunk_size = crate::media::manifest::DEFAULT_CHUNK_SIZE_BYTES;
+        MediaManifest {
+            media_id: "big-test".to_string(),
+            filename: "big.bin".to_string(),
+            file_size,
+            container: None,
+            full_hash: "hash".to_string(),
+            quick_fingerprint: QuickFingerprint {
+                file_size,
+                first_hash: "first".to_string(),
+                last_hash: "last".to_string(),
+            },
+            chunk_size,
+            chunk_count: file_size.div_ceil(chunk_size),
+        }
+    }
+
+    /// `bytes=0-` is how mpv asks for a film. It must produce a bounded
+    /// response with a truthful `Content-Range`, not the whole film in one
+    /// `Vec` — which is what used to happen once the cache was complete.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_request_for_the_whole_file_is_bounded_not_buffered() {
+        let root = std::env::temp_dir().join(Uuid::now_v7().to_string());
+        std::fs::create_dir_all(&root).expect("temp");
+        let file_size = MAX_RESPONSE_BYTES + crate::media::manifest::DEFAULT_CHUNK_SIZE_BYTES;
+        let manifest = big_manifest(file_size);
+        let mut cache = SparseCache::open(&root, manifest.clone()).expect("cache");
+        for index in 0..manifest.chunk_count {
+            let len = crate::media::cache::chunk_len(&manifest, index) as usize;
+            cache
+                .write_chunk(index, &vec![0x5a; len])
+                .expect("write chunk");
+        }
+        let cache = Arc::new(Mutex::new(cache));
+        let h = start_range_server(make_config(manifest.clone(), cache, "tok"))
+            .await
+            .expect("server");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let (head, body) = http_get_raw(h.addr, "/media/big-test?token=tok", Some("bytes=0-"));
+        assert!(head.contains("206 Partial Content"), "{head}");
+        assert!(
+            head.contains(&format!(
+                "Content-Range: bytes 0-{}/{}",
+                MAX_RESPONSE_BYTES - 1,
+                file_size
+            )),
+            "{head}"
+        );
+        assert_eq!(
+            body.len() as u64,
+            MAX_RESPONSE_BYTES,
+            "a whole-file request must be bounded by MAX_RESPONSE_BYTES"
+        );
+
+        // The client continues from exactly where the first window stopped.
+        let last = file_size - 1;
+        let (head, body) = http_get_raw(
+            h.addr,
+            "/media/big-test?token=tok",
+            Some(&format!("bytes={last}-{last}")),
+        );
+        assert!(head.contains("206 Partial Content"), "{head}");
+        assert_eq!(body.len(), 1, "the tail of the file is still reachable");
+
+        // A GET with no Range header at all is bounded the same way; serving a
+        // truncated body as 200 would look like a shorter film.
+        let (head, body) = http_get_raw(h.addr, "/media/big-test?token=tok", None);
+        assert!(
+            head.contains("206 Partial Content"),
+            "a large file must not be answered with a truncated 200: {head}"
+        );
+        assert_eq!(body.len() as u64, MAX_RESPONSE_BYTES);
+
+        h.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A client that connects and says nothing must not hold a permit (and a
+    /// blocking thread) forever: enough of them used to park the accept loop and
+    /// stop playback.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stalled_clients_cannot_exhaust_the_connection_pool() {
+        let root = std::env::temp_dir().join(Uuid::now_v7().to_string());
+        std::fs::create_dir_all(&root).expect("temp");
+        let m = test_manifest();
+        let mut cache = SparseCache::open(&root, m.clone()).expect("cache");
+        for index in 0..m.chunk_count {
+            cache.write_chunk(index, b"abcd").expect("write");
+        }
+        let cache = Arc::new(Mutex::new(cache));
+        let mut config = make_config(m, cache, "tok");
+        config.connection_timeout_ms = 150;
+        config.wait_timeout_ms = 2_000;
+        let h = start_range_server(config).await.expect("server");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut silent = Vec::new();
+        for _ in 0..=MAX_RANGE_CONNECTIONS {
+            if let Ok(stream) = std::net::TcpStream::connect(h.addr) {
+                silent.push(stream);
+            }
+        }
+        // Well past the connection deadline, so every stalled permit is back.
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+        let response = http_get_range(h.addr, "/media/range-test?token=tok", "bytes=0-3");
+        assert!(
+            response.contains("206 Partial Content"),
+            "a stalled client kept the pool: {response}"
+        );
+
+        drop(silent);
         h.shutdown();
         let _ = std::fs::remove_dir_all(&root);
     }
