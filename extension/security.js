@@ -57,11 +57,12 @@ function base64UrlNoPad(bytes) {
 }
 
 /**
- * Token for one message, bound to its sequence and kind. Derived with WebCrypto
- * HMAC-SHA256, which is the same construction the app verifies against the
- * published RFC 4231 vectors.
+ * Token for one message, bound to its sequence, kind **and payload**. Derived
+ * with WebCrypto HMAC-SHA256, which is the same construction the app verifies
+ * against the published RFC 4231 vectors. `payload` is the canonical form from
+ * `protocol.js`; leaving it out signs an empty payload, which only the tests do.
  */
-export async function deriveToken(secret, sequence, kind) {
+export async function deriveToken(secret, sequence, kind, payload = "") {
   const key = await crypto.subtle.importKey(
     "raw",
     secret.slice(0, 32),
@@ -72,7 +73,7 @@ export async function deriveToken(secret, sequence, kind) {
   const signature = await crypto.subtle.sign(
     "HMAC",
     key,
-    new TextEncoder().encode(`${String(sequence)}:${String(kind)}`),
+    new TextEncoder().encode(`${String(sequence)}:${String(kind)}:${String(payload)}`),
   );
   return base64UrlNoPad(new Uint8Array(signature));
 }

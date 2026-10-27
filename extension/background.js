@@ -8,25 +8,49 @@ import {
   HOST_NAME,
   PROTOCOL_VERSION,
   buildMessage,
+  canonicalPayload,
   guidanceFor,
   parseResponse,
 } from "./protocol.js";
 import { canSend, initialState, nextSequence, reduce, Phase } from "./state.js";
-import { deriveToken, isProviderUrl } from "./security.js";
+import { decodeSecret, deriveToken, isProviderUrl } from "./security.js";
 
 let session = initialState();
 let secret = null;
 
+/**
+ * The app sends the session key as unpadded base64url (`URL_SAFE_NO_PAD`).
+ * `atob()` accepts only the standard alphabet, so every `-` or `_` makes it
+ * throw — roughly three keys in four. `decodeSecret` is the one decoder that
+ * understands both, and it is the only thing allowed to touch a stored key.
+ */
 async function loadPairedSecret() {
   const stored = await chrome.storage.local.get([
     "companionSecret",
     "companionProtocol",
     "companionCapabilities",
+    "companionSequence",
   ]);
-  if (typeof stored.companionSecret !== "string" || stored.companionProtocol !== PROTOCOL_VERSION) {
-    return null;
+  if (stored.companionProtocol !== PROTOCOL_VERSION) return null;
+  const bytes = decodeSecret(stored.companionSecret);
+  if (bytes === null) return null;
+  const storedSequence = stored.companionSequence;
+  return {
+    secret: bytes,
+    capabilities: Array.isArray(stored.companionCapabilities) ? stored.companionCapabilities : [],
+    // Sequences must only move forward across a service-worker restart, so the
+    // last one used is persisted next to the key. 0 means "start at 1".
+    sequence:
+      Number.isSafeInteger(storedSequence) && storedSequence > 0 ? storedSequence : 0,
+  };
+}
+
+async function persistSequence(sequence) {
+  try {
+    await chrome.storage.local.set({ companionSequence: sequence });
+  } catch {
+    // Losing the stored counter costs a re-pair, never a sent command.
   }
-  return { secret: stored.companionSecret, capabilities: stored.companionCapabilities ?? [] };
 }
 
 /** One message to Movie Party, through the bridge. Failures become states. */
@@ -39,9 +63,15 @@ async function send(kind, fields = {}) {
     return { ok: false, error: "CapabilityDisabled", guidance: guidanceFor("CapabilityDisabled") };
   }
   const sequence = nextSequence(session);
-  const token = await deriveToken(secret, sequence, kind);
+  // Bind the sequence, the kind and the payload into one MAC: a frame whose
+  // URL, title or position was rewritten after signing is refused, even though
+  // the sequence and kind still match.
+  const token = await deriveToken(secret, sequence, kind, canonicalPayload(fields));
   const message = buildMessage({ kind, sequence, token, ...fields });
   session = { ...session, sequence };
+  // Persist before sending: if the worker dies mid-command, resuming must skip
+  // the spent sequence rather than replay it and be refused as stale.
+  await persistSequence(sequence);
   let reply;
   try {
     reply = await chrome.runtime.sendNativeMessage(HOST_NAME, message);
@@ -80,7 +110,12 @@ async function activateTab(tabId, url) {
 async function disconnect() {
   session = reduce(session, { type: "DISCONNECT" });
   secret = null;
-  await chrome.storage.local.remove(["companionSecret", "companionProtocol"]);
+  await chrome.storage.local.remove([
+    "companionSecret",
+    "companionProtocol",
+    "companionCapabilities",
+    "companionSequence",
+  ]);
   return { ok: true };
 }
 
@@ -135,10 +170,16 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       case "BEGIN": {
         const stored = await loadPairedSecret();
         if (stored) {
-          secret = Uint8Array.from(atob(stored.secret), (character) => character.charCodeAt(0));
+          secret = stored.secret;
+          // A service worker can be suspended at any time; resuming must
+          // continue the sequence Movie Party last saw, never restart at 1.
           session = reduce(
             { ...initialState(), phase: Phase.NeedsPairing },
-            { type: "PAIRED", capabilities: stored.capabilities },
+            {
+              type: "PAIRED",
+              capabilities: stored.capabilities,
+              startSequence: stored.sequence,
+            },
           );
           return { ok: true, phase: session.phase, capabilities: [...session.available] };
         }
@@ -170,18 +211,20 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
           };
         }
         const parsed = parseResponse(reply);
-        if (!parsed?.ok || typeof parsed.secret !== "string") {
+        const secretBytes = parsed?.ok ? decodeSecret(parsed.secret) : null;
+        if (!parsed?.ok || secretBytes === null) {
           session = reduce(session, { type: "PAIRING_REJECTED" });
           return { ok: false, error: "PairingFailed", guidance: guidanceFor("PairingFailed") };
         }
         // The app answers with the operations this provider really supports.
         // Storing them means a reconnect cannot quietly gain a capability.
         const capabilities = Array.isArray(parsed.capabilities) ? parsed.capabilities : [];
-        secret = Uint8Array.from(atob(parsed.secret), (character) => character.charCodeAt(0));
+        secret = secretBytes;
         await chrome.storage.local.set({
           companionSecret: parsed.secret,
           companionProtocol: PROTOCOL_VERSION,
           companionCapabilities: capabilities,
+          companionSequence: sequence,
         });
         session = reduce(session, { type: "PAIRED", startSequence: sequence, capabilities });
         return { ok: true, phase: session.phase, capabilities };
@@ -227,7 +270,12 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
         return { ok: false, error: "MalformedFrame", guidance: guidanceFor("MalformedFrame") };
     }
   };
-  handle().then(respond);
+  // A rejected handler used to close the port with no reply at all, which the
+  // popup can only report as a dead connection. Every failure now gets an
+  // answer the popup can show.
+  handle().then(respond, () =>
+    respond({ ok: false, error: "MalformedFrame", guidance: guidanceFor("MalformedFrame") }),
+  );
   return true;
 });
 

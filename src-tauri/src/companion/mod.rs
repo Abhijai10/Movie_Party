@@ -10,7 +10,14 @@
 //!   through CDP. Attaching a debugger to the user's default profile would hand
 //!   Movie Party every other site they have open, so it is refused by design.
 //! - The extension proves it is paired before any content command is accepted.
-//!   The pairing secret lives in OS-protected storage, alongside the device key.
+//!   The session key is returned once, in the handshake reply, to the extension
+//!   that presented the pairing code; it is kept in `chrome.storage.local` for
+//!   the life of the pairing and lives in Movie Party's memory for the session.
+//!   It is deliberately **not** described as secret-from-the-browser: the
+//!   extension has to sign with it, and the native bridge relays the reply, so
+//!   both can see it. What the protocol cannot ask for is anything else — no
+//!   cookies, credentials, headers or history, and nothing from a tab outside
+//!   the provider allowlist.
 //! - Every operation names the capability it needs, so a capability the browser,
 //!   the provider or policy does not allow is switched off and explained rather
 //!   than silently degraded.
@@ -26,14 +33,20 @@ use sha2::{Digest, Sha256};
 pub mod host;
 
 /// One protocol revision. A host and an extension that disagree must fail closed.
-pub const PROTOCOL_VERSION: u8 = 1;
+///
+/// 2: the message MAC covers the payload as well as `sequence:kind`. A v1
+/// extension signs a different challenge, so this bump is what turns "every
+/// command mysteriously NotPaired" into an explicit version mismatch.
+pub const PROTOCOL_VERSION: u8 = 2;
 /// A native message is JSON bounded by Chrome at 1 MB; Movie Party is far
 /// tighter because every legitimate message is small.
 pub const MAX_FRAME_BYTES: usize = 32 * 1024;
 /// A pairing code is short and human-typed, so attempts are capped and the
 /// secret is rotated rather than allowed to brute-force.
 pub const MAX_PAIRING_ATTEMPTS: u8 = 5;
-/// OS-protected storage label for the companion shared secret.
+/// Label kept for the keychain path the app *would* use if the companion key
+/// were ever persisted. Today the key lives in `AppRuntimeState::companion` for
+/// the session only, so nothing writes this item.
 pub const SECRET_LABEL: &str = "movie-party-companion-secret";
 
 /// The providers a companion may report on. This deliberately delegates to
@@ -183,8 +196,17 @@ pub fn allowed_origin(extension_id: &str) -> Result<String, CompanionErrorCode> 
     Ok(format!("chrome-extension://{extension_id}/"))
 }
 
-/// A pairing code is what the human types; the secret is what it derives from.
-/// The code never leaves the app and the browser never sees the raw secret.
+/// A pairing code is what the human types; the session key is what every later
+/// message is signed with.
+///
+/// They are independent random values. The eight-character code proves a person
+/// started the pairing; the 32-byte key is handed to the extension once the code
+/// matches, because the extension is the side that signs later commands. That
+/// means the key is not hidden from the browser or from the bridge process — the
+/// claim this type supports is narrower and true: the key only ever reaches an
+/// extension that knew the code, and it is useless without a provider tab the
+/// allowlist accepts. `chrome.storage.local` holds it between service-worker
+/// restarts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pairing {
     pub code: String,

@@ -79,10 +79,21 @@ Companion. Open the extension's popup, paste or type that code, and choose
 **Pair with Movie Party**.
 
 The code is short-lived and stops working after five attempts; **New pairing code**
-issues another. On success Movie Party returns a session key over the channel the
-browser already pinned to your extension ID. Every later message is signed with it,
-bound to its sequence number and to the operation it performs, so a captured message
-cannot be replayed or pointed at a different action.
+issues another. On success Movie Party returns a session key over the loopback
+channel the browser already pinned to your extension ID.
+
+Every later message is signed with that key, bound to its **sequence number, its
+operation, and its payload** — so a captured message cannot be replayed, pointed at
+a different action, or have its URL, title or playback position rewritten in
+transit. The key is held by the extension (`chrome.storage.local`) and by Movie
+Party for the session; it is not a secret the app can keep from the browser,
+because the browser is the side that signs. What the protocol has no way to ask for
+is anything else.
+
+The extension and the app must speak the same **protocol version** (currently 2).
+If you update one, reload/reinstall the other; a mismatch is reported as
+`VersionMismatch` with words, not as silent failures. Updating also requires pairing
+again — the app drops the old session key when it starts with the new version.
 
 ## 5. Use it
 
@@ -115,8 +126,8 @@ browser; `BLOCKED` names what has to exist before the row can be answered.
 
 | # | Check | Chrome macOS | Chrome Windows | Edge macOS | Edge Windows |
 |---|---|---|---|---|---|
-| C1 | Load unpacked, host installed, pairing succeeds | BLOCKED — needs the packaged app plus a loaded unpacked extension (never attempted end-to-end) | — | — | — |
-| C2 | A provider tab is recognised and reported | AUTOMATED (`a_reported_provider_tab_becomes_a_real_selection`) — not yet driven from a real extension page | — | — | — |
+| C1 | Load unpacked, host installed, pairing succeeds | PARTIAL — the worker itself is driven end-to-end with a chrome stub (`extension/background.test.js`: pairing with a base64url key, payload-bound token, sequence resume, refusal handling); a real unpacked extension + packaged app has never been run | — | — | — |
+| C2 | A provider tab is recognised and reported | AUTOMATED (`a_reported_provider_tab_becomes_a_real_selection`, `a_playback_report_updates_the_selected_tab_without_naming_a_url`) — not yet driven from a real extension page | — | — | — |
 | C3 | A non-provider tab is refused and nothing is sent | PASS, AUTOMATED (`off_allowlist_tabs_and_unsupported_providers_are_refused_nothing_stored`, `content_reports_are_limited_to_supported_provider_hosts`) | — | — | — |
 | C4 | Play/pause/seek stay switched off with their reason | PASS, AUTOMATED (`a_capability_the_user_never_granted_stays_switched_off`, `capabilities_that_were_never_observed_stay_switched_off`) | — | — | — |
 | C5 | Extension absent → `ExtensionMissing` wording, not a hang | PARTIAL — the code and its guidance exist and are unit-tested; the in-app wording path (`companionState.test.ts`) has not been seen with the extension genuinely missing | — | — | — |
@@ -134,4 +145,5 @@ browser; `BLOCKED` names what has to exist before the row can be answered.
 |---|---|---|
 | 2026-10-26 | `MOVIE_PARTY_ALLOW_VISIBLE_CHROME=1 cargo test --lib providers::chrome -- --include-ignored` | Real Chrome launched and driven over CDP on a managed profile: launch/evaluate, active-tab following, closed-target detection, profile persistence across close/relaunch, launch-timeout tree reaping. 40/40 after the YouTube player-wait fix. |
 | 2026-10-26 | Companion unit + loopback integration suites (`companion::*`, `app_runtime::companion::*`) | All green; the loopback handshake test opens a real TCP listener and refuses off-origin/off-allowlist frames. |
+| 2026-10-28 | Protocol v2: payload-bound MAC, sequence persistence across worker restarts, `reportPlayback` without a URL, attempt counter saturation. `extension/background.test.js` drives the real service worker with a chrome stub; Rust companions tests re-sign what they send. | Green. A real unpacked extension in a real browser profile is still not part of any run (C1). |
 | — | Anything requiring the extension UI in a real browser profile | Not performed. C1, C6, C10, C12 stay blocked. |

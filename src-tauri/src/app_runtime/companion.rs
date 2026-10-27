@@ -273,7 +273,7 @@ impl AppRuntime {
         if kind == "handshake" {
             return self.companion_handshake(&request);
         }
-        self.companion_command(&request, &kind)
+        self.companion_command(&request, &kind, bytes.len())
     }
 
     fn companion_handshake(&self, request: &CompanionRequest) -> Vec<u8> {
@@ -282,7 +282,10 @@ impl AppRuntime {
             if !state.companion.listening {
                 return refuse("handshake", CompanionErrorCode::ExtensionMissing);
             }
-            state.companion.attempts += 1;
+            // Saturating on purpose: a local process can send this frame as
+            // often as it likes, and a plain `+= 1` on a u8 panics after 255 in
+            // a debug build — inside the only thread serving the companion.
+            state.companion.attempts = state.companion.attempts.saturating_add(1);
             if state.companion.attempts > companion::MAX_PAIRING_ATTEMPTS {
                 state.companion.last_error = Some(CompanionErrorCode::PairingFailed);
                 state.companion.pairing = None;
@@ -302,6 +305,11 @@ impl AppRuntime {
         state.companion.sequence = Some(request.sequence);
         state.companion.attempts = 0;
         state.companion.browser = Some("browser".into());
+        // The key is returned here by design, not by accident: the extension is
+        // the side that signs every later command, so it has to hold the key.
+        // `chrome.storage.local` keeps it across service-worker restarts, and
+        // the native bridge relays this frame on the way. See the trust-model
+        // note in `crate::companion`.
         let reply = serde_json::json!({
             "kind": "handshake",
             "ok": true,
@@ -316,17 +324,13 @@ impl AppRuntime {
             .unwrap_or_else(|_| refuse("handshake", CompanionErrorCode::MalformedFrame))
     }
 
-    fn companion_command(&self, request: &CompanionRequest, kind: &str) -> Vec<u8> {
+    fn companion_command(&self, request: &CompanionRequest, kind: &str, raw_len: usize) -> Vec<u8> {
         let granted = GRANTED_CAPABILITIES.to_vec();
         let outcome = {
             let state = self.lock();
             match (state.companion.secret, state.companion.sequence) {
                 (Some(secret), previous) => companion::host::authorize_command(
-                    request,
-                    &secret,
-                    previous,
-                    &granted,
-                    MAX_FRAME_BYTES / 2,
+                    request, &secret, previous, &granted, raw_len,
                 ),
                 (None, _) => Err(CompanionErrorCode::NotPaired),
             }
@@ -337,13 +341,6 @@ impl AppRuntime {
                 self.lock().companion.last_error = Some(error);
                 return refuse(kind, error);
             }
-        };
-        let Some(url) = request.url.as_deref() else {
-            {
-                let mut state = self.lock();
-                state.companion.sequence = Some(request.sequence);
-            }
-            return refuse(kind, CompanionErrorCode::MalformedFrame);
         };
         // Reuse the provider the room is already about, so a companion tab cannot
         // quietly retarget a session that is under way.
@@ -363,6 +360,66 @@ impl AppRuntime {
                 return refuse(kind, error);
             }
         };
+        let observation =
+            request
+                .position_ms
+                .map(|position_ms| crate::providers::playback::Observation {
+                    position_ms,
+                    duration_ms: request.duration_ms.unwrap_or(position_ms.saturating_add(1)),
+                    buffer_ms: 0,
+                    ready_state: 4,
+                    paused: request.paused.unwrap_or(true),
+                    ended: false,
+                    seeking: false,
+                });
+
+        // A playback report names no destination: it updates the tab the user
+        // already selected. Requiring a URL here — which this used to do — made
+        // the one capability that carries live position unusable, even though
+        // the authorization layer deliberately lets it omit the URL.
+        if request.url.is_none() && authorised == Capability::ReportPlayback {
+            let target_id = format!("companion:{}", request.tab_id.unwrap_or(0));
+            let mut state = self.lock();
+            let Some(existing) = state
+                .provider_chooser
+                .tabs
+                .iter_mut()
+                .find(|tab| tab.target_id == target_id)
+            else {
+                drop(state);
+                self.lock().companion.last_error = Some(CompanionErrorCode::TabChanged);
+                return refuse(kind, CompanionErrorCode::TabChanged);
+            };
+            // A report that carries no position says nothing new about the
+            // player: it must not wipe the observation the previous report
+            // supplied (the extension sends `{ tabId }` on a bare report).
+            if let Some(observation) = observation {
+                existing.player = Some(observation);
+                existing.playback_ready = true;
+                existing.document_id = format!("v{}", request.sequence);
+            }
+            let title = existing.title.clone();
+            let content_ready = state.provider_chooser.content_ready;
+            state.companion.sequence = Some(request.sequence);
+            state.companion.browser = Some("browser".into());
+            drop(state);
+            let reply = serde_json::json!({
+                "kind": kind,
+                "ok": true,
+                "contentReady": content_ready,
+                "title": title,
+            });
+            return serde_json::to_vec(&reply)
+                .unwrap_or_else(|_| refuse(kind, CompanionErrorCode::MalformedFrame));
+        }
+
+        let Some(url) = request.url.as_deref() else {
+            {
+                let mut state = self.lock();
+                state.companion.sequence = Some(request.sequence);
+            }
+            return refuse(kind, CompanionErrorCode::MalformedFrame);
+        };
         let identity = match crate::providers::content::parse_content(&provider, url) {
             Ok(identity) => identity,
             Err(_) => {
@@ -372,17 +429,7 @@ impl AppRuntime {
         };
         let playback_ready = request.position_ms.is_some() && authorised != Capability::IdentifyTab;
         let tab = crate::providers::content::ContentTab {
-            player: request.position_ms.map(|position_ms| {
-                crate::providers::playback::Observation {
-                    position_ms,
-                    duration_ms: request.duration_ms.unwrap_or(position_ms.saturating_add(1)),
-                    buffer_ms: 0,
-                    ready_state: 4,
-                    paused: request.paused.unwrap_or(true),
-                    ended: false,
-                    seeking: false,
-                }
-            }),
+            player: observation,
             selection_key: String::new(),
             target_id: format!("companion:{}", request.tab_id.unwrap_or(0)),
             title: request
@@ -527,13 +574,23 @@ mod tests {
             "kind": kind,
             "sequence": sequence,
             "version": PROTOCOL_VERSION,
-            "token": companion::host::token_for(secret, sequence, kind),
+            "token": "",
         });
         if let Some(map) = fields.as_object() {
             for (key, value) in map {
                 message[key] = value.clone();
             }
         }
+        // Sign exactly what is about to be sent, the way the extension does —
+        // sequence, kind *and* payload.
+        let parsed: CompanionRequest =
+            serde_json::from_value(message.clone()).expect("a well-formed request");
+        message["token"] = serde_json::Value::String(companion::host::token_for(
+            secret,
+            sequence,
+            kind,
+            &companion::host::canonical_payload(&parsed),
+        ));
         let reply = runtime.handle_companion_frame(&serde_json::to_vec(&message).unwrap());
         serde_json::from_slice(&reply).expect("a json reply")
     }
@@ -585,8 +642,7 @@ mod tests {
     fn only_the_right_code_exchanges_for_a_session_key() {
         let (runtime, code) = companion_ready("netflix");
         let hello = |code: Option<&str>, sequence: u64| {
-            let mut message =
-                serde_json::json!({"kind": "handshake", "sequence": sequence, "version": 1});
+            let mut message = serde_json::json!({"kind": "handshake", "sequence": sequence, "version": PROTOCOL_VERSION});
             if let Some(code) = code {
                 message["code"] = serde_json::Value::String(code.into());
             }
@@ -610,7 +666,7 @@ mod tests {
         let (runtime, code) = companion_ready("netflix");
         let attempt = |sequence: u64| {
             let message = serde_json::json!({
-                "kind": "handshake", "sequence": sequence, "version": 1, "code": "AAAA1111"
+                "kind": "handshake", "sequence": sequence, "version": PROTOCOL_VERSION, "code": "AAAA1111"
             });
             let bytes = runtime.handle_companion_frame(&serde_json::to_vec(&message).unwrap());
             serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["error"]
@@ -642,7 +698,7 @@ mod tests {
             &serde_json::to_vec(&serde_json::json!({
                 "kind": "reportContent",
                 "sequence": 1,
-                "version": 1,
+                "version": PROTOCOL_VERSION,
                 "token": "not-a-real-token-but-long-enough",
                 "url": "https://www.netflix.com/title/80181170",
             }))
@@ -678,14 +734,22 @@ mod tests {
         // A token minted for one operation cannot be spent on another: the kind
         // is inside the signed challenge, so swapping operations is a signature
         // failure, not a permission lookup the attacker can race.
-        let foreign = companion::sign(&secret, &format!("{}:reportContent", sequence + 2));
         let swapped = serde_json::json!({
             "kind": "identifyTab",
             "sequence": sequence + 2,
             "version": PROTOCOL_VERSION,
-            "token": foreign,
+            "token": "",
             "url": "https://www.netflix.com/title/80181170",
         });
+        let swapped_request: CompanionRequest =
+            serde_json::from_value(swapped.clone()).expect("a request shape");
+        let mut swapped = swapped;
+        swapped["token"] = serde_json::Value::String(companion::host::token_for(
+            &secret,
+            sequence + 2,
+            "reportContent",
+            &companion::host::canonical_payload(&swapped_request),
+        ));
         let reply = runtime.handle_companion_frame(&serde_json::to_vec(&swapped).unwrap());
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&reply).unwrap()["error"],
@@ -910,5 +974,166 @@ mod tests {
                 "accepted {bogus}"
             );
         }
+    }
+
+    /// The capability that carries live position must not require a
+    /// destination: it updates the tab the user already selected. The
+    /// authorization layer always allowed this; the command layer used to
+    /// refuse it, which made `report_playback` unusable.
+    #[test]
+    fn a_playback_report_updates_the_selected_tab_without_naming_a_url() {
+        let (runtime, code) = companion_ready("netflix");
+        let (secret, sequence) = paired(&runtime, &code);
+        assert_eq!(
+            command(
+                &runtime,
+                &secret,
+                sequence + 1,
+                "reportContent",
+                serde_json::json!({
+                    "url": "https://www.netflix.com/watch/80181170",
+                    "title": "A Real Series",
+                    "tabId": 12,
+                    "positionMs": 10_000,
+                    "durationMs": 1_800_000,
+                    "paused": false,
+                }),
+            )["ok"],
+            serde_json::Value::Bool(true)
+        );
+
+        let report = command(
+            &runtime,
+            &secret,
+            sequence + 2,
+            "reportPlayback",
+            serde_json::json!({
+                "tabId": 12,
+                "positionMs": 95_000,
+                "durationMs": 1_800_000,
+                "paused": false,
+            }),
+        );
+        assert_eq!(report["ok"], serde_json::Value::Bool(true), "{report}");
+        assert_eq!(report["title"], "A Real Series");
+
+        let state = runtime.lock();
+        let tab = state
+            .provider_chooser
+            .tabs
+            .iter()
+            .find(|tab| tab.target_id == "companion:12")
+            .expect("the reported tab is still the selected one");
+        let player = tab.player.as_ref().expect("observation");
+        assert_eq!(player.position_ms, 95_000);
+        assert!(tab.playback_ready);
+        drop(state);
+
+        // A report with no position says nothing new: it must not wipe the
+        // observation the previous one supplied.
+        let bare = command(
+            &runtime,
+            &secret,
+            sequence + 3,
+            "reportPlayback",
+            serde_json::json!({ "tabId": 12 }),
+        );
+        assert_eq!(bare["ok"], serde_json::Value::Bool(true), "{bare}");
+        let state = runtime.lock();
+        let tab = state
+            .provider_chooser
+            .tabs
+            .iter()
+            .find(|tab| tab.target_id == "companion:12")
+            .expect("tab");
+        assert_eq!(
+            tab.player.as_ref().expect("observation").position_ms,
+            95_000,
+            "a bare report cleared the last known position"
+        );
+        assert!(tab.playback_ready);
+    }
+
+    #[test]
+    fn a_playback_report_for_a_tab_nobody_selected_is_refused() {
+        let (runtime, code) = companion_ready("netflix");
+        let (secret, sequence) = paired(&runtime, &code);
+        let reply = command(
+            &runtime,
+            &secret,
+            sequence + 1,
+            "reportPlayback",
+            serde_json::json!({ "tabId": 99, "positionMs": 5_000 }),
+        );
+        assert_eq!(reply["error"], "TabChanged");
+    }
+
+    /// The MAC covers `sequence:kind:payload`. A frame signed for one payload
+    /// and rewritten afterwards must fail even though its sequence and kind
+    /// still match — that is what makes the native bridge's ability to edit a
+    /// frame in flight harmless.
+    #[test]
+    fn a_frame_whose_payload_was_rewritten_after_signing_is_refused() {
+        let (runtime, code) = companion_ready("netflix");
+        let (secret, sequence) = paired(&runtime, &code);
+        let message = serde_json::json!({
+            "kind": "reportContent",
+            "sequence": sequence + 1,
+            "version": PROTOCOL_VERSION,
+            "url": "https://www.netflix.com/watch/80181170",
+            "tabId": 3,
+        });
+        let parsed: CompanionRequest =
+            serde_json::from_value(message.clone()).expect("a request shape");
+        let token = companion::host::token_for(
+            &secret,
+            sequence + 1,
+            "reportContent",
+            &companion::host::canonical_payload(&parsed),
+        );
+
+        for (field, value) in [
+            (
+                "url",
+                serde_json::json!("https://www.netflix.com/watch/99999999"),
+            ),
+            ("tabId", serde_json::json!(4)),
+            ("title", serde_json::json!("Rewritten")),
+            ("paused", serde_json::json!(true)),
+        ] {
+            let mut tampered = message.clone();
+            tampered["token"] = serde_json::Value::String(token.clone());
+            tampered[field] = value;
+            let reply = runtime.handle_companion_frame(&serde_json::to_vec(&tampered).unwrap());
+            let value: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+            assert_eq!(
+                value["error"], "NotPaired",
+                "rewriting {field} was accepted"
+            );
+        }
+        assert!(runtime.lock().provider_chooser.tabs.is_empty());
+    }
+
+    /// A local process can send handshake frames as fast as it likes. The
+    /// attempt counter is a u8; incrementing it past 255 used to panic inside
+    /// the only thread serving the companion.
+    #[test]
+    fn a_flood_of_bad_handshakes_cannot_kill_the_listener() {
+        let (runtime, _code) = companion_ready("netflix");
+        for sequence in 1..=300u64 {
+            let message = serde_json::json!({
+                "kind": "handshake",
+                "sequence": sequence,
+                "version": PROTOCOL_VERSION,
+                "code": "AAAA1111",
+            });
+            let reply = runtime.handle_companion_frame(&serde_json::to_vec(&message).unwrap());
+            let value: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+            assert_eq!(value["ok"], serde_json::Value::Bool(false));
+        }
+        let status = runtime.companion_status();
+        assert!(status.listening, "the listener died");
+        assert!(status.pairing_code.is_none(), "a burned code came back");
+        runtime.companion_stop();
     }
 }

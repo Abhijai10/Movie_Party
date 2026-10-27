@@ -1,0 +1,17 @@
+{
+  "_comment": "Shared signing contract for companion protocol v2. The extension (extension/signing.test.js) and the app (src-tauri/src/companion/host.rs) must both reproduce canonical_payload and token exactly. Changing either is a protocol-version change. The key below is generated test material for this vector and is used by no build.",
+  "secret_base64url": "3un0_woVICs2QUxXYm14g46ZpK-6xdDb5vH8BxIdKDM",
+  "request": {
+    "kind": "reportContent",
+    "sequence": 7,
+    "version": 2,
+    "url": "https://www.netflix.com/watch/80181170?ep=70218421",
+    "tabId": 12,
+    "title": "Amélie",
+    "positionMs": 90000,
+    "durationMs": 1800000,
+    "paused": false
+  },
+  "canonical_payload": "url:50:https://www.netflix.com/watch/80181170?ep=70218421|tabId:2:12|positionMs:5:90000|durationMs:7:1800000|title:7:Amélie|paused:5:false",
+  "token": "3_Cmbg2dUBccwKVey1FHE8o6OLLEBDIGCMq4PvLG0m0"
+}

@@ -7,8 +7,11 @@
 //! companion is switched on.
 //!
 //! Deliberate limits:
-//! - It holds no secret. The pairing proof rides with each message and Movie
-//!   Party verifies it, so a copied or replaced host binary gains nothing.
+//! - It holds no secret of its own and cannot authorise anything: every frame
+//!   it relays is verified by Movie Party against the paired session key. It
+//!   does *see* the handshake reply, which necessarily carries that key to the
+//!   extension — so the honest claim is "a copied binary cannot pair without
+//!   the on-screen code", not "it can never learn the key".
 //! - It refuses unknown message kinds and oversized frames before contacting the
 //!   app, so a compromised extension page cannot use it as a generic proxy.
 //! - It writes nothing to stdout except protocol frames. Diagnostics go to
@@ -17,7 +20,9 @@
 //!   There is no code path here that could do any of those.
 
 use movie_party_lib::companion::host::{self, CompanionRequest, CompanionResponse};
-use movie_party_lib::companion::{decode_frame, CompanionErrorCode, MAX_FRAME_BYTES};
+use movie_party_lib::companion::{
+    decode_frame, CompanionErrorCode, MAX_FRAME_BYTES, PROTOCOL_VERSION,
+};
 use serde_json::Value;
 use std::io::{self, Read, Write};
 use std::time::Duration;
@@ -147,7 +152,7 @@ mod tests {
             "/tmp/movie-party-absent-endpoint.json",
         );
         let frame = serde_json::json!({
-            "kind": "handshake", "sequence": 1, "version": 1, "code": "ABCD2345",
+            "kind": "handshake", "sequence": 1, "version": PROTOCOL_VERSION, "code": "ABCD2345",
         });
         let text = String::from_utf8(handle(&serde_json::to_vec(&frame).unwrap())).unwrap();
         assert!(

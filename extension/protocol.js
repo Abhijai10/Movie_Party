@@ -1,13 +1,48 @@
 // Companion protocol shared by the popup, the service worker and the tests.
 // Chrome frames native messages itself, so this module owns meaning, not bytes.
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 // Chrome caps a native message at 1 MB. Movie Party speaks far less; a bigger
 // payload is a bug or an attempt to make the bridge carry somebody's page.
 export const MAX_MESSAGE_BYTES = 32 * 1024;
 
 export const HOST_NAME = "desktop.movieparty.companion";
+
+/**
+ * Fields covered by the message MAC, in the one order both ends must use.
+ *
+ * The token used to cover only `sequence:kind`, which left every payload field
+ * rewritable in transit by anything holding a frame — including the native
+ * bridge the protocol deliberately treats as plumbing. `sequence` and `kind`
+ * already stop a captured message from being replayed or repurposed; this list
+ * stops its *contents* from being changed without the key.
+ *
+ * The canonical form is `name:<utf8-byte-length>:<value>` joined by `|`.
+ * Length prefixes make it unambiguous without an escaping scheme, and UTF-8
+ * byte lengths keep this side computable the same way in Rust.
+ */
+export const SIGNED_FIELDS = Object.freeze([
+  "url",
+  "tabId",
+  "action",
+  "positionMs",
+  "durationMs",
+  "title",
+  "paused",
+]);
+
+export function canonicalPayload(fields) {
+  const encoder = new TextEncoder();
+  return SIGNED_FIELDS.filter(
+    (name) => fields != null && fields[name] !== undefined && fields[name] !== null,
+  )
+    .map((name) => {
+      const value = String(fields[name]);
+      return `${name}:${encoder.encode(value).length}:${value}`;
+    })
+    .join("|");
+}
 
 export const KINDS = Object.freeze({
   handshake: "handshake",

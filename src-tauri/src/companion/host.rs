@@ -1,10 +1,12 @@
 //! Native messaging host: manifest generation and request authorisation.
 //!
-//! The host process is treated as untrusted plumbing. It is spawned by the
-//! browser, it forwards opaque frames, and it holds no secret of its own — the
-//! shared pairing secret stays in Movie Party's OS-protected storage. Every
-//! decision that actually protects the user lives in [`authorize`], which is
-//! pure and tested; the stdin/stdout loop in the binary only moves bytes.
+//! The host process is spawned by the browser and treats every frame as
+//! opaque: it forwards bytes and decides nothing. It has no key of its own,
+//! but it does relay the handshake reply, which carries the session key to the
+//! extension — so "untrusted plumbing" here means *it cannot authorise
+//! anything*, not *it can never see anything*. Every decision that actually
+//! protects the user lives in [`authorize_command`], which is pure and tested;
+//! the stdin/stdout loop in the binary only moves bytes.
 
 use super::{
     origin_is_allowed, verify, Capability, CompanionErrorCode, MAX_FRAME_BYTES, PROTOCOL_VERSION,
@@ -95,6 +97,53 @@ pub fn capability_for(kind: &str) -> Option<Capability> {
     }
 }
 
+/// The canonical form of every payload field the MAC covers.
+///
+/// `sequence` and `kind` alone stopped a captured message from being replayed
+/// or repurposed, but not from having its *contents* rewritten: the bridge is
+/// explicitly untrusted plumbing, and a URL, title or position it changed would
+/// still verify. This binds them.
+///
+/// The shape is `name:<utf8-byte-length>:<value>` joined by `|`, in the one
+/// order the extension must also use (`SIGNED_FIELDS` in `extension/protocol.js`):
+/// url, tabId, action, positionMs, durationMs, title, paused. Length prefixes
+/// make it unambiguous without escaping, and counting UTF-8 bytes (not
+/// characters) is what makes both languages compute the same string for a
+/// non-ASCII title.
+pub fn canonical_payload(request: &CompanionRequest) -> String {
+    fn push(parts: &mut Vec<String>, name: &str, value: Option<String>) {
+        if let Some(value) = value {
+            parts.push(format!("{name}:{}:{value}", value.len()));
+        }
+    }
+
+    let mut parts = Vec::with_capacity(7);
+    push(&mut parts, "url", request.url.clone());
+    push(
+        &mut parts,
+        "tabId",
+        request.tab_id.map(|value| value.to_string()),
+    );
+    push(&mut parts, "action", request.action.clone());
+    push(
+        &mut parts,
+        "positionMs",
+        request.position_ms.map(|value| value.to_string()),
+    );
+    push(
+        &mut parts,
+        "durationMs",
+        request.duration_ms.map(|value| value.to_string()),
+    );
+    push(&mut parts, "title", request.title.clone());
+    push(
+        &mut parts,
+        "paused",
+        request.paused.map(|value| value.to_string()),
+    );
+    parts.join("|")
+}
+
 /// Cheap, fatal checks shared by every message. Cheapest first.
 fn check_envelope(
     request: &CompanionRequest,
@@ -120,7 +169,12 @@ fn check_envelope(
     }
     if !verify(
         secret,
-        &format!("{}:{}", request.sequence, request.kind),
+        &format!(
+            "{}:{}:{}",
+            request.sequence,
+            request.kind,
+            canonical_payload(request)
+        ),
         &request.token,
     ) {
         return Err(CompanionErrorCode::NotPaired);
@@ -194,8 +248,8 @@ pub fn authorize_command(
 
 /// Recompute the token a paired extension must present. Exposed so the app can
 /// answer a challenge it issued without storing anything in the host.
-pub fn token_for(secret: &[u8; 32], sequence: u64, kind: &str) -> String {
-    super::sign(secret, &format!("{sequence}:{kind}"))
+pub fn token_for(secret: &[u8; 32], sequence: u64, kind: &str, payload: &str) -> String {
+    super::sign(secret, &format!("{sequence}:{kind}:{payload}"))
 }
 
 /// The manifest Chrome/Edge read. `allowed_origins` is the only thing that
@@ -270,9 +324,9 @@ mod tests {
     }
 
     fn request(kind: &str, secret: &[u8; 32], sequence: u64) -> CompanionRequest {
-        CompanionRequest {
+        let mut message = CompanionRequest {
             kind: kind.into(),
-            token: token_for(secret, sequence, kind),
+            token: String::new(),
             code: None,
             sequence,
             version: Some(PROTOCOL_VERSION),
@@ -283,7 +337,9 @@ mod tests {
             duration_ms: None,
             title: None,
             paused: None,
-        }
+        };
+        message.token = token_for(secret, sequence, kind, &canonical_payload(&message));
+        message
     }
 
     const ALL: [Capability; 5] = [
@@ -352,13 +408,121 @@ mod tests {
         .is_ok());
     }
 
+    /// `sequence:kind` alone let a frame's contents be rewritten without the
+    /// key. Every field the app acts on is now inside the MAC.
+    #[test]
+    fn rewriting_a_signed_payload_after_signing_is_refused() {
+        let pairing = new_pairing();
+        let secret = &pairing.secret;
+        let original = request("reportContent", secret, 3);
+        assert_eq!(
+            authorize_command(&original, secret, None, &ALL, 256).ok(),
+            Some(Capability::ReportContent)
+        );
+
+        let mut by_url = original.clone();
+        by_url.url = Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ".into());
+        let mut by_tab = original.clone();
+        by_tab.tab_id = Some(8);
+        let mut by_title = original.clone();
+        by_title.title = Some("A different film".into());
+        let mut by_position = original.clone();
+        by_position.position_ms = Some(1);
+        let mut by_paused = original.clone();
+        by_paused.paused = Some(true);
+
+        for (name, tampered) in [
+            ("url", by_url),
+            ("tabId", by_tab),
+            ("title", by_title),
+            ("positionMs", by_position),
+            ("paused", by_paused),
+        ] {
+            assert_eq!(
+                authorize_command(&tampered, secret, None, &ALL, 256),
+                Err(CompanionErrorCode::NotPaired),
+                "changing {name} left the signature valid"
+            );
+        }
+    }
+
+    /// The canonical payload counts UTF-8 **bytes**, because that is what both
+    /// languages can compute identically. Counting characters (JS `String.length`)
+    /// would diverge on any non-ASCII title and reject honest frames.
+    #[test]
+    fn the_signed_payload_counts_utf8_bytes_not_characters() {
+        let pairing = new_pairing();
+        let mut message = request("reportContent", &pairing.secret, 1);
+        message.title = Some("É".repeat(3));
+        message.token = token_for(
+            &pairing.secret,
+            1,
+            "reportContent",
+            &canonical_payload(&message),
+        );
+        let payload = canonical_payload(&message);
+        assert!(
+            payload.contains("title:6:"),
+            "3 characters are 6 UTF-8 bytes: {payload}"
+        );
+        assert_eq!(
+            authorize_command(&message, &pairing.secret, None, &ALL, 256).ok(),
+            Some(Capability::ReportContent)
+        );
+    }
+
+    /// The same vector `extension/signing.test.js` uses. If either side changes
+    /// a field name, its order, or the length prefix, this fails before a
+    /// browser is involved — which is the failure mode that produced a broken
+    /// pairing path in the first place.
+    #[test]
+    fn the_shared_signing_vector_matches_the_extension() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../extension/test-vectors/companion-signing.json");
+        let raw = std::fs::read_to_string(&path).expect("the shared signing vector");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("vector json");
+        let secret: [u8; 32] = URL_SAFE_NO_PAD
+            .decode(value["secret_base64url"].as_str().expect("secret"))
+            .expect("base64url secret")
+            .try_into()
+            .expect("32-byte key");
+        let mut request: CompanionRequest =
+            serde_json::from_value(value["request"].clone()).expect("request shape");
+
+        assert_eq!(request.version, Some(PROTOCOL_VERSION));
+        assert_eq!(
+            canonical_payload(&request),
+            value["canonical_payload"].as_str().expect("payload")
+        );
+        assert_eq!(
+            token_for(
+                &secret,
+                request.sequence,
+                &request.kind,
+                &canonical_payload(&request)
+            ),
+            value["token"].as_str().expect("token")
+        );
+        // The vector must actually authorise, not merely match a string. The
+        // request JSON deliberately carries no token: the stored token is the
+        // thing being verified.
+        request.token = value["token"].as_str().expect("token").to_string();
+        assert_eq!(
+            authorize_command(&request, &secret, None, &ALL, 256),
+            Ok(Capability::ReportContent),
+            "the shared vector was refused"
+        );
+    }
+
     #[test]
     fn unknown_and_oversized_frames_are_discarded() {
         let pairing = new_pairing();
         let secret = &pairing.secret;
         let mut ghost = request("readCookies", secret, 1);
         ghost.kind = "readCookies".into();
-        ghost.token = token_for(secret, 1, "readCookies");
+        ghost.token = token_for(secret, 1, "readCookies", "");
         assert_eq!(
             authorize_command(&ghost, secret, None, &ALL, 256),
             Err(CompanionErrorCode::MalformedFrame)
@@ -462,6 +626,9 @@ mod tests {
         ] {
             let mut message = request("reportContent", secret, 1);
             message.url = Some(url.into());
+            // Re-sign: the MAC covers the URL, so a token minted for the
+            // original destination would fail before the origin check ran.
+            message.token = token_for(secret, 1, "reportContent", &canonical_payload(&message));
             assert_eq!(
                 authorize_command(&message, secret, None, &ALL, 256),
                 Err(CompanionErrorCode::OriginNotAllowed),
@@ -470,6 +637,7 @@ mod tests {
         }
         let mut absent = request("reportContent", secret, 1);
         absent.url = None;
+        absent.token = token_for(secret, 1, "reportContent", &canonical_payload(&absent));
         assert_eq!(
             authorize_command(&absent, secret, None, &ALL, 256),
             Err(CompanionErrorCode::MalformedFrame)
@@ -509,6 +677,7 @@ mod tests {
         let secret = &pairing.secret;
         let mut message = request("reportPlayback", secret, 1);
         message.url = None;
+        message.token = token_for(secret, 1, "reportPlayback", &canonical_payload(&message));
         assert_eq!(
             authorize_command(&message, secret, None, &ALL, 256).ok(),
             Some(Capability::ReportPlayback)
@@ -537,19 +706,23 @@ mod tests {
     #[test]
     fn the_endpoint_is_loopback_only_and_version_pinned() {
         assert_eq!(
-            parse_endpoint(r#"{"port":54321,"protocol":1}"#)
-                .unwrap()
-                .port,
+            parse_endpoint(&format!(
+                r#"{{"port":54321,"protocol":{PROTOCOL_VERSION}}}"#
+            ))
+            .unwrap()
+            .port,
             54321
         );
+        let endpoint =
+            |port: &str, protocol: u8| format!(r#"{{"port":{port},"protocol":{protocol}}}"#);
         for bad in [
-            r#"{"port":0,"protocol":1}"#,
-            r#"{"port":54321,"protocol":2}"#,
-            r#"{"port":"54321","protocol":1}"#,
-            r#"{"port":54321,"protocol":1,"secret":"x"}"#,
-            "not json",
+            endpoint("0", PROTOCOL_VERSION),
+            endpoint("54321", PROTOCOL_VERSION + 1),
+            r#"{"port":"54321","protocol":2}"#.to_string(),
+            format!(r#"{{"port":54321,"protocol":{PROTOCOL_VERSION},"secret":"x"}}"#),
+            "not json".to_string(),
         ] {
-            assert!(parse_endpoint(bad).is_err(), "accepted {bad}");
+            assert!(parse_endpoint(&bad).is_err(), "accepted {bad}");
         }
         // An explicit override always wins, so the host is testable without
         // touching a real application-support directory.
