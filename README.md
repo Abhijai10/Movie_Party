@@ -19,7 +19,9 @@ Rust validation lives in `src-tauri/`:
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+# Serial on purpose: several suites exercise real Keychain entries and launch
+# real Chrome, and running them in parallel produces false failures.
+cargo test -- --test-threads=1
 ```
 
 ## Shared TMDB key (build-time)

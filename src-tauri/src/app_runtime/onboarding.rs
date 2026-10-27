@@ -763,7 +763,7 @@ mod tests {
             .onboarding_share_link_url()
             .unwrap_err()
             .starts_with(NO_SESSION));
-        assert!(!runtime.onboarding_view().is_ok());
+        assert!(runtime.onboarding_view().is_err());
         clean(dir);
     }
 
