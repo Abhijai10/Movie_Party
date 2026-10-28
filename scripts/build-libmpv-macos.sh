@@ -63,6 +63,11 @@ if [ ! -f "$STAGE/lib/libavcodec.dylib" ]; then
     tar xzf ffmpeg.tar.gz
     mv FFmpeg-n8.1 ffmpeg-8.1
     cd ffmpeg-8.1
+    # --enable-network + tcp/http are NOT optional: the guest plays Local
+    # Perfect through a loopback HTTP range server (`http://127.0.0.1:<port>`),
+    # and libavformat is the only thing that can open it. Without these flags
+    # libmpv reports "Protocol not found" and every guest playback fails, which
+    # real_range_server_playback_test now catches.
     ./configure --prefix="$STAGE" --enable-shared --disable-static --disable-programs \
         --disable-doc --enable-pic --enable-videotoolbox --enable-audiotoolbox --disable-everything \
         --enable-avcodec --enable-avformat --enable-avutil --enable-swresample --enable-swscale --enable-avfilter \
@@ -73,7 +78,9 @@ if [ ! -f "$STAGE/lib/libavcodec.dylib" ]; then
         --enable-decoder=mjpeg \
         --enable-parser=h264 --enable-parser=hevc --enable-parser=aac --enable-parser=mpegaudio --enable-parser=vp9 --enable-parser=av1 --enable-parser=opus --enable-parser=flac \
         --enable-demuxer=mov --enable-demuxer=matroska --enable-demuxer=mp3 --enable-demuxer=flac --enable-demuxer=ogg --enable-demuxer=wav --enable-demuxer=avi --enable-demuxer=image2 --enable-demuxer=aac \
-        --enable-muxer=null --enable-protocol=file --enable-protocol=pipe --enable-protocol=concat \
+        --enable-muxer=null --enable-network \
+        --enable-protocol=file --enable-protocol=pipe --enable-protocol=concat \
+        --enable-protocol=tcp --enable-protocol=http \
         --enable-filter=scale --enable-filter=format --enable-filter=yadif --enable-filter=bwdif --enable-filter=transpose --enable-filter=afade --enable-filter=aformat
     make -j"$JOBS"
     make install

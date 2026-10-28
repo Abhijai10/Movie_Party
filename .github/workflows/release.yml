@@ -165,6 +165,17 @@ jobs:
           bash ./scripts/build-libmpv-macos.sh
           ls -la src-tauri/mpv_runtime/
 
+      # The guest's Local Perfect path opens `http://127.0.0.1:<port>` in
+      # libmpv, and libavformat is the only thing that can. A runtime built
+      # without --enable-network/--enable-protocol=http answers "Protocol not
+      # found" and every guest playback fails. This workflow used to ship
+      # whatever it had just built without ever running it; this test opens a
+      # real range server with a real (bounded) response stream and plays it.
+      - name: Verify the staged runtime plays through the range server (macOS)
+        if: runner.os == 'macOS'
+        working-directory: src-tauri
+        run: cargo test --test real_range_server_playback_test -- --test-threads=1 --nocapture
+
       # Windows: mpv-winbuild-cmake's dev archive ships a fully
       # self-contained LGPL-build libmpv-2.dll. We rename it to
       # mpv-2.dll, which is what src-tauri/src/media/player/mpv_backend.rs

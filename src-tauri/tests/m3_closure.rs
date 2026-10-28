@@ -125,6 +125,7 @@ async fn uncached_http_range_triggers_real_quic_fetch_and_serves() {
         demand: demand.clone(),
         wait_timeout_ms: 5_000,
         connection_timeout_ms: 5_000,
+        max_response_bytes: movie_party_lib::media::stream::range_server::MAX_RESPONSE_BYTES,
     })
     .await
     .expect("range server");
@@ -229,6 +230,7 @@ async fn cache_write_contention_eventually_persists_chunk() {
         demand: demand.clone(),
         wait_timeout_ms: 5_000,
         connection_timeout_ms: 5_000,
+        max_response_bytes: movie_party_lib::media::stream::range_server::MAX_RESPONSE_BYTES,
     })
     .await
     .expect("range server");

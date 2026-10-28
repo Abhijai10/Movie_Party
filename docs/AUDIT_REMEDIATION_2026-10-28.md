@@ -36,6 +36,7 @@ listed under *Still unverified* rather than implied done.
 | 20 | Low | A message handler that threw closed the port with no reply, so the popup could only report a dead connection | the rejection is answered with `MalformedFrame` + guidance | `answers a message whose handler throws instead of closing the port` |
 | 21 | Low | `nonminimal_bool` in `onboarding.rs` would fail `clippy -D warnings` | `is_err()` | CI gate |
 | 22 | Low | README told a developer to run `cargo test` — the one command this repo records as producing false failures | `cargo test -- --test-threads=1` with the reason | documentation |
+| 23 | **Critical** (pre-existing, found while verifying the rest) | The macOS runtime's ffmpeg was built with **no network protocols**, so libmpv could not open the loopback `http://127.0.0.1:<port>` URL the guest plays from — every guest Local Perfect playback died with *"Protocol not found"* | ffmpeg configure now enables `--enable-network --enable-protocol=tcp --enable-protocol=http`; the release workflow runs a real playback test against the runtime it just built | `bundled_libmpv_plays_a_film_through_bounded_range_responses` — failed against the shipped runtime, passes against the rebuilt one |
 
 ## Protocol v2 — a deliberate break
 
@@ -50,6 +51,45 @@ words) instead of "every command is `NotPaired`". Consequences:
   rather than half-used.
 - The app drops the session key whenever it starts, so there is no upgrade path
   that silently keeps a v1 key.
+
+## Finding 23: the guest could not play at all
+
+This one was not in the audit. It surfaced because the audit's finding 3 (bound the
+range response) needed a test that actually **played** through the range server,
+and no such test existed: the range-server tests use a raw HTTP client, and every
+real-media test opens a local file path.
+
+The new test failed with `mpv never learned the duration`. With mpv's own terminal
+logging enabled the reason was explicit:
+
+```
+[ffmpeg] Opening http://127.0.0.1:49317/media/local-53203-…?token=…
+[ffmpeg] Protocol not found. Make sure FFmpeg is compiled with networking support.
+[ffmpeg] Failed to open http://127.0.0.1:49317/media/…
+[cplayer] finished playback, loading failed (reason 4)
+```
+
+`scripts/build-libmpv-macos.sh` configured ffmpeg with `--disable-everything` and
+only `file`, `pipe` and `concat` protocols. libmpv has no HTTP implementation of
+its own and this build has no libcurl, so the macOS bundle could never read the
+stream the guest is built around. Nothing noticed because:
+
+- the unit/integration tests never hand the loopback URL to a player;
+- `ci.yml` skips the real-libmpv tests (no runtime in CI) and the release workflow
+  shipped whatever runtime it had just built without running it;
+- no two-device session has ever been run.
+
+Fix: the configure flags above, plus a release-time gate that runs
+`real_range_server_playback_test` against the freshly built runtime, plus the test
+itself in `ci.yml`'s explicit-skip list. Verified locally by rebuilding ffmpeg
+with the new flags, swapping the six ffmpeg dylibs into `src-tauri/mpv_runtime/`
+with the same `@loader_path`/ad-hoc-signing treatment `stage-libmpv-macos.sh`
+applies, and re-running: the test plays and seeks through 16 KiB responses, and
+all five other real-media tests still pass.
+
+Residual risk: the Windows leg uses shinchiro's `libmpv-2.dll`, which is a
+full-featured build with networking, but that is **assumed, not verified** — no
+Windows machine has run this repository.
 
 ## What this does *not* claim
 
@@ -82,6 +122,7 @@ cargo clippy --all-targets --all-features
 cargo test --lib -- --test-threads=1
 cargo test --test real_sw_render_test -- --test-threads=1 --nocapture
 cargo test --test real_native_surface_e2e -- --test-threads=1 --nocapture
+cargo test --test real_range_server_playback_test -- --test-threads=1 --nocapture
 ```
 
 Two flips were used to prove the new tests catch the old behaviour: the pre-auth

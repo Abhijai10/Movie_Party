@@ -7385,6 +7385,7 @@ impl AppRuntime {
             wait_timeout_ms: 5_000,
             connection_timeout_ms:
                 crate::media::stream::range_server::DEFAULT_CONNECTION_TIMEOUT_MS,
+            max_response_bytes: crate::media::stream::range_server::MAX_RESPONSE_BYTES,
         };
         let range_handle = start_range_server(range_config)
             .await

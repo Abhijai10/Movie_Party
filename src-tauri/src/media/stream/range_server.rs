@@ -124,6 +124,10 @@ pub struct RangeServerConfig {
     pub wait_timeout_ms: u64,
     /// Read/write deadline for a single loopback connection.
     pub connection_timeout_ms: u64,
+    /// Largest body this server produces for one request. Production uses
+    /// [`MAX_RESPONSE_BYTES`]; tests lower it so multi-window playback is
+    /// exercised against a small fixture.
+    pub max_response_bytes: u64,
 }
 
 pub struct RangeServerHandle {
@@ -166,6 +170,7 @@ pub async fn start_range_server(
     let chunk_wake = config.chunk_wake;
     let wait_timeout_ms = config.wait_timeout_ms;
     let connection_timeout_ms = config.connection_timeout_ms;
+    let max_response_bytes = config.max_response_bytes;
     let chunk_wake_for_task = chunk_wake.clone();
     let connection_limit = Arc::new(tokio::sync::Semaphore::new(MAX_RANGE_CONNECTIONS));
     let media_url = format!(
@@ -201,7 +206,7 @@ pub async fn start_range_server(
                                         Some(std::time::Duration::from_millis(connection_timeout_ms));
                                     let _ = std_stream.set_read_timeout(timeout);
                                     let _ = std_stream.set_write_timeout(timeout);
-                                    handle_connection(std_stream, peer_addr, &manifest, &cache, &token, &demand, &chunk_wake, wait_timeout_ms);
+                                    handle_connection(std_stream, peer_addr, &manifest, &cache, &token, &demand, &chunk_wake, wait_timeout_ms, max_response_bytes);
                                 }
                             });
                         }
@@ -231,6 +236,7 @@ fn handle_connection(
     demand: &ChunkDemandHandle,
     chunk_wake: &Arc<ChunkWake>,
     wait_timeout_ms: u64,
+    max_response_bytes: u64,
 ) {
     let mut method = String::new();
     let mut path = String::new();
@@ -291,7 +297,7 @@ fn handle_connection(
                 // Bound the response, not the request: `bytes=0-` is a legal
                 // way to ask for the whole film and a player that sends it
                 // (mpv does) must not get the film allocated in one buffer.
-                let len = range_request.len().min(MAX_RESPONSE_BYTES);
+                let len = range_request.len().min(max_response_bytes);
                 let serve = wait_for_range(
                     cache,
                     manifest,
@@ -329,8 +335,8 @@ fn handle_connection(
             // of any size would put it in memory twice. A film larger than one
             // response is therefore answered with a truthful 206 the client
             // continues from.
-            let whole_file_fits = manifest.file_size <= MAX_RESPONSE_BYTES;
-            let len = manifest.file_size.min(MAX_RESPONSE_BYTES);
+            let whole_file_fits = manifest.file_size <= max_response_bytes;
+            let len = manifest.file_size.min(max_response_bytes);
             let serve =
                 wait_for_range(cache, manifest, 0, len, demand, chunk_wake, wait_timeout_ms);
             match serve {
@@ -563,6 +569,7 @@ mod tests {
             demand: ChunkDemandHandle::new(),
             wait_timeout_ms: 500,
             connection_timeout_ms: DEFAULT_CONNECTION_TIMEOUT_MS,
+            max_response_bytes: MAX_RESPONSE_BYTES,
         }
     }
 

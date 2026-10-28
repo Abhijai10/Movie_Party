@@ -103,6 +103,14 @@ before building:
   SHA-256 is pinned and verified before extraction** (`Get-FileHash`), because pinning the asset *name*
   does not pin its *bytes*.
 
+**The macOS ffmpeg build must include local-network protocols.** The guest plays Local Perfect
+through a loopback HTTP range server (`http://127.0.0.1:<port>`), and libavformat is the only
+component that can open it: `--enable-network --enable-protocol=tcp --enable-protocol=http`. Without
+them libmpv answers *"Protocol not found. Make sure FFmpeg is compiled with networking support"* and
+every guest playback fails — which is what the 0.9.9 runtime did. The release workflow now runs
+`real_range_server_playback_test` against the runtime it just built, so a build missing those flags
+fails the release instead of shipping.
+
 A **local** macOS release build needs the runtime staged by hand first
 (`./scripts/stage-libmpv-macos.sh`); otherwise the bundle simply ships without it and plays nothing.
 A system-wide `mpv` install is never used.

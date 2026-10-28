@@ -126,8 +126,9 @@ jobs:
               --skip production_player_reports_completed_when_the_movie_ends \
               --skip production_player_is_not_completed_mid_playback \
               --skip production_player_leaves_completed_after_seeking_back \
-              --skip audio_bearing_fixture_yields_an_audio_track
-            echo "EXPLICIT SKIP: the 9 libmpv-dependent tests above did not execute (no libmpv runtime in this job). The committed media fixtures they need ARE present; only the runtime is missing."
+              --skip audio_bearing_fixture_yields_an_audio_track \
+              --skip bundled_libmpv_plays_a_film_through_bounded_range_responses
+            echo "EXPLICIT SKIP: the 10 libmpv-dependent tests above did not execute (no libmpv runtime in this job). The committed media fixtures they need ARE present; only the runtime is missing."
           fi
 
   # Dependency audits — ADVISORY, non-blocking by design. Failures surface
